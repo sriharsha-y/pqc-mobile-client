@@ -2,11 +2,32 @@
 //!
 //! Wraps `rustls-platform-verifier` so the system trust chain validates
 //! first (CT, revocation, MDM-distributed enterprise roots all still
-//! apply), then enforces that at least one cert in the chain has its
-//! SubjectPublicKeyInfo SHA-256 matching one of the configured pins.
+//! apply), then enforces that the **leaf** certificate's SubjectPublicKeyInfo
+//! SHA-256 matches one of the configured pins.
 //!
 //! Empty pin list disables pinning (verification falls through to the
 //! platform verifier alone).
+//!
+//! ## Why leaf-strict, not any-cert-in-chain
+//!
+//! Earlier revisions of this file matched the pin against any cert in the
+//! server-presented chain (leaf + intermediates). That semantic has two
+//! footguns:
+//!
+//! 1. **Root-pin bypass.** An operator who pins a popular root CA's SPKI
+//!    (a common mistake when copy-pasting from "find your cert's hash"
+//!    tutorials) accepts any chain that includes that root — including
+//!    one from an unrelated compromised intermediate under the same root.
+//!    The pin then offers no protection beyond the OS trust store.
+//!
+//! 2. **Silent leaf-parse skip.** If the leaf fails to parse but an
+//!    intermediate matches a configured pin, the verifier would accept
+//!    the chain even though the leaf was never compared to its pin.
+//!
+//! Leaf-strict closes both: the leaf MUST be parseable and MUST match.
+//! For rotation, configure BOTH the active leaf SPKI AND the pre-deployed
+//! next leaf SPKI as pins. Intermediate or root pins are NOT supported by
+//! design.
 //!
 //! Pin format: base64-encoded SHA-256 of the DER-encoded SPKI (the
 //! same format used by HTTP Public Key Pinning RFC 7469 and by Cronet's
@@ -68,18 +89,30 @@ impl ServerCertVerifier for PinningVerifier {
             return Ok(verified);
         }
 
-        let chain = std::iter::once(end_entity).chain(intermediates.iter());
-        for cert in chain {
-            if let Some(hash) = extract_spki_sha256(cert) {
-                if self.pins.contains(&hash) {
-                    return Ok(verified);
-                }
-            }
+        // Leaf-strict pinning. The end-entity (leaf) certificate's SPKI
+        // MUST be parseable and MUST match a configured pin. We never
+        // accept a match against any intermediate the server included —
+        // that would let a server present a chain where only an
+        // intermediate (or a server-included root from the trust store)
+        // matches the pin, defeating the pinning guarantee.
+        //
+        // For rotation, configure BOTH the active leaf SPKI AND the
+        // pre-deployed next leaf SPKI as pins.
+        let leaf_hash = extract_spki_sha256(end_entity).ok_or_else(|| {
+            rustls::Error::General(
+                "certificate pinning failure: leaf certificate SPKI could not be extracted"
+                    .to_string(),
+            )
+        })?;
+
+        if !self.pins.contains(&leaf_hash) {
+            return Err(rustls::Error::General(
+                "certificate pinning failure: leaf SPKI does not match any configured pin"
+                    .to_string(),
+            ));
         }
 
-        Err(rustls::Error::General(
-            "certificate pinning failure: no SPKI in chain matched a configured pin".to_string(),
-        ))
+        Ok(verified)
     }
 
     fn verify_tls12_signature(
@@ -135,12 +168,128 @@ pub fn decode_pin_list(encoded: &[String]) -> Result<Vec<SpkiHash>, PqcError> {
 mod tests {
     use super::*;
     use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use rustls::client::danger::HandshakeSignatureValid;
     use rustls::pki_types::CertificateDer;
+    use std::time::Duration;
 
     fn make_test_cert() -> CertificateDer<'static> {
         let CertifiedKey { cert, .. } =
             generate_simple_self_signed(vec!["test.local".to_string()]).unwrap();
         CertificateDer::from(cert.der().to_vec())
+    }
+
+    /// Stub inner verifier that always accepts the chain. Lets us exercise
+    /// the pinning-layer logic in isolation from the platform trust store.
+    #[derive(Debug)]
+    struct AlwaysOkVerifier;
+
+    impl ServerCertVerifier for AlwaysOkVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![SignatureScheme::ECDSA_NISTP256_SHA256]
+        }
+    }
+
+    fn now() -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::from_secs(1_700_000_000))
+    }
+
+    fn name(host: &str) -> ServerName<'static> {
+        ServerName::try_from(host.to_string()).unwrap()
+    }
+
+    #[test]
+    fn leaf_pin_match_accepts() {
+        let leaf = make_test_cert();
+        let leaf_hash = extract_spki_sha256(&leaf).unwrap();
+        let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![leaf_hash]);
+        let result = v.verify_server_cert(&leaf, &[], &name("test.local"), &[], now());
+        assert!(result.is_ok(), "matching leaf SPKI should accept the chain");
+    }
+
+    #[test]
+    fn leaf_mismatch_rejects_even_if_intermediate_matches() {
+        // Defense-in-depth: pinning to an intermediate alone must NOT
+        // accept the chain. Old behavior would have accepted this.
+        let leaf = make_test_cert();
+        let intermediate = make_test_cert();
+        let int_hash = extract_spki_sha256(&intermediate).unwrap();
+        let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![int_hash]);
+        let result = v.verify_server_cert(&leaf, &[intermediate], &name("test.local"), &[], now());
+        assert!(
+            result.is_err(),
+            "intermediate-only pin match must be rejected under leaf-strict semantics"
+        );
+    }
+
+    #[test]
+    fn unparseable_leaf_rejects_even_with_pin_list() {
+        // If the leaf DER fails to parse, we MUST NOT silently fall
+        // through and accept on the basis of some other cert. Old
+        // behavior would have skipped the leaf and checked intermediates.
+        let garbage = CertificateDer::from(vec![0u8; 16]);
+        let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![[0u8; 32]]);
+        let result = v.verify_server_cert(&garbage, &[], &name("test.local"), &[], now());
+        assert!(
+            result.is_err(),
+            "unparseable leaf must be rejected, not skipped"
+        );
+    }
+
+    #[test]
+    fn empty_pin_list_disables_pinning() {
+        let leaf = make_test_cert();
+        let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![]);
+        let result = v.verify_server_cert(&leaf, &[], &name("test.local"), &[], now());
+        assert!(
+            result.is_ok(),
+            "empty pin list should fall through to inner verifier"
+        );
+    }
+
+    #[test]
+    fn rotation_pin_set_accepts_either_leaf() {
+        // Backwards-compatible rotation: pin both old and new leaf SPKIs;
+        // either should accept.
+        let leaf_a = make_test_cert();
+        let leaf_b = make_test_cert();
+        let hash_a = extract_spki_sha256(&leaf_a).unwrap();
+        let hash_b = extract_spki_sha256(&leaf_b).unwrap();
+        let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![hash_a, hash_b]);
+        assert!(v
+            .verify_server_cert(&leaf_a, &[], &name("test.local"), &[], now())
+            .is_ok());
+        assert!(v
+            .verify_server_cert(&leaf_b, &[], &name("test.local"), &[], now())
+            .is_ok());
     }
 
     #[test]

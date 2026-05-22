@@ -260,6 +260,8 @@ openssl x509 -in cert.pem -pubkey -noout \
   | base64
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and one backup (e.g., a future leaf or an intermediate CA). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+
+**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.
