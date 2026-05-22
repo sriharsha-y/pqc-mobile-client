@@ -22,6 +22,17 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!--
+	  Bundling rustls + aws-lc-rs (which contains BoringSSL-derived code)
+	  promotes the app from "uses-OS-encryption-only" (exempt) to
+	  "uses non-exempt encryption" per U.S. BIS export rules. Declaring
+	  ITSAppUsesNonExemptEncryption=true tells App Store Connect we've
+	  filed (or will file) the annual self-classification report.
+	  ML-KEM (FIPS 203) qualifies for the standard TLS exemption — no
+	  CCATS needed, just the ERN.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
