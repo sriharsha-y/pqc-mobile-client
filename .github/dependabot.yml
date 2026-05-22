@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # Rust dependencies (Cargo.toml + Cargo.lock)
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels:
+      - dependencies
+      - rust
+    # Group patch + minor bumps into a single PR per week to reduce noise.
+    # Security advisories always get their own PR regardless of grouping.
+    groups:
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions versions in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+      day: 1
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions-versions:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
