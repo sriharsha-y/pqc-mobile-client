@@ -28,8 +28,12 @@ echo "==> Installing cargo-ndk (Android cross-compile helper)"
 cargo install --locked cargo-ndk
 
 # uniffi-bindgen is built from this crate's own [[bin]] target — no separate
-# `cargo install` needed. The build scripts invoke
-# `cargo run --release --bin uniffi-bindgen -- generate ...`.
+# `cargo install` needed. The bin is gated by the `cli` feature so the host
+# tool's dep tree (clap, goblin, uniffi_bindgen) never gets linked into the
+# mobile cross-compiled archives. The build scripts invoke it as:
+#   cargo run --release --features cli --bin uniffi-bindgen -- generate ...
+# `--features cli` is mandatory — without it cargo errors with
+# "target uniffi-bindgen requires the features: cli".
 
 cat <<'EOF'
 

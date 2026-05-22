@@ -88,7 +88,7 @@ pqc-mobile-client/
 ## Quick start
 
 ```bash
-./scripts/setup.sh                 # one-time: rust targets, cargo-ndk, uniffi-bindgen
+./scripts/setup.sh                 # one-time: rust targets, cargo-ndk
 cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.com
 ./scripts/build-android.sh         # cross-compile all Android ABIs + Kotlin bindings
 ./scripts/build-ios.sh             # build XCFramework + Swift bindings

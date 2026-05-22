@@ -10,6 +10,14 @@ The Rust core, the XCFramework, and the generated Swift bindings are the same re
 
 ## 1. Build outputs
 
+> **Note on regenerating bindings manually.** The build script invokes
+> `cargo run --release --features cli --bin uniffi-bindgen -- generate ...`.
+> The `--features cli` flag is mandatory — the uniffi-bindgen binary is
+> gated behind a `cli` cargo feature so its dep tree (clap, goblin,
+> uniffi_bindgen itself) never gets linked into the mobile cross-compiled
+> archive. Running `cargo run --bin uniffi-bindgen ...` without the flag
+> errors with `target uniffi-bindgen requires the features: cli`.
+
 After `./scripts/build-ios.sh` at the repo root:
 
 ```
