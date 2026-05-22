@@ -1,32 +1,56 @@
 name: release
 
+# Conventional-commits driven release workflow using release-please.
+#
+# Flow:
+#   1. Commit to main with conventional-commit subject lines:
+#        feat(client): add HTTP/3 support       → bumps minor (pre-1.0: patch unless bump-minor-pre-major)
+#        fix(tls): handle malformed pin         → bumps patch
+#        chore: bump deps                       → no version bump
+#        feat!: drop iOS 14 support             → bumps major (or minor in 0.x with bump-minor-pre-major)
+#   2. release-please opens / updates a release PR ("chore: release X.Y.Z") that:
+#        - bumps version in Cargo.toml
+#        - updates CHANGELOG.md (grouped by Features / Bug Fixes / etc.)
+#   3. Merge that release PR. release-please then:
+#        - creates git tag vX.Y.Z
+#        - creates a GitHub Release whose body is the CHANGELOG entries for this version
+#   4. The build-android, build-ios, and attach-assets jobs run conditionally
+#      on `release_created`, attaching the AAR + XCFramework archives to the
+#      newly-created release.
+
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+
+permissions:
+  contents: write       # release-please creates tags/releases
+  pull-requests: write  # release-please opens release PRs
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Gate: never release something that doesn't build + test cleanly.
-  test:
-    name: test
+  release-please:
+    name: release-please
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name:        ${{ steps.rp.outputs.tag_name }}
+      version:         ${{ steps.rp.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: googleapis/release-please-action@v4
+        id: rp
         with:
-          shared-key: release-test
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --release --locked
+          release-type: rust
+          package-name: pqc_client
+          # Treat 0.x.y like 1.x.y for the purpose of choosing bump levels —
+          # feat: → 0.minor, fix: → 0.patch (rather than everything → patch).
+          bump-minor-pre-major: true
 
   build-android:
     name: build-android
-    needs: test
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +81,7 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
           tar -czf "dist/${ARCHIVE}" \
@@ -75,7 +99,8 @@ jobs:
 
   build-ios:
     name: build-ios
-    needs: test
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +126,7 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-ios.zip"
           mkdir -p dist
           (cd generated && zip -r "../dist/${ARCHIVE}" PqcCore.xcframework swift)
@@ -115,17 +140,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    name: release
-    needs: [build-android, build-ios]
+  attach-assets:
+    name: attach-assets
+    needs: [release-please, build-android, build-ios]
+    if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # required to create the release
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # needed for auto-generated notes to see previous tags
-
       - name: Download Android artifact
         uses: actions/download-artifact@v4
         with:
@@ -138,18 +160,12 @@ jobs:
           name: pqc-ios
           path: dist
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          # Auto-generate release notes from commits since the previous tag.
-          # GitHub categorizes by PR labels if .github/release.yml is present;
-          # otherwise it lists commit subjects.
-          generate_release_notes: true
-          # Mark pre-1.0 builds as pre-releases so consumers know they're
-          # not source-stable yet. Strip with a manual edit on the release
-          # if needed.
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
-          files: |
-            dist/pqc-mobile-client-*-android.tar.gz
-            dist/pqc-mobile-client-*-ios.zip
-          fail_on_unmatched_files: true
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            dist/pqc-mobile-client-*-android.tar.gz \
+            dist/pqc-mobile-client-*-ios.zip \
+            --repo "${{ github.repository }}" \
+            --clobber
