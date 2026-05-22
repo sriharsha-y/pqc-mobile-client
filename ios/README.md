@@ -266,3 +266,21 @@ Task {
 For production verification use Wireshark with `rvictl` USB tethering — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
 
 For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named group per request, broken down by client OS and app version.
+
+## 10. SPKI cert pinning — how to compute hashes
+
+`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI). Empty array disables pinning.
+
+Compute from a live server:
+
+```sh
+openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
+  | openssl x509 -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary \
+  | base64
+```
+
+**Always pin at least two hashes** — the current leaf SPKI and one backup (e.g., a future leaf or an intermediate CA). Document a rotation playbook for cert renewal.
+
+The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.

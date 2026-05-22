@@ -8,6 +8,7 @@
 mod client;
 mod config;
 mod error;
+mod pinning;
 mod tls;
 mod types;
 

@@ -96,7 +96,7 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 | Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
 | Classical fallback (X25519, P-256) | ✅ Automatic |
 | System trust store (iOS Keychain / Android KeyStore) | ✅ Via `rustls-platform-verifier` |
-| Cert pinning (SPKI SHA-256) | ⏳ Wired in config; verifier TBD |
+| Cert pinning (SPKI SHA-256) | ✅ Layered on top of platform verifier; empty pin list disables |
 | Cookies | ✅ `reqwest` cookie store |
 | gzip / brotli decompression | ✅ |
 | Redirects | ✅ |
@@ -125,7 +125,9 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 | `rustls` | 0.23 | Pure-Rust TLS 1.3 stack |
 | `rustls-post-quantum` | 0.2 | Adds `X25519MLKEM768` to default group list |
 | `rustls-platform-verifier` | 0.5 | Defers cert validation to OS trust store |
-| `aws-lc-rs` | 1.13 | FIPS 140-3 validated crypto provider |
+| `aws-lc-rs` | 1.13 | FIPS 140-3 validated crypto provider (also used for SPKI SHA-256) |
+| `x509-parser` | 0.16 | Extract SPKI bytes from server cert for pinning |
+| `base64` | 0.22 | Decode user-supplied pin hashes |
 | `tokio` | 1 | Async runtime |
 | `uniffi` | 0.29 | Generates Kotlin + Swift bindings from `src/pqc.udl` |
 
@@ -134,7 +136,6 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 **Baseline verified.** Crate compiles and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated (verified on Rust stable `1.95`, macOS host). Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
 
 Outstanding items tracked as TODOs in source:
-- SPKI cert-pinning `ServerCertVerifier` (config field present; verifier impl pending).
 - Accurate `negotiated_named_group` reporting (currently hardcoded; needs hyper connector hook).
 - CI workflows for cross-compile validation.
 - Sample RN app exercising the integration end-to-end.

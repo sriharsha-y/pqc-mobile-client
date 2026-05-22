@@ -105,7 +105,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
 
 // Installation
 val pqc = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = CertPins.SPKI_SHA256,
+    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see §10 for how to compute
     enablePostQuantum = true,
     enableHttp3 = false,
     defaultTimeoutMs = 15_000UL,
@@ -236,3 +236,30 @@ android.util.Log.i("PQC", "negotiated group: ${resp.negotiatedNamedGroup}")
 For production verification use Wireshark on a USB-tethered device — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
 
 For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named group per request, broken down by client OS and app version.
+
+## 10. SPKI cert pinning — how to compute hashes
+
+`PqcConfig.pinnedCertSha256` takes a list of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI) — the same format used by RFC 7469 and Cronet's `addPublicKeyPins`. Empty list disables pinning.
+
+Compute from a live server:
+
+```sh
+openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
+  | openssl x509 -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary \
+  | base64
+```
+
+Compute from a cert file:
+
+```sh
+openssl x509 -in cert.pem -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary \
+  | base64
+```
+
+**Always pin at least two hashes** — the current leaf SPKI and one backup (e.g., a future leaf or an intermediate CA). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+
+The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.

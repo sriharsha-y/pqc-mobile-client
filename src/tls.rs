@@ -5,19 +5,19 @@ use rustls_platform_verifier::BuilderVerifierExt;
 
 use crate::config::PqcConfig;
 use crate::error::PqcError;
+use crate::pinning::{decode_pin_list, PinningVerifier};
 
 /// Build a rustls `ClientConfig` with the requested crypto provider.
 ///
 /// - When `enable_post_quantum` is true, uses `rustls_post_quantum::provider()`
 ///   which prepends `X25519MLKEM768` to the default group list (so the
 ///   `ClientHello` carries both `X25519MLKEM768` and `X25519` key_shares).
-/// - Cert validation defers to the platform trust store via
+/// - Cert chain validation defers to the platform trust store via
 ///   `rustls-platform-verifier` (iOS Security framework / Android KeyStore),
 ///   so MDM-distributed enterprise roots, captive portals, and OS revocation
 ///   continue to work.
-///
-/// TODO: layer a custom `ServerCertVerifier` on top when `pinned_cert_sha256`
-/// is non-empty so that platform verification AND SPKI pinning both apply.
+/// - When `pinned_cert_sha256` is non-empty, wraps the platform verifier in a
+///   `PinningVerifier` that additionally enforces an SPKI pin from the chain.
 pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
     let provider = if cfg.enable_post_quantum {
         Arc::new(rustls_post_quantum::provider())
@@ -25,15 +25,27 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
         Arc::new(rustls::crypto::aws_lc_rs::default_provider())
     };
 
-    let tls = ClientConfig::builder_with_provider(provider)
+    let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|_| PqcError::Tls)?
-        .with_platform_verifier()
-        .with_no_client_auth();
+        .map_err(|_| PqcError::Tls)?;
 
-    // TODO(pinning): if !cfg.pinned_cert_sha256.is_empty() {
-    //     wrap tls.dangerous().with_custom_certificate_verifier(...)
-    // }
+    let tls = if cfg.pinned_cert_sha256.is_empty() {
+        // No pinning: just the platform verifier.
+        builder.with_platform_verifier().with_no_client_auth()
+    } else {
+        // Pinning enabled: wrap the platform verifier so the chain still
+        // validates against the system trust store, and additionally
+        // require that one cert's SPKI hash matches a configured pin.
+        let inner: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+            Arc::new(rustls_platform_verifier::Verifier::new());
+        let pins = decode_pin_list(&cfg.pinned_cert_sha256)?;
+        let pinning = Arc::new(PinningVerifier::new(inner, pins));
+
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(pinning)
+            .with_no_client_auth()
+    };
 
     Ok(tls)
 }
