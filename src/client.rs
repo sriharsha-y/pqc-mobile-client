@@ -19,8 +19,12 @@ pub struct PqcHttpClient {
 }
 
 impl PqcHttpClient {
-    pub fn new(config: PqcConfig) -> Self {
-        let tls = build_tls_config(&config).expect("TLS config build failed");
+    /// Construct a new PQC HTTPS client. Returns `PqcError` rather than
+    /// panicking so consumers (iOS / Android / RN) can surface bad config
+    /// (e.g. malformed base64 in pinned_cert_sha256) as a typed error
+    /// instead of an opaque FFI panic.
+    pub fn new(config: PqcConfig) -> Result<Self, PqcError> {
+        let tls = build_tls_config(&config)?;
 
         let mut builder = reqwest::Client::builder()
             .use_preconfigured_tls(tls)
@@ -39,12 +43,12 @@ impl PqcHttpClient {
         //     builder = builder.http3_prior_knowledge();
         // }
 
-        let client = builder.build().expect("reqwest client build failed");
+        let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
-        Self {
+        Ok(Self {
             inner: client,
             default_timeout: config.default_timeout_ms.map(Duration::from_millis),
-        }
+        })
     }
 
     pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {

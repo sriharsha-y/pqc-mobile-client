@@ -68,6 +68,11 @@ enum PqcError {
 // ----- Client -----
 
 interface PqcHttpClient {
+    // Constructor can fail on malformed config (e.g. bad base64 in
+    // pinned_cert_sha256, or rustls failing to build the TLS config).
+    // The throw lets consumers handle bad config typed instead of via
+    // an opaque InternalException at the FFI boundary.
+    [Throws=PqcError]
     constructor(PqcConfig config);
 
     [Async, Throws=PqcError]
