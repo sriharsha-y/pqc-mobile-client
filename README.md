@@ -123,7 +123,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | Capability | Status |
 |---|---|
 | HTTP/1.1, HTTP/2 (via reqwest + hyper) | ✅ |
-| HTTP/3 / QUIC | ⏳ Opt-in via cargo feature, not enabled by default |
+| HTTP/3 / QUIC | ❌ Not yet wired (`enable_http3` config field is accepted but the `h3-quinn` dep + branch in `client.rs` are commented out) |
 | Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
 | Classical fallback (X25519, P-256) | ✅ Automatic |
 | System trust store (iOS Keychain / Android KeyStore) | ✅ Via `rustls-platform-verifier` |
