@@ -14,7 +14,8 @@ async fn pq_handshake_cloudflare() {
         enable_post_quantum: true,
         enable_http3: false,
         default_timeout_ms: Some(15_000),
-    });
+    })
+    .expect("client construction should succeed with empty pin list");
 
     let req = HttpRequest {
         method: HttpMethod::Get,

@@ -52,3 +52,21 @@ jobs:
         # PQ endpoint is down, re-run via workflow_dispatch; we want loud
         # signal when negotiation breaks rather than silently green.
         run: cargo test --release --locked -- --nocapture
+
+  # Security + supply-chain checks: cargo-audit scans the locked dep tree
+  # against the RustSec advisory database; cargo-deny enforces the license
+  # / banned-crate / source-registry policy in deny.toml.
+  # Both tools install as pre-built binaries (taiki-e/install-action) —
+  # much faster than `cargo install` from source.
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: cargo audit (RustSec advisory scan)
+        run: cargo audit --deny warnings
+      - name: cargo deny (licenses + bans + sources)
+        run: cargo deny check

@@ -2,9 +2,9 @@
 
 `pqc_client` on Android, consumed from:
 
-- **A native Android app** using OkHttp / Retrofit / Ktor / raw `HttpURLConnection` (§3, §4)
-- **A React Native Android app** (§5)
-- **Direct from Kotlin/Java without any HTTP framework** (§6)
+- **A native Android app** using OkHttp / Retrofit / Ktor / raw `HttpURLConnection` (Sections 3 and 4)
+- **A React Native Android app** (Section 5)
+- **Direct from Kotlin/Java without any HTTP framework** (Section 6)
 
 The Rust core, the `.so` files, and the generated Kotlin bindings are the same regardless of consumer.
 
@@ -105,7 +105,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
 
 // Installation
 val pqc = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see §10 for how to compute
+    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see Section 10 for how to compute
     enablePostQuantum = true,
     enableHttp3 = false,
     defaultTimeoutMs = 15_000UL,
@@ -127,7 +127,7 @@ val retrofit = Retrofit.Builder()
 
 ## 4. Native Android — `HttpURLConnection` or no framework
 
-`HttpURLConnection` does not expose an interceptor model. The clean answer is to skip it and call `PqcHttpClient` directly (see §6). If the consumer code must keep `HttpURLConnection` semantics, wrap `PqcHttpClient` behind a thin `HttpURLConnection`-shaped facade — possible but ~150 LOC of glue, not provided here.
+`HttpURLConnection` does not expose an interceptor model. The clean answer is to skip it and call `PqcHttpClient` directly (see Section 6). If the consumer code must keep `HttpURLConnection` semantics, wrap `PqcHttpClient` behind a thin `HttpURLConnection`-shaped facade — possible but ~150 LOC of glue, not provided here.
 
 ## 5. React Native Android
 
@@ -170,7 +170,7 @@ class MainApplication : Application(), ReactApplication {
 }
 ```
 
-The `PqcInterceptor` class is identical to the native case (§3).
+The `PqcInterceptor` class is identical to the native case (Section 3).
 
 ## 6. Direct use — no HTTP framework
 
@@ -260,6 +260,8 @@ openssl x509 -in cert.pem -pubkey -noout \
   | base64
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and one backup (e.g., a future leaf or an intermediate CA). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+
+**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.

@@ -74,12 +74,18 @@ env_logger = "0.11"
 # Self-signed certs for pinning unit tests
 rcgen = "0.13"
 
-# Release profile tuned for mobile binary size
+# Release profile tuned for mobile binary size.
+#
+# panic strategy is left as "unwind" (rustc default) rather than "abort"
+# because cargo test --release in CI relies on the test harness catching
+# panics to report which test failed. With panic="abort", a panicking
+# assertion would SIGABRT the test binary mid-run — non-zero exit, but
+# zero failed tests in the summary. The size benefit of abort on these
+# static libs (~50 KB) doesn't outweigh the lost diagnostic.
 [profile.release]
 opt-level = "z"          # optimize for size
 lto = true               # link-time optimization
 codegen-units = 1
-panic = "abort"
 strip = true
 overflow-checks = false
 

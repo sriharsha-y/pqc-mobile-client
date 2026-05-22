@@ -19,15 +19,33 @@ public final class PqcURLProtocol: URLProtocol {
     /// of allowed hosts in a real app.
     private static let interceptAll = true
 
-    private static let client: PqcHttpClient = {
-        PqcHttpClient(
-            config: PqcConfig(
-                pinnedCertSha256: [],
-                enablePostQuantum: true,
-                enableHttp3: false,
-                defaultTimeoutMs: 15_000
+    // Optional because PqcHttpClient init now throws on bad config
+    // (e.g. malformed base64 pin entries). If construction fails we
+    // log and leave the client nil — startLoading then synthesizes a
+    // network-failure error rather than crashing the app.
+    //
+    // NOTE: pinnedCertSha256 is [] in the sample. A real banking app
+    // MUST populate this with base64(SHA-256(SPKI)) for the production
+    // leaf cert (+ a pre-deployed next leaf for rotation). See
+    // pqc-mobile-client/ios/README.md §10.
+    // Named `httpClient` rather than `client` to avoid shadowing
+    // URLProtocol's inherited instance property `client: URLProtocolClient?`
+    // (the loading-system delegate we call back into via
+    // self.client?.urlProtocol(...) below).
+    private static let httpClient: PqcHttpClient? = {
+        do {
+            return try PqcHttpClient(
+                config: PqcConfig(
+                    pinnedCertSha256: [],
+                    enablePostQuantum: true,
+                    enableHttp3: false,
+                    defaultTimeoutMs: 15_000
+                )
             )
-        )
+        } catch {
+            NSLog("PqcURLProtocol: PqcHttpClient init failed: \(error)")
+            return nil
+        }
     }()
 
     private var pqcTask: Task<Void, Never>?
@@ -55,6 +73,16 @@ public final class PqcURLProtocol: URLProtocol {
                         userInfo: [NSLocalizedDescriptionKey: "missing URL"]
                     )
                 }
+                guard let pqcClient = Self.httpClient else {
+                    throw NSError(
+                        domain: "PqcURLProtocol",
+                        code: -3,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "PqcHttpClient unavailable — check init logs",
+                        ]
+                    )
+                }
                 let pqcReq = HttpRequest(
                     method: req.httpMethod.flatMap(Self.parseMethod) ?? .get,
                     url: url.absoluteString,
@@ -63,7 +91,7 @@ public final class PqcURLProtocol: URLProtocol {
                     timeoutMs: nil
                 )
 
-                let pqcResp = try await Self.client.request(req: pqcReq)
+                let pqcResp = try await pqcClient.request(req: pqcReq)
 
                 // Build a header dict that includes the negotiated KEX so
                 // JS can verify the handshake via response.headers.get(...).
@@ -72,10 +100,24 @@ public final class PqcURLProtocol: URLProtocol {
                 }
                 headerFields["X-Pqc-Negotiated-Group"] = pqcResp.negotiatedNamedGroup
 
+                // Map the Rust core's `negotiated_protocol` string (formatted
+                // from `http::Version` via `Debug`, e.g. "HTTP/1.1") into a
+                // value HTTPURLResponse will accept. Defaults to HTTP/1.1 on
+                // unknown values rather than fabricating HTTP/2 — wrong
+                // telemetry is worse than conservative telemetry.
+                let httpVersion: String = {
+                    switch pqcResp.negotiatedProtocol {
+                    case "HTTP/0.9", "HTTP/1.0": return "HTTP/1.0"
+                    case "HTTP/1.1":              return "HTTP/1.1"
+                    case "HTTP/2.0", "HTTP/2":    return "HTTP/2.0"
+                    case "HTTP/3.0", "HTTP/3":    return "HTTP/3.0"
+                    default:                       return "HTTP/1.1"
+                    }
+                }()
                 guard let response = HTTPURLResponse(
                     url: url,
                     statusCode: Int(pqcResp.status),
-                    httpVersion: "HTTP/1.1",
+                    httpVersion: httpVersion,
                     headerFields: headerFields
                 ) else {
                     throw NSError(

@@ -25,12 +25,12 @@ This crate provides a **unified, single-codebase, FIPS-validated** alternative t
 
 | Consumer | Pattern | Doc |
 |---|---|---|
-| Native Android app (Kotlin/Java) using OkHttp / Retrofit / Ktor | Custom `Interceptor` that delegates to `PqcHttpClient` | [`android/README.md`](android/README.md) §3 |
-| Native Android app using `HttpURLConnection` or no framework | Call `PqcHttpClient` directly from Kotlin/Java | [`android/README.md`](android/README.md) §6 |
-| React Native Android app | Same `Interceptor` installed via `OkHttpClientProvider.setOkHttpClientFactory` | [`android/README.md`](android/README.md) §5 |
-| Native iOS app using `URLSession` | Register `PqcURLProtocol` on the session config | [`ios/README.md`](ios/README.md) §3 |
-| Native iOS app using a custom HTTP client (AsyncHTTPClient, etc.) | Call `PqcHttpClient` directly from Swift/Obj-C | [`ios/README.md`](ios/README.md) §5 |
-| React Native iOS app | `PqcURLProtocol` registered via `RCTSetCustomNSURLSessionConfigurationProvider` | [`ios/README.md`](ios/README.md) §6 |
+| Native Android app (Kotlin/Java) using OkHttp / Retrofit / Ktor | Custom `Interceptor` that delegates to `PqcHttpClient` | [`android/README.md`](android/README.md) Section 3 |
+| Native Android app using `HttpURLConnection` or no framework | Call `PqcHttpClient` directly from Kotlin/Java | [`android/README.md`](android/README.md) Section 6 |
+| React Native Android app | Same `Interceptor` installed via `OkHttpClientProvider.setOkHttpClientFactory` | [`android/README.md`](android/README.md) Section 5 |
+| Native iOS app using `URLSession` | Register `PqcURLProtocol` on the session config | [`ios/README.md`](ios/README.md) Section 3 |
+| Native iOS app using a custom HTTP client (AsyncHTTPClient, etc.) | Call `PqcHttpClient` directly from Swift/Obj-C | [`ios/README.md`](ios/README.md) Section 5 |
+| React Native iOS app | `PqcURLProtocol` registered via `RCTSetCustomNSURLSessionConfigurationProvider` | [`ios/README.md`](ios/README.md) Section 6 |
 
 The Rust core, Kotlin bindings, and Swift bindings are **identical** across all six consumers. Only the integration glue at the call site differs.
 
@@ -123,7 +123,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | Capability | Status |
 |---|---|
 | HTTP/1.1, HTTP/2 (via reqwest + hyper) | ✅ |
-| HTTP/3 / QUIC | ⏳ Opt-in via cargo feature, not enabled by default |
+| HTTP/3 / QUIC | ❌ Not yet wired (`enable_http3` config field is accepted but the `h3-quinn` dep + branch in `client.rs` are commented out) |
 | Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
 | Classical fallback (X25519, P-256) | ✅ Automatic |
 | System trust store (iOS Keychain / Android KeyStore) | ✅ Via `rustls-platform-verifier` |

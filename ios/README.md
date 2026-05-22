@@ -2,9 +2,9 @@
 
 `pqc_client` on iOS, consumed from:
 
-- **A native iOS app** using `URLSession` (§3, §4)
-- **A native iOS app** using a custom HTTP client or no HTTP framework (§5)
-- **A React Native iOS app** (§6)
+- **A native iOS app** using `URLSession` (Sections 3 and 4)
+- **A native iOS app** using a custom HTTP client or no HTTP framework (Section 5)
+- **A React Native iOS app** (Section 6)
 
 The Rust core, the XCFramework, and the generated Swift bindings are the same regardless of consumer.
 
@@ -168,7 +168,7 @@ Existing API code (Alamofire, Moya, raw `URLSession.dataTask`) using this sessio
 
 ## 4. Native iOS — Alamofire / Moya / async-http-client
 
-Alamofire and Moya wrap `URLSession`, so they inherit the URLProtocol hook from §3 if the underlying session is the one with `PqcURLProtocol` registered. Construct Alamofire's `Session` with a `URLSessionConfiguration` that includes the protocol class:
+Alamofire and Moya wrap `URLSession`, so they inherit the URLProtocol hook from Section 3 if the underlying session is the one with `PqcURLProtocol` registered. Construct Alamofire's `Session` with a `URLSessionConfiguration` that includes the protocol class:
 
 ```swift
 let cfg = URLSessionConfiguration.default
@@ -178,7 +178,7 @@ if #unavailable(iOS 26, *) {
 let af = Session(configuration: cfg)
 ```
 
-`swift-nio`-based clients (AsyncHTTPClient) do not use `URLSession`; for those, call `PqcHttpClient` directly (§5).
+`swift-nio`-based clients (AsyncHTTPClient) do not use `URLSession`; for those, call `PqcHttpClient` directly (Section 5).
 
 ## 5. Native iOS — direct use, no URLSession
 
@@ -233,7 +233,7 @@ final class AppDelegate: RCTAppDelegate {
 }
 ```
 
-The `PqcURLProtocol` class is identical to the native case (§3).
+The `PqcURLProtocol` class is identical to the native case (Section 3).
 
 ## 7. iOS 26 gate
 
@@ -281,6 +281,8 @@ openssl s_client -servername api.example.com -connect api.example.com:443 < /dev
   | base64
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and one backup (e.g., a future leaf or an intermediate CA). Document a rotation playbook for cert renewal.
+**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Document a rotation playbook for cert renewal.
+
+**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.
