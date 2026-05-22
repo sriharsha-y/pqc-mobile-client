@@ -28,7 +28,11 @@ public final class PqcURLProtocol: URLProtocol {
     // MUST populate this with base64(SHA-256(SPKI)) for the production
     // leaf cert (+ a pre-deployed next leaf for rotation). See
     // pqc-mobile-client/ios/README.md §10.
-    private static let client: PqcHttpClient? = {
+    // Named `httpClient` rather than `client` to avoid shadowing
+    // URLProtocol's inherited instance property `client: URLProtocolClient?`
+    // (the loading-system delegate we call back into via
+    // self.client?.urlProtocol(...) below).
+    private static let httpClient: PqcHttpClient? = {
         do {
             return try PqcHttpClient(
                 config: PqcConfig(
@@ -69,7 +73,7 @@ public final class PqcURLProtocol: URLProtocol {
                         userInfo: [NSLocalizedDescriptionKey: "missing URL"]
                     )
                 }
-                guard let pqcClient = Self.client else {
+                guard let pqcClient = Self.httpClient else {
                     throw NSError(
                         domain: "PqcURLProtocol",
                         code: -3,
