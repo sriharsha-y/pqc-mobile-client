@@ -84,7 +84,17 @@ impl PqcHttpClient {
 
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         for (k, v) in resp.headers() {
-            let s = v.to_str().unwrap_or("").to_string();
+            // If the header value contains non-UTF8 bytes (legacy Set-Cookie
+            // with Latin-1 chars, RFC 2231 Content-Disposition filenames,
+            // misbehaving servers), to_str() returns Err. Earlier code
+            // substituted "" — caller saw the header present but value
+            // missing, which can drop a session cookie or filename hint
+            // silently. Use from_utf8_lossy so invalid bytes become U+FFFD
+            // replacement chars but the header round-trips visibly.
+            let s = match v.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            };
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
