@@ -31,7 +31,11 @@ cargo ndk \
 echo "==> Generating Kotlin bindings"
 rm -rf generated/kotlin
 mkdir -p generated/kotlin
-cargo run --release --bin uniffi-bindgen -- generate \
+# --features cli enables the uniffi-bindgen binary (gated by
+# required-features in Cargo.toml). The cross-compile build above is
+# intentionally feature-free so clap / goblin / uniffi_bindgen don't
+# get linked into the .so / .a artifacts shipped to mobile.
+cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --language kotlin \
     --out-dir generated/kotlin \
     src/pqc.udl
