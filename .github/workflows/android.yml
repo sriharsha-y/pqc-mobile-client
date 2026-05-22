@@ -1,0 +1,53 @@
+name: android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-aar
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+
+      - name: Install cargo-ndk + uniffi-bindgen-cli
+        run: |
+          cargo install --locked cargo-ndk
+          cargo install --locked uniffi-bindgen-cli
+
+      - name: Resolve NDK path
+        run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
+
+      - name: Build native libraries + Kotlin bindings
+        run: ./scripts/build-android.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqc-android
+          path: |
+            target/jniLibs/
+            generated/kotlin/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,5 +1,9 @@
 # pqc-mobile-client
 
+[![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
+[![android](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml)
+[![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
+
 Post-Quantum TLS HTTPS client for mobile apps — **iOS 15.1+** and **Android API 29+**. Single Rust core built on `rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`, exposed to Kotlin and Swift via UniFFI.
 
 Designed for any mobile app — **native iOS (Swift/Obj-C), native Android (Kotlin/Java), or React Native** — that needs to negotiate `X25519MLKEM768` against PQC-enabled servers (Akamai, Cloudflare, AWS) on OS versions that don't have native PQC TLS yet.
@@ -137,7 +141,6 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 **Baseline verified.** Crate compiles, all unit tests pass (11), and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated *and verified* (the smoke test now asserts on the actual negotiated group, not a hardcoded constant). Verified on Rust stable `1.95`, macOS host. Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
 
 Outstanding items:
-- CI workflows for cross-compile validation.
 - Sample RN app exercising the integration end-to-end.
 
 ## License

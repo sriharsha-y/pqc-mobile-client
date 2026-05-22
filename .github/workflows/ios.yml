@@ -1,0 +1,48 @@
+name: ios
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-xcframework
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + iOS targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+
+      - name: Install uniffi-bindgen-cli
+        run: cargo install --locked uniffi-bindgen-cli
+
+      - name: Build XCFramework + Swift bindings
+        run: ./scripts/build-ios.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqc-ios
+          path: |
+            generated/PqcCore.xcframework
+            generated/swift/
+          if-no-files-found: error
+          retention-days: 14
