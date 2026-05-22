@@ -5,6 +5,7 @@ use rustls_platform_verifier::BuilderVerifierExt;
 
 use crate::config::PqcConfig;
 use crate::error::PqcError;
+use crate::kx_tracker::instrument_provider;
 use crate::pinning::{decode_pin_list, PinningVerifier};
 
 /// Build a rustls `ClientConfig` with the requested crypto provider.
@@ -19,11 +20,14 @@ use crate::pinning::{decode_pin_list, PinningVerifier};
 /// - When `pinned_cert_sha256` is non-empty, wraps the platform verifier in a
 ///   `PinningVerifier` that additionally enforces an SPKI pin from the chain.
 pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
-    let provider = if cfg.enable_post_quantum {
-        Arc::new(rustls_post_quantum::provider())
+    let base = if cfg.enable_post_quantum {
+        rustls_post_quantum::provider()
     } else {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        rustls::crypto::aws_lc_rs::default_provider()
     };
+    // Wrap so the negotiated kx group is recorded into a global atomic
+    // and can be read after each request via kx_tracker::last_negotiated_group_str().
+    let provider = Arc::new(instrument_provider(base));
 
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()

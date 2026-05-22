@@ -5,6 +5,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::config::PqcConfig;
 use crate::error::PqcError;
+use crate::kx_tracker::last_negotiated_group_str;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
 
@@ -99,10 +100,10 @@ impl PqcHttpClient {
             .map_err(|_| PqcError::InvalidResponse)?
             .to_vec();
 
-        // TODO: surface the actual negotiated named group from rustls.
-        // reqwest does not currently expose this; will require either a
-        // custom hyper connector or a rustls connection-listener hook.
-        let negotiated_named_group = "X25519MLKEM768".to_string();
+        // The KEX group rustls selected on the most-recent handshake.
+        // See kx_tracker module for the recording mechanism and the
+        // documented concurrency caveat.
+        let negotiated_named_group = last_negotiated_group_str();
 
         Ok(HttpResponse {
             status,

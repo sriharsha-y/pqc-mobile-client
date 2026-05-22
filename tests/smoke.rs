@@ -30,4 +30,8 @@ async fn pq_handshake_cloudflare() {
         "status={} group={}",
         resp.status, resp.negotiated_named_group
     );
+    assert_eq!(
+        resp.negotiated_named_group, "X25519MLKEM768",
+        "Cloudflare PQ endpoint should negotiate X25519MLKEM768"
+    );
 }

@@ -104,6 +104,7 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 | Timeouts (connect / read / total) | ✅ |
 | Cancellation | ✅ Via UniFFI async + tokio |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
+| Negotiated TLS group reporting on `HttpResponse` | ✅ Via instrumented `CryptoProvider` (see `src/kx_tracker.rs`) |
 | Android GMS + non-GMS devices | ✅ |
 | iOS 15.1 – 18 | ✅ |
 | iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |
@@ -133,10 +134,9 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 
 ## Status
 
-**Baseline verified.** Crate compiles and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated (verified on Rust stable `1.95`, macOS host). Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
+**Baseline verified.** Crate compiles, all unit tests pass (11), and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated *and verified* (the smoke test now asserts on the actual negotiated group, not a hardcoded constant). Verified on Rust stable `1.95`, macOS host. Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
 
-Outstanding items tracked as TODOs in source:
-- Accurate `negotiated_named_group` reporting (currently hardcoded; needs hyper connector hook).
+Outstanding items:
 - CI workflows for cross-compile validation.
 - Sample RN app exercising the integration end-to-end.
 
