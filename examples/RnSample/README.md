@@ -71,6 +71,6 @@ If the on-screen text reads `kex = X25519MLKEM768`, the handshake succeeded with
 
 This sample intentionally elides things a real banking app needs:
 
-- No cert pinning configured (the integration accepts an empty `pinnedCertSha256` list). See [`../../android/README.md` §10](../../android/README.md) and [`../../ios/README.md` §10](../../ios/README.md) for how to compute and configure pins.
+- No cert pinning configured (the integration accepts an empty `pinnedCertSha256` list). See [`../../android/README.md` Section 10](../../android/README.md) and [`../../ios/README.md` Section 10](../../ios/README.md) for how to compute and configure pins.
 - `PqcURLProtocol.swift` intercepts every `https://` URL — a real app should restrict to known API hostnames so 3rd-party SDKs and CDN traffic continue to use URLSession's native stack.
 - WebViews (`react-native-webview`) and 3rd-party native SDKs (Firebase, Sentry, payment SDKs, etc.) bring their own HTTP stacks and are NOT covered by the swap. See [`../../README.md`](../../README.md) for the full coverage matrix.

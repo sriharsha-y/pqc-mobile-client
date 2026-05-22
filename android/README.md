@@ -2,9 +2,9 @@
 
 `pqc_client` on Android, consumed from:
 
-- **A native Android app** using OkHttp / Retrofit / Ktor / raw `HttpURLConnection` (§3, §4)
-- **A React Native Android app** (§5)
-- **Direct from Kotlin/Java without any HTTP framework** (§6)
+- **A native Android app** using OkHttp / Retrofit / Ktor / raw `HttpURLConnection` (Sections 3 and 4)
+- **A React Native Android app** (Section 5)
+- **Direct from Kotlin/Java without any HTTP framework** (Section 6)
 
 The Rust core, the `.so` files, and the generated Kotlin bindings are the same regardless of consumer.
 
@@ -105,7 +105,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
 
 // Installation
 val pqc = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see §10 for how to compute
+    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see Section 10 for how to compute
     enablePostQuantum = true,
     enableHttp3 = false,
     defaultTimeoutMs = 15_000UL,
@@ -127,7 +127,7 @@ val retrofit = Retrofit.Builder()
 
 ## 4. Native Android — `HttpURLConnection` or no framework
 
-`HttpURLConnection` does not expose an interceptor model. The clean answer is to skip it and call `PqcHttpClient` directly (see §6). If the consumer code must keep `HttpURLConnection` semantics, wrap `PqcHttpClient` behind a thin `HttpURLConnection`-shaped facade — possible but ~150 LOC of glue, not provided here.
+`HttpURLConnection` does not expose an interceptor model. The clean answer is to skip it and call `PqcHttpClient` directly (see Section 6). If the consumer code must keep `HttpURLConnection` semantics, wrap `PqcHttpClient` behind a thin `HttpURLConnection`-shaped facade — possible but ~150 LOC of glue, not provided here.
 
 ## 5. React Native Android
 
@@ -170,7 +170,7 @@ class MainApplication : Application(), ReactApplication {
 }
 ```
 
-The `PqcInterceptor` class is identical to the native case (§3).
+The `PqcInterceptor` class is identical to the native case (Section 3).
 
 ## 6. Direct use — no HTTP framework
 
