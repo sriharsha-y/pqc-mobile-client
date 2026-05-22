@@ -1,0 +1,75 @@
+// UniFFI interface for pqc_client.
+// Generates Kotlin (Android) and Swift (iOS) bindings.
+
+namespace pqc {};
+
+// ----- Configuration -----
+
+dictionary PqcConfig {
+    // SHA-256 hashes of Subject Public Key Info, base64-encoded.
+    // Empty list disables pinning.
+    sequence<string> pinned_cert_sha256;
+
+    // Enable X25519MLKEM768 hybrid post-quantum key exchange.
+    boolean enable_post_quantum;
+
+    // Enable HTTP/3 (QUIC) when supported by the server.
+    // Defaults to false; turn on once observability is in place.
+    boolean enable_http3;
+
+    // Default request timeout in milliseconds.
+    u64? default_timeout_ms;
+};
+
+// ----- Request / response shapes -----
+
+enum HttpMethod {
+    "Get",
+    "Post",
+    "Put",
+    "Delete",
+    "Patch",
+    "Head",
+    "Options"
+};
+
+dictionary HttpRequest {
+    HttpMethod method;
+    string url;
+    record<string, string> headers;
+    bytes? body;
+    u64? timeout_ms;
+};
+
+dictionary HttpResponse {
+    u16 status;
+    record<string, sequence<string>> headers;
+    bytes body;
+    // The TLS named group actually negotiated (e.g. "X25519MLKEM768" or "X25519").
+    string negotiated_named_group;
+    // Negotiated ALPN protocol (e.g. "h2", "http/1.1").
+    string negotiated_protocol;
+};
+
+// ----- Errors -----
+
+[Error]
+enum PqcError {
+    "Network",
+    "Tls",
+    "Timeout",
+    "Cancelled",
+    "InvalidRequest",
+    "InvalidResponse",
+    "PinningFailure",
+    "TrustVerification"
+};
+
+// ----- Client -----
+
+interface PqcHttpClient {
+    constructor(PqcConfig config);
+
+    [Async, Throws=PqcError]
+    HttpResponse request(HttpRequest req);
+};

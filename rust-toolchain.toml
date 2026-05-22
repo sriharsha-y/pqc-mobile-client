@@ -1,0 +1,16 @@
+[toolchain]
+# Pin a recent stable Rust. Bump as needed.
+channel = "1.87"
+components = ["rustfmt", "clippy"]
+targets = [
+    # Android
+    "aarch64-linux-android",
+    "armv7-linux-androideabi",
+    "x86_64-linux-android",
+    "i686-linux-android",
+    # iOS
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios",
+]
+profile = "minimal"

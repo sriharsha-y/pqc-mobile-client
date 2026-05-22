@@ -1,0 +1,21 @@
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum PqcError {
+    #[error("network error")]
+    Network,
+    #[error("TLS error")]
+    Tls,
+    #[error("request timed out")]
+    Timeout,
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("invalid request")]
+    InvalidRequest,
+    #[error("invalid response")]
+    InvalidResponse,
+    #[error("certificate pinning failure")]
+    PinningFailure,
+    #[error("trust verification failure")]
+    TrustVerification,
+}

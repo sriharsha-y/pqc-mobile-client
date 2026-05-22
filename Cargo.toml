@@ -1,0 +1,70 @@
+[package]
+name = "pqc_client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+description = "Post-Quantum TLS HTTPS client for iOS and Android (native + React Native) via UniFFI"
+repository = ""
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+name = "pqc_client"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# HTTP client (rustls backend, no native-tls)
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots-no-provider",
+    "http2",
+    "gzip",
+    "brotli",
+    "cookies",
+    "stream",
+] }
+
+# TLS with post-quantum support
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-post-quantum = "0.2"
+rustls-platform-verifier = "0.5"
+
+# FIPS-validated crypto provider (ML-KEM, etc.)
+aws-lc-rs = { version = "1.13", default-features = false, features = ["aws-lc-sys"] }
+
+# Error + logging
+thiserror = "2"
+log = "0.4"
+
+# UniFFI for cross-language bindings (Kotlin/Swift)
+uniffi = { version = "0.29", features = ["tokio"] }
+
+# JSON helpers (often useful in client code)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async helpers
+async-trait = "0.1"
+futures = "0.3"
+
+[build-dependencies]
+uniffi = { version = "0.29", features = ["build"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.11"
+
+# Release profile tuned for mobile binary size
+[profile.release]
+opt-level = "z"          # optimize for size
+lto = true               # link-time optimization
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+
+# Faster dev iteration
+[profile.dev]
+opt-level = 1
+debug = true

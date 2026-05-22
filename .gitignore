@@ -1,0 +1,31 @@
+# Rust
+target/
+**/*.rs.bk
+
+# UniFFI generated artifacts (regenerate from source)
+generated/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Android
+android/build/
+android/.gradle/
+local.properties
+
+# iOS
+ios/build/
+*.xcuserstate
+xcuserdata/
+
+# Logs / scratch
+*.log
+.scratch/
+
+# Node (for RN consumer-side helpers; this repo itself has no node_modules)
+node_modules/
