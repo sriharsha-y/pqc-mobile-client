@@ -1,0 +1,155 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate: never release something that doesn't build + test cleanly.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-test
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --release --locked
+
+  build-android:
+    name: build-android
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-android
+
+      - name: Install cargo-ndk + uniffi-bindgen-cli
+        run: |
+          cargo install --locked cargo-ndk
+          cargo install --locked uniffi-bindgen-cli
+
+      - name: Resolve NDK path
+        run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
+
+      - name: Build
+        run: ./scripts/build-android.sh
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/${ARCHIVE}" \
+              -C target jniLibs \
+              -C ../generated kotlin
+          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqc-android
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  build-ios:
+    name: build-ios
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + iOS targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-ios
+
+      - name: Install uniffi-bindgen-cli
+        run: cargo install --locked uniffi-bindgen-cli
+
+      - name: Build
+        run: ./scripts/build-ios.sh
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="pqc-mobile-client-${VERSION}-ios.zip"
+          mkdir -p dist
+          (cd generated && zip -r "../dist/${ARCHIVE}" PqcCore.xcframework swift)
+          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqc-ios
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: release
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create the release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for auto-generated notes to see previous tags
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pqc-android
+          path: dist
+
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pqc-ios
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generate release notes from commits since the previous tag.
+          # GitHub categorizes by PR labels if .github/release.yml is present;
+          # otherwise it lists commit subjects.
+          generate_release_notes: true
+          # Mark pre-1.0 builds as pre-releases so consumers know they're
+          # not source-stable yet. Strip with a manual edit on the release
+          # if needed.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          files: |
+            dist/pqc-mobile-client-*-android.tar.gz
+            dist/pqc-mobile-client-*-ios.zip
+          fail_on_unmatched_files: true

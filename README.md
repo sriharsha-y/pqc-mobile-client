@@ -3,6 +3,7 @@
 [![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
 [![android](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml)
 [![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
+[![release](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/release.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/releases)
 
 Post-Quantum TLS HTTPS client for mobile apps — **iOS 15.1+** and **Android API 29+**. Single Rust core built on `rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`, exposed to Kotlin and Swift via UniFFI.
 
@@ -90,6 +91,23 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 ./scripts/build-android.sh         # cross-compile all Android ABIs + Kotlin bindings
 ./scripts/build-ios.sh             # build XCFramework + Swift bindings
 ```
+
+## Releases
+
+Releases are cut by pushing a git tag matching `v*`:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The `release` workflow then:
+1. Runs `cargo clippy` + `cargo test --release` (gating — never releases a red build).
+2. Builds Android `.so` files + Kotlin bindings (`pqc-mobile-client-<version>-android.tar.gz`).
+3. Builds iOS `PqcCore.xcframework` + Swift bindings (`pqc-mobile-client-<version>-ios.zip`).
+4. Creates a [GitHub Release](https://github.com/sriharsha-y/pqc-mobile-client/releases) at the tag with auto-generated release notes (commit subjects since the previous tag, categorized by PR labels if any), and attaches both archives as downloadable assets.
+
+Tags matching `v0.*` are marked as prereleases automatically; remove the prerelease flag on the release page when moving to a stable major.
 
 ## What this covers
 
