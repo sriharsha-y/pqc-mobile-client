@@ -1,8 +1,10 @@
 import Foundation
 // PqcConfig / PqcHttpClient / HttpRequest / HttpResponse / HttpMethod
-// come from pqc.swift (UniFFI-generated), which is added to the same
-// app target. pqc.swift itself imports the `pqcFFI` C module declared
-// by the bundled PqcClient.xcframework's module.modulemap.
+// are exported by the PqcCore Pod (which vendors PqcCore.xcframework
+// and ships UniFFI-generated pqc.swift inside its module). pqc.swift
+// internally imports the `pqcFFI` C module declared by the
+// XCFramework's module.modulemap.
+import PqcCore
 
 /// URLProtocol that intercepts NSURLSession requests and routes them
 /// through the Rust `PqcHttpClient`. Register it via
