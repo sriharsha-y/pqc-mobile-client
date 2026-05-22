@@ -1,10 +1,24 @@
 name: ios
 
+# PR-only — runs on macos-latest which costs 10× against the free quota,
+# so we want this firing as rarely as possible while still catching
+# breakage. release.yml builds iOS artifacts when a release is cut.
+#
+# paths-ignore: docs-only PRs don't need the iOS XCFramework pipeline.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

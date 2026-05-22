@@ -21,6 +21,14 @@ name: release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+# Serialize release runs so concurrent merges to main don't race on tag
+# creation. Don't cancel an in-progress release — its mid-state might be
+# a partially-published release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write       # release-please creates tags/releases

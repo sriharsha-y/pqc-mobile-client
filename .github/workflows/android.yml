@@ -1,10 +1,24 @@
 name: android
 
+# PR-only — the merge commit is the same SHA main will have after merge,
+# so push:main would be a redundant re-test. release.yml builds Android
+# artifacts when a release is cut.
+#
+# paths-ignore: docs-only PRs don't need the Android cross-compile pipeline.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

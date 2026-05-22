@@ -1,10 +1,20 @@
 name: check
 
+# Runs only on PRs targeting main. The merge commit GitHub creates for a PR
+# is the same tree main will have post-merge, so re-running on push:main
+# would just re-test the same SHA. release.yml is the only workflow that
+# needs to fire on push:main (release-please scans commits there).
+#
+# Add a `workflow_dispatch` here too so the Actions tab has a manual button
+# in case CF's PQ endpoint blips and you want to re-verify without pushing.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,12 +22,11 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    # macOS minutes count 10× against the GitHub free quota, and ios.yml
+    # already exercises the macOS + aws-lc-sys + iOS-target toolchain.
+    # Linux is enough here.
+    name: check (ubuntu)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +39,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: check-${{ matrix.os }}
+          shared-key: check-ubuntu
 
       - name: Format check
         run: cargo fmt --check
@@ -39,7 +48,7 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Tests
-        # Includes the smoke test against pq.cloudflareresearch.com.
-        # If CF's PQ endpoint is down, mark this step as continue-on-error
-        # rather than disable it; we want loud signal when negotiation breaks.
+        # Includes the smoke test against pq.cloudflareresearch.com. If CF's
+        # PQ endpoint is down, re-run via workflow_dispatch; we want loud
+        # signal when negotiation breaks rather than silently green.
         run: cargo test --release --locked -- --nocapture
