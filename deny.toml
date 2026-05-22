@@ -1,0 +1,84 @@
+# cargo-deny configuration.
+# Run locally: `cargo deny check`
+# CI: see .github/workflows/check.yml — fails on advisory / license violation.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ----- Security advisories -----
+# Fail the build on any RustSec advisory matching a current dep.
+# Unmaintained / unsound advisories are warnings — they're informational
+# rather than exploitable, but worth flagging.
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+# ----- License policy -----
+# Banking-grade: permissive licenses only. No GPL / LGPL / AGPL / MPL
+# (weak copyleft on modifications is incompatible with shipping a
+# closed-source consumer app).
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "OpenSSL",        # aws-lc-rs's OpenSSL-derived files
+    # MPL-2.0: file-level copyleft only. Modifying an MPL-2.0 source file
+    # requires sharing the modified file; using the crate unmodified — as
+    # we do — triggers no reciprocal obligations on the consumer app.
+    # Required for the UniFFI tree (uniffi, uniffi_bindgen, uniffi_core,
+    # uniffi_build, uniffi_macros, uniffi_meta, uniffi_pipeline, uniffi_udl).
+    # Not in the same risk class as LGPL/GPL/AGPL.
+    "MPL-2.0",
+    # CDLA-Permissive-2.0: Linux Foundation's permissive data-set license,
+    # used by webpki-root-certs (Mozilla's root CA bundle data, pulled
+    # transitively by rustls-platform-verifier). Permissive — no copyleft,
+    # no patent restrictions. Safe for closed-source consumers.
+    "CDLA-Permissive-2.0",
+]
+# Per-crate exceptions — keep this list empty unless absolutely necessary.
+exceptions = []
+
+# ----- Banned crates / duplicates -----
+[bans]
+# Warn (don't fail) on duplicate semver-major versions. A real fail would
+# be too noisy given how many duplicated transitive deps the reqwest +
+# rustls + uniffi tree pulls in.
+multiple-versions = "warn"
+# Wildcards in Cargo.toml dependency versions are a foot-gun.
+wildcards = "deny"
+# Always deny crates known to be problematic.
+deny = [
+    # OpenSSL with native-tls would defeat the purpose of pinning to
+    # rustls-post-quantum. Belt and suspenders.
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+allow = []
+features = []
+skip = []
+skip-tree = []
+
+# ----- Source registry policy -----
+# Only allow crates from crates.io. No git deps, no alternate registries.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
