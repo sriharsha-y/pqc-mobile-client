@@ -31,8 +31,9 @@ jobs:
         with:
           shared-key: ios
 
-      - name: Install uniffi-bindgen-cli
-        run: cargo install --locked uniffi-bindgen-cli
+      # uniffi-bindgen is built as a binary target from this crate
+      # (see Cargo.toml [[bin]]); the build script invokes it via
+      # `cargo run --release --bin uniffi-bindgen`.
 
       - name: Build XCFramework + Swift bindings
         run: ./scripts/build-ios.sh

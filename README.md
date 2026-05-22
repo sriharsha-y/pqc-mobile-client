@@ -80,6 +80,8 @@ pqc-mobile-client/
 │   └── build-ios.sh        Build XCFramework + Swift bindings
 ├── android/README.md       Consumption guide (native + React Native)
 ├── ios/README.md           Consumption guide (native + React Native)
+├── PqcCore.podspec         Local CocoaPod that vendors the iOS XCFramework
+├── examples/RnSample/      Runnable React Native sample app (see its README)
 └── docs/                   (populate as design evolves)
 ```
 
@@ -165,8 +167,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 
 **Baseline verified.** Crate compiles, all unit tests pass (11), and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated *and verified* (the smoke test now asserts on the actual negotiated group, not a hardcoded constant). Verified on Rust stable `1.95`, macOS host. Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
 
-Outstanding items:
-- Sample RN app exercising the integration end-to-end.
+Outstanding items: none from the original plan. See [`examples/RnSample/README.md`](examples/RnSample/README.md) for the end-to-end React Native sample, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for the conventional-commits release flow.
 
 ## License
 

@@ -31,10 +31,11 @@ jobs:
         with:
           shared-key: android
 
-      - name: Install cargo-ndk + uniffi-bindgen-cli
-        run: |
-          cargo install --locked cargo-ndk
-          cargo install --locked uniffi-bindgen-cli
+      - name: Install cargo-ndk
+        run: cargo install --locked cargo-ndk
+        # uniffi-bindgen is built as a binary target from this crate
+        # (see Cargo.toml [[bin]]); the build script invokes it via
+        # `cargo run --release --bin uniffi-bindgen`.
 
       - name: Resolve NDK path
         run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV

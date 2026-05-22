@@ -7,6 +7,13 @@ set -euo pipefail
 
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your Android NDK path}"
 
+# Make sure ~/.cargo/bin is on PATH so uniffi-bindgen is found in fresh shells
+# (CI runners and local shells that haven't sourced ~/.cargo/env).
+if [ -f "${HOME}/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/.cargo/env"
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -22,11 +29,12 @@ cargo ndk \
     build --release
 
 echo "==> Generating Kotlin bindings"
+rm -rf generated/kotlin
 mkdir -p generated/kotlin
-uniffi-bindgen generate \
-    --library "target/aarch64-linux-android/release/libpqc_client.so" \
+cargo run --release --bin uniffi-bindgen -- generate \
     --language kotlin \
-    --out-dir generated/kotlin
+    --out-dir generated/kotlin \
+    src/pqc.udl
 
 echo
 echo "Android build complete:"

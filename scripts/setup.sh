@@ -27,9 +27,9 @@ rustup target add \
 echo "==> Installing cargo-ndk (Android cross-compile helper)"
 cargo install --locked cargo-ndk
 
-echo "==> Installing uniffi-bindgen CLI"
-cargo install --locked uniffi-bindgen-cli || \
-    cargo install --locked --git https://github.com/mozilla/uniffi-rs uniffi-bindgen-cli
+# uniffi-bindgen is built from this crate's own [[bin]] target — no separate
+# `cargo install` needed. The build scripts invoke
+# `cargo run --release --bin uniffi-bindgen -- generate ...`.
 
 cat <<'EOF'
 

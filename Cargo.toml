@@ -11,6 +11,18 @@ repository = ""
 crate-type = ["cdylib", "staticlib", "lib"]
 name = "pqc_client"
 
+# UniFFI's recommended pattern: each crate provides its own uniffi-bindgen
+# binary that just calls uniffi::uniffi_bindgen_main(). Run via
+# `cargo run --bin uniffi-bindgen -- generate ...`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[features]
+default = []
+# Build the uniffi-bindgen binary. The build scripts opt in via `--features cli`.
+cli = ["uniffi/cli"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -41,8 +53,9 @@ base64 = "0.22"
 thiserror = "2"
 log = "0.4"
 
-# UniFFI for cross-language bindings (Kotlin/Swift)
-uniffi = { version = "0.29", features = ["tokio"] }
+# UniFFI for cross-language bindings (Kotlin/Swift). `cli` feature enables
+# uniffi_bindgen_main() used by the local uniffi-bindgen binary above.
+uniffi = { version = "0.29", features = ["tokio", "cli"] }
 
 # JSON helpers (often useful in client code)
 serde = { version = "1", features = ["derive"] }
