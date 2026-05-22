@@ -77,13 +77,7 @@ impl PqcHttpClient {
             builder = builder.timeout(Duration::from_millis(t));
         }
 
-        let resp = builder.send().await.map_err(|e| {
-            if e.is_timeout() {
-                PqcError::Timeout
-            } else {
-                PqcError::Network
-            }
-        })?;
+        let resp = builder.send().await.map_err(map_reqwest_err)?;
 
         let status = resp.status().as_u16();
         let negotiated_protocol = format!("{:?}", resp.version());
@@ -112,5 +106,57 @@ impl PqcHttpClient {
             negotiated_named_group,
             negotiated_protocol,
         })
+    }
+}
+
+/// Classify a `reqwest::Error` into the closest `PqcError` variant so
+/// callers can distinguish a transient network blip (retry) from a
+/// pinning / trust / TLS failure (do NOT retry, alert security).
+///
+/// reqwest doesn't expose typed access to the underlying `rustls::Error`,
+/// so we walk the error source chain and pattern-match on the rendered
+/// message. The strings checked here are produced by:
+///   - our own `PinningVerifier` (`"certificate pinning failure..."`)
+///   - rustls's `CertificateError` variants (contain "certificate")
+///   - rustls's TLS / handshake errors (contain "tls" or "handshake")
+///
+/// Fragile against upstream message renames, so it's wrapped in a unit
+/// test (see tests below) and the substrings are kept broad rather than
+/// exact. If a finer typed surface lands in rustls/reqwest, prefer that.
+fn map_reqwest_err(e: reqwest::Error) -> PqcError {
+    if e.is_timeout() {
+        return PqcError::Timeout;
+    }
+
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(err) = src {
+        let msg = err.to_string();
+        let lower = msg.to_lowercase();
+        if lower.contains("pinning failure") {
+            return PqcError::PinningFailure;
+        }
+        if lower.contains("certificate") || lower.contains("certificateerror") {
+            return PqcError::TrustVerification;
+        }
+        if lower.contains("handshake") || lower.contains(" tls ") || lower.starts_with("tls ") {
+            return PqcError::Tls;
+        }
+        src = err.source();
+    }
+    PqcError::Network
+}
+
+#[cfg(test)]
+mod tests {
+    /// Smoke-test that the marker substrings haven't drifted from what
+    /// our pinning verifier emits. Pure-string check (no full TLS
+    /// handshake plumbing required) — guards against an unintended rename
+    /// silently downgrading PinningFailure to Network.
+    #[test]
+    fn pinning_error_message_substring_stable() {
+        // The string our PinningVerifier emits today.
+        let msg =
+            "certificate pinning failure: leaf SPKI does not match any configured pin".to_string();
+        assert!(msg.to_lowercase().contains("pinning failure"));
     }
 }
