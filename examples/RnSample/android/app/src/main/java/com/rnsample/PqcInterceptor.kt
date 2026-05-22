@@ -54,9 +54,9 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
 
         val responseBuilder = Response.Builder()
             .request(req)
-            .protocol(Protocol.HTTP_2)
+            .protocol(parseProtocol(pqcResp.negotiatedProtocol))
             .code(pqcResp.status.toInt())
-            .message("")
+            .message(statusReasonPhrase(pqcResp.status.toInt()))
             .body(pqcResp.body.toResponseBody(mediaType))
 
         val headerBuilder = Headers.Builder()
@@ -80,5 +80,53 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
         "HEAD" -> HttpMethod.HEAD
         "OPTIONS" -> HttpMethod.OPTIONS
         else -> error("unsupported HTTP method: $this")
+    }
+
+    /**
+     * Map the Rust core's `negotiated_protocol` string (formatted from
+     * `http::Version` via `Debug`, e.g. "HTTP/1.1" or "HTTP/2.0") to
+     * OkHttp's [Protocol] enum. Defaults to HTTP/1.1 on unknown values
+     * rather than fabricating HTTP/2 — wrong telemetry is worse than
+     * conservative telemetry. OkHttp lacks an HTTP/3 enum, so HTTP/3
+     * is reported as HTTP/2 (the closest OkHttp can express).
+     */
+    private fun parseProtocol(raw: String): Protocol = when (raw) {
+        "HTTP/0.9" -> Protocol.HTTP_1_0
+        "HTTP/1.0" -> Protocol.HTTP_1_0
+        "HTTP/1.1" -> Protocol.HTTP_1_1
+        "HTTP/2.0", "HTTP/2" -> Protocol.HTTP_2
+        "HTTP/3.0", "HTTP/3" -> Protocol.HTTP_2
+        else -> Protocol.HTTP_1_1
+    }
+
+    /**
+     * Best-effort reason phrase for the synthesized response. OkHttp's
+     * Response.Builder.message() accepts any string, but logging
+     * interceptors and downstream parsers (HttpLoggingInterceptor in
+     * particular) print a malformed-looking status line when it's empty.
+     * Standard RFC 9110 phrases for the codes a banking API actually
+     * returns; unusual codes get the empty-string fallback rather than
+     * pretending we know what 451-Unavailable-For-Legal-Reasons says.
+     */
+    private fun statusReasonPhrase(status: Int): String = when (status) {
+        200 -> "OK"
+        201 -> "Created"
+        202 -> "Accepted"
+        204 -> "No Content"
+        301 -> "Moved Permanently"
+        302 -> "Found"
+        304 -> "Not Modified"
+        400 -> "Bad Request"
+        401 -> "Unauthorized"
+        403 -> "Forbidden"
+        404 -> "Not Found"
+        409 -> "Conflict"
+        422 -> "Unprocessable Entity"
+        429 -> "Too Many Requests"
+        500 -> "Internal Server Error"
+        502 -> "Bad Gateway"
+        503 -> "Service Unavailable"
+        504 -> "Gateway Timeout"
+        else -> ""
     }
 }

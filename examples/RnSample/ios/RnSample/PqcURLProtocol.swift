@@ -96,10 +96,24 @@ public final class PqcURLProtocol: URLProtocol {
                 }
                 headerFields["X-Pqc-Negotiated-Group"] = pqcResp.negotiatedNamedGroup
 
+                // Map the Rust core's `negotiated_protocol` string (formatted
+                // from `http::Version` via `Debug`, e.g. "HTTP/1.1") into a
+                // value HTTPURLResponse will accept. Defaults to HTTP/1.1 on
+                // unknown values rather than fabricating HTTP/2 — wrong
+                // telemetry is worse than conservative telemetry.
+                let httpVersion: String = {
+                    switch pqcResp.negotiatedProtocol {
+                    case "HTTP/0.9", "HTTP/1.0": return "HTTP/1.0"
+                    case "HTTP/1.1":              return "HTTP/1.1"
+                    case "HTTP/2.0", "HTTP/2":    return "HTTP/2.0"
+                    case "HTTP/3.0", "HTTP/3":    return "HTTP/3.0"
+                    default:                       return "HTTP/1.1"
+                    }
+                }()
                 guard let response = HTTPURLResponse(
                     url: url,
                     statusCode: Int(pqcResp.status),
-                    httpVersion: "HTTP/1.1",
+                    httpVersion: httpVersion,
                     headerFields: headerFields
                 ) else {
                     throw NSError(
