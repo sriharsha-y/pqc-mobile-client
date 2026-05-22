@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rustls::ClientConfig;
-use rustls_platform_verifier::ConfigVerifierExt;
+use rustls_platform_verifier::BuilderVerifierExt;
 
 use crate::config::PqcConfig;
 use crate::error::PqcError;

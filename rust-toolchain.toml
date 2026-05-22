@@ -1,6 +1,7 @@
 [toolchain]
-# Pin a recent stable Rust. Bump as needed.
-channel = "1.87"
+# Tracks the latest stable Rust. Pin to a specific version (e.g. "1.95")
+# if reproducibility-across-machines becomes a concern.
+channel = "stable"
 components = ["rustfmt", "clippy"]
 targets = [
     # Android

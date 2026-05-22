@@ -131,7 +131,13 @@ cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.c
 
 ## Status
 
-**Scaffold.** Crate compiles, integration recipes documented for native and React Native on both platforms, cross-compile scripts ready. Cert-pinning `ServerCertVerifier` and accurate `negotiated_named_group` reporting are tracked as TODOs in the source.
+**Baseline verified.** Crate compiles and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated (verified on Rust stable `1.95`, macOS host). Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
+
+Outstanding items tracked as TODOs in source:
+- SPKI cert-pinning `ServerCertVerifier` (config field present; verifier impl pending).
+- Accurate `negotiated_named_group` reporting (currently hardcoded; needs hyper connector hook).
+- CI workflows for cross-compile validation.
+- Sample RN app exercising the integration end-to-end.
 
 ## License
 

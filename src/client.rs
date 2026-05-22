@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
@@ -19,7 +18,7 @@ pub struct PqcHttpClient {
 }
 
 impl PqcHttpClient {
-    pub fn new(config: PqcConfig) -> Arc<Self> {
+    pub fn new(config: PqcConfig) -> Self {
         let tls = build_tls_config(&config).expect("TLS config build failed");
 
         let mut builder = reqwest::Client::builder()
@@ -41,10 +40,10 @@ impl PqcHttpClient {
 
         let client = builder.build().expect("reqwest client build failed");
 
-        Arc::new(Self {
+        Self {
             inner: client,
             default_timeout: config.default_timeout_ms.map(Duration::from_millis),
-        })
+        }
     }
 
     pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
@@ -80,8 +79,6 @@ impl PqcHttpClient {
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {
                 PqcError::Timeout
-            } else if e.is_connect() || e.is_request() {
-                PqcError::Network
             } else {
                 PqcError::Network
             }

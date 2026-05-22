@@ -26,5 +26,8 @@ async fn pq_handshake_cloudflare() {
 
     let resp = client.request(req).await.expect("request should succeed");
     assert!(resp.status < 500, "unexpected status: {}", resp.status);
-    println!("status={} group={}", resp.status, resp.negotiated_named_group);
+    println!(
+        "status={} group={}",
+        resp.status, resp.negotiated_named_group
+    );
 }
