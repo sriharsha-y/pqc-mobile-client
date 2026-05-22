@@ -1,19 +1,14 @@
 name: android
 
-# PR-only — the merge commit is the same SHA main will have after merge,
-# so push:main would be a redundant re-test. release.yml builds Android
-# artifacts when a release is cut.
+# Manual-only. The Android cross-compile pipeline is expensive enough
+# (~6 ubuntu-minutes including cargo-ndk install) that we don't run it
+# on every PR — `check.yml` (which includes cargo audit + cargo deny)
+# covers fmt / clippy / unit + smoke tests on every PR, and release.yml
+# builds Android artifacts when a release is cut.
 #
-# paths-ignore: docs-only PRs don't need the Android cross-compile pipeline.
+# Click "Run workflow" on the Actions tab before merging any PR that
+# touches the Rust core, build scripts, or NDK-relevant config.
 on:
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CONTRIBUTING.md'
-      - 'LICENSE'
-      - '.gitignore'
   workflow_dispatch:
 
 concurrency:
