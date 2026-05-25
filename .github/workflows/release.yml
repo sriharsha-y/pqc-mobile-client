@@ -36,6 +36,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # iOS deployment-target floor — must match PqcCore.podspec's
+  # `s.platform = :ios, '15.1'`. Pinning here (rather than relying on
+  # build-ios.sh's `${IPHONEOS_DEPLOYMENT_TARGET:-15.1}` default) keeps
+  # the contract in one place: bumping the floor requires changing this
+  # workflow AND the podspec together.
+  IPHONEOS_DEPLOYMENT_TARGET: "15.1"
 
 jobs:
   release-please:
@@ -129,6 +135,24 @@ jobs:
 
       - name: Build
         run: ./scripts/build-ios.sh
+
+      # Defense in depth: the `cli` cargo feature is supposed to keep
+      # uniffi-bindgen + clap + goblin out of the iOS static archive. If
+      # a future Cargo.toml edit, --all-features invocation, or workspace
+      # addition accidentally re-activates the feature for the cross-
+      # compile, the archive balloons from ~58 MB back to ~90 MB and
+      # ships bloated assets. Grep the .a for telltale CLI symbols and
+      # fail the release if any appear.
+      - name: Guard against CLI-feature bloat regression
+        run: |
+          AR=generated/PqcCore.xcframework/ios-arm64/libpqc_client.a
+          if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
+            echo "::error::iOS static archive contains uniffi-bindgen CLI symbols (clap / goblin / uniffi_bindgen_main)."
+            echo "The 'cli' cargo feature appears to have leaked into the cross-compile."
+            echo "Audit Cargo.toml's uniffi dep features and the build invocation in scripts/build-ios.sh."
+            exit 1
+          fi
+          echo "OK: no CLI symbols in $AR"
 
       - name: Package
         run: |

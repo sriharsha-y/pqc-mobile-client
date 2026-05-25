@@ -62,7 +62,11 @@ Commits should appear authored by the human who made the change. **No** AI/model
 ## Local development
 
 ```bash
-./scripts/setup.sh                 # rustup targets, cargo-ndk, uniffi-bindgen-cli
+./scripts/setup.sh                 # rustup targets, cargo-ndk
+# uniffi-bindgen is built from the in-tree `[[bin]]` target via
+# `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
+# The `--features cli` gate is critical: it keeps clap / goblin /
+# uniffi_bindgen out of the iOS / Android cross-compiled archives.
 cargo test --release               # unit + smoke tests
 ./scripts/build-android.sh         # cross-compile + Kotlin bindings
 ./scripts/build-ios.sh             # XCFramework + Swift bindings

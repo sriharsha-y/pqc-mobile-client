@@ -17,6 +17,17 @@ Pod::Spec.new do |s|
   s.source_files      = 'generated/swift/pqc.swift'
   s.vendored_frameworks = 'generated/PqcCore.xcframework'
 
+  # static_framework = true is required when a Pod both vendors an
+  # XCFramework AND ships Swift sources, especially under
+  # `use_frameworks!` (common in RN 0.74+ New Architecture). Without it
+  # CocoaPods may build PqcCore as a clang framework whose auto-generated
+  # module map doesn't re-export the vendored XCFramework's `pqcFFI`
+  # module — `import PqcCore` would succeed at compile but link with
+  # `Undefined symbol: _$s6pqcFFI...` errors. Setting this explicitly
+  # keeps the integration working across both static-lib and framework
+  # link modes.
+  s.static_framework = true
+
   s.pod_target_xcconfig = {
     'OTHER_LDFLAGS' => '-lc++',
   }

@@ -44,7 +44,11 @@ lipo -create \
 echo "==> Generating Swift bindings"
 rm -rf generated/swift
 mkdir -p generated/swift
-cargo run --release --bin uniffi-bindgen -- generate \
+# --features cli enables the uniffi-bindgen binary (gated by
+# required-features in Cargo.toml). The cross-compile builds above are
+# intentionally feature-free so clap / goblin / uniffi_bindgen don't
+# get linked into the .a archive shipped to consumers.
+cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --language swift \
     --out-dir generated/swift \
     src/pqc.udl

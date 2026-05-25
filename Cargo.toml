@@ -13,14 +13,23 @@ name = "pqc_client"
 
 # UniFFI's recommended pattern: each crate provides its own uniffi-bindgen
 # binary that just calls uniffi::uniffi_bindgen_main(). Run via
-# `cargo run --bin uniffi-bindgen -- generate ...`.
+# `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
+#
+# `required-features = ["cli"]` is the critical bit: without it, cross-
+# compiling the library to iOS / Android pulled the entire uniffi_bindgen
+# tree (clap, goblin, the whole CLI) into the static archive, ballooning
+# the iOS arm64 .a from ~50 MB to ~90 MB. Gating the bin on the feature
+# means `cargo build --release --target aarch64-apple-ios` never asks for
+# `cli` and never links those host-only tools into the iOS lib.
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
 
 [features]
 default = []
-# Build the uniffi-bindgen binary. The build scripts opt in via `--features cli`.
+# Enable host build of the uniffi-bindgen binary. Adds clap + goblin +
+# uniffi_bindgen to the dep tree — never wanted in mobile cross-compiles.
 cli = ["uniffi/cli"]
 
 [dependencies]
@@ -53,17 +62,10 @@ base64 = "0.22"
 thiserror = "2"
 log = "0.4"
 
-# UniFFI for cross-language bindings (Kotlin/Swift). `cli` feature enables
-# uniffi_bindgen_main() used by the local uniffi-bindgen binary above.
-uniffi = { version = "0.29", features = ["tokio", "cli"] }
-
-# JSON helpers (often useful in client code)
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Async helpers
-async-trait = "0.1"
-futures = "0.3"
+# UniFFI for cross-language bindings (Kotlin/Swift). `cli` is NOT enabled
+# here — it's gated behind the local `cli` feature flag, which only the
+# uniffi-bindgen binary build opts into. See the [[bin]] section above.
+uniffi = { version = "0.29", features = ["tokio"] }
 
 [build-dependencies]
 uniffi = { version = "0.29", features = ["build"] }
