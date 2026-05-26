@@ -26,6 +26,23 @@ Pod::Spec.new do |s|
   s.source_files      = 'pqc.swift'
   s.vendored_frameworks = 'PqcCore.xcframework'
 
+  # System frameworks the vendored static archive links against:
+  #   - Security:           rustls-platform-verifier (SecTrust*, SecPolicy*)
+  #   - CFNetwork:          proxy / trust-settings introspection
+  #   - SystemConfiguration: reachability / proxy info on Apple platforms
+  #   - Foundation:         Swift auto-link but explicit is harmless
+  # Without these declared, consumer apps fail to link with
+  # "Undefined symbol: _SecTrustEvaluateWithError" — static .a files
+  # don't carry LC_LINKER_OPTION the way dylibs/frameworks do, so the
+  # consumer's project must learn about required frameworks elsewhere.
+  s.frameworks = ['Security', 'CFNetwork', 'SystemConfiguration', 'Foundation']
+
+  # libc++ is needed because aws-lc-sys's C++ runtime support symbols
+  # come from libc++ on Apple platforms. s.libraries is the idiomatic
+  # form; CocoaPods aggregates it across pods and applies it to the
+  # right link phase.
+  s.libraries = 'c++'
+
   # static_framework = true is required when a Pod both vendors an
   # XCFramework AND ships Swift sources, especially under
   # `use_frameworks!` (common in RN 0.74+ New Architecture). Without it
@@ -36,8 +53,4 @@ Pod::Spec.new do |s|
   # keeps the integration working across both static-lib and framework
   # link modes.
   s.static_framework = true
-
-  s.pod_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-lc++',
-  }
 end
