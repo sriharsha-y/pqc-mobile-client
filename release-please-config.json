@@ -7,7 +7,10 @@
     ".": {
       "package-name": "pqc_client",
       "extra-files": [
-        "PqcCore.podspec"
+        {
+          "type": "generic",
+          "path": "PqcCore.podspec"
+        }
       ]
     }
   }
