@@ -235,3 +235,98 @@ jobs:
             dist/PqcCore-*.zip \
             --repo "${{ github.repository }}" \
             --clobber
+
+  publish-swiftpm:
+    name: publish-swiftpm
+    needs: [release-please, attach-assets]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      SWIFTPM_BRANCH: swiftpm
+    steps:
+      # Templates + LICENSE live on main; we read them from this checkout
+      # and write the rendered files into a fresh clone of the swiftpm
+      # branch (see "Update swiftpm branch" step).
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-checkout
+
+      - name: Download release asset, checksum, render Package.swift
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          STAGE="$(mktemp -d)"
+
+          gh release download "$TAG" \
+            -p "PqcCore-${VERSION}.zip" \
+            -D "$STAGE" \
+            --repo "${{ github.repository }}"
+
+          # SPM verifies the entire zip against this checksum at resolve
+          # time. swift package compute-checksum is the standard tool.
+          CHECKSUM="$(swift package compute-checksum "$STAGE/PqcCore-${VERSION}.zip")"
+
+          # The release zip carries pqc.swift at top level; SPM ignores
+          # non-xcframework content for binaryTarget, so we extract it
+          # separately to populate the swiftpm branch's Sources/PqcCore/.
+          unzip -j "$STAGE/PqcCore-${VERSION}.zip" pqc.swift -d "$STAGE/"
+
+          sed \
+            -e "s|{{VERSION}}|${VERSION}|g" \
+            -e "s|{{CHECKSUM}}|${CHECKSUM}|g" \
+            main-checkout/.github/swiftpm-template/Package.swift.in \
+            > "$STAGE/Package.swift"
+
+          cp main-checkout/LICENSE "$STAGE/"
+          cp main-checkout/.github/swiftpm-template/README.md "$STAGE/"
+
+          echo "STAGE=$STAGE" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Update swiftpm branch and re-point release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+
+          if git ls-remote --exit-code --heads "$REPO_URL" "$SWIFTPM_BRANCH" >/dev/null 2>&1; then
+            # Branch exists: clone single-branch and clear its tracked files.
+            git clone --branch "$SWIFTPM_BRANCH" --single-branch "$REPO_URL" .
+            git rm -rf . 2>/dev/null || true
+          else
+            # First run: bootstrap an orphan branch.
+            git init -b "$SWIFTPM_BRANCH"
+            git remote add origin "$REPO_URL"
+          fi
+
+          # Lay down the new tree.
+          mkdir -p Sources/PqcCore
+          cp "$STAGE/Package.swift" .
+          cp "$STAGE/pqc.swift" Sources/PqcCore/
+          cp "$STAGE/LICENSE" .
+          cp "$STAGE/README.md" .
+
+          git add -A
+          git commit -m "release: ${TAG}"
+          git push -u origin "HEAD:$SWIFTPM_BRANCH"
+
+          # Move the release tag from the release-please commit on main
+          # to this swiftpm-branch commit. SPM resolves `from: "X.Y.Z"`
+          # by walking tags and reading Package.swift at the tagged
+          # commit, so the tag must point where Package.swift lives.
+          # Force is required because release-please already created the
+          # tag pointing at main.
+          git tag -f "$TAG"
+          git push --force origin "$TAG"
