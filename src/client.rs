@@ -156,9 +156,19 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
         return PqcError::Timeout;
     }
 
+    // The outermost reqwest error Display embeds the request URL
+    // ("error sending request for url (https://api.example.com/v1/certificates/list)"),
+    // which contaminates the substring match: a URL containing "certificate"
+    // would silently map to TrustVerification even for a plain DNS failure.
+    // Strip the URL from every frame before lowercase matching.
+    let url_str = e.url().map(|u| u.to_string());
+
     let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
     while let Some(err) = src {
-        let msg = err.to_string();
+        let mut msg = err.to_string();
+        if let Some(ref u) = url_str {
+            msg = msg.replace(u, "");
+        }
         let lower = msg.to_lowercase();
         if lower.contains("pinning failure") {
             return PqcError::PinningFailure;
@@ -186,5 +196,18 @@ mod tests {
         let msg =
             "certificate pinning failure: leaf SPKI does not match any configured pin".to_string();
         assert!(msg.to_lowercase().contains("pinning failure"));
+    }
+
+    /// Regression: a URL containing "certificate" in its path must not
+    /// cause map_reqwest_err to misclassify a plain network failure as
+    /// TrustVerification. Tests the URL-stripping branch.
+    #[test]
+    fn url_substring_does_not_contaminate_classification() {
+        let url = "https://api.example.com/v1/certificates/list";
+        let msg = format!("error sending request for url ({}): connection refused", url);
+        let stripped = msg.replace(url, "");
+        let lower = stripped.to_lowercase();
+        assert!(!lower.contains("certificate"));
+        assert!(!lower.contains("pinning failure"));
     }
 }
