@@ -269,12 +269,26 @@ jobs:
     name: publish-swiftpm
     needs: [release-please, attach-assets]
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: macos-latest
+    # Linux runner — this job only needs `swift package compute-checksum`,
+    # `unzip`, `sed`, and `git`. None of that requires Xcode. macOS minutes
+    # cost 10x against the included budget, so we keep this off macos-latest;
+    # build-ios is the only iOS job that genuinely needs Xcode.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       SWIFTPM_BRANCH: swiftpm
     steps:
+      # Install the Swift toolchain on Linux for `swift package
+      # compute-checksum` and `swift package dump-package`. The action
+      # downloads the official swift.org Linux binary; Package.swift's
+      # platforms: [.iOS(.v13)] declaration parses fine on Linux Swift
+      # because we never build the package — we only checksum and dump.
+      - name: Set up Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '5.9'
+
       # Templates + LICENSE live on main; we read them from this checkout
       # and write the rendered files into a fresh clone of the swiftpm
       # branch (see "Update swiftpm branch" step).
