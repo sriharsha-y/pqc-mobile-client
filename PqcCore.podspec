@@ -26,16 +26,18 @@ Pod::Spec.new do |s|
   s.source_files      = 'pqc.swift'
   s.vendored_frameworks = 'PqcCore.xcframework'
 
-  # System frameworks the vendored static archive links against:
-  #   - Security:           rustls-platform-verifier (SecTrust*, SecPolicy*)
-  #   - CFNetwork:          proxy / trust-settings introspection
-  #   - SystemConfiguration: reachability / proxy info on Apple platforms
-  #   - Foundation:         Swift auto-link but explicit is harmless
-  # Without these declared, consumer apps fail to link with
-  # "Undefined symbol: _SecTrustEvaluateWithError" — static .a files
-  # don't carry LC_LINKER_OPTION the way dylibs/frameworks do, so the
-  # consumer's project must learn about required frameworks elsewhere.
-  s.frameworks = ['Security', 'CFNetwork', 'SystemConfiguration', 'Foundation']
+  # The vendored static archive references Security.framework symbols
+  # (rustls-platform-verifier's SecTrust* / SecKey* / SecCertificate*
+  # calls). Static .a files don't carry LC_LINKER_OPTION the way dylibs
+  # do, so without this declaration the consumer's project fails to
+  # link with "Undefined symbol: _kSecKeyAlgorithm...".
+  #
+  # Verified by `nm -u` on both ios-arm64 and ios-arm64_x86_64-simulator
+  # slices: the only Apple-framework symbol prefixes referenced are
+  # _kSec* (Security) and _CCR* (CommonCrypto, which is in libSystem
+  # and auto-linked — no framework declaration needed). CFNetwork,
+  # SystemConfiguration, and Foundation are NOT referenced.
+  s.frameworks = 'Security'
 
   # libc++ is needed because aws-lc-sys's C++ runtime support symbols
   # come from libc++ on Apple platforms. s.libraries is the idiomatic
