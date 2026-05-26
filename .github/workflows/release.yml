@@ -365,6 +365,15 @@ jobs:
 
           git add -A
           git commit -m "release: ${TAG}"
+
+          # Fail fast if the rendered Package.swift is malformed. This
+          # runs BEFORE we push the branch and move the tag; a broken
+          # manifest at this point would otherwise be visible to every
+          # SPM consumer the moment the tag moves. swift package
+          # dump-package parses the manifest and prints the resolved
+          # model, exiting non-zero on syntax/type errors.
+          swift package --package-path . dump-package > /dev/null
+
           git push -u origin "HEAD:$SWIFTPM_BRANCH"
 
           # Move the release tag from the release-please commit on main
