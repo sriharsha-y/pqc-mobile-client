@@ -40,12 +40,14 @@ android {
         buildConfig = false
     }
 
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-            withJavadocJar()
-        }
-    }
+    // NOTE: do NOT declare `publishing { singleVariant("release") { ... } }`
+    // here. Vanniktech's maven-publish plugin (configured below with
+    // publishToMavenCentral(...) + AndroidSingleVariantLibrary, which is
+    // the default for android-library projects) internally calls
+    // singleVariant("release") { withSourcesJar(); withJavadocJar() }
+    // itself. Declaring it manually as well triggers a Gradle error:
+    //   "Using singleVariant publishing DSL multiple times to publish
+    //    variant 'release' to component 'release' is not allowed."
 }
 
 kotlin {
