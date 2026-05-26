@@ -85,10 +85,14 @@ public final class PqcURLProtocol: URLProtocol {
                         ]
                     )
                 }
+                // URLRequest.allHTTPHeaderFields is [String: String] — Apple
+                // already comma-joins duplicate headers upstream, so we wrap
+                // each value in a single-element array to satisfy the
+                // [String: [String]] shape on HttpRequest.headers.
                 let pqcReq = HttpRequest(
                     method: req.httpMethod.flatMap(Self.parseMethod) ?? .get,
                     url: url.absoluteString,
-                    headers: req.allHTTPHeaderFields ?? [:],
+                    headers: (req.allHTTPHeaderFields ?? [:]).mapValues { [$0] },
                     body: req.httpBody,
                     timeoutMs: nil
                 )

@@ -41,7 +41,10 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
                 HttpRequest(
                     method = req.method.toPqcMethod(),
                     url = req.url.toString(),
-                    headers = req.headers.toMap(),
+                    // toMultimap() preserves duplicate header values
+                    // (Kotlin's Iterable.toMap() would drop all but the
+                    // last entry for any repeated header name).
+                    headers = req.headers.toMultimap(),
                     body = bodyBytes,
                     timeoutMs = null,
                 )
