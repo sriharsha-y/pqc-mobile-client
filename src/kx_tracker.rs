@@ -81,9 +81,10 @@ impl SupportedKxGroup for TrackingKxGroup {
 /// the actually-selected group is recorded on every handshake.
 ///
 /// Wrappers are leaked once (they have `'static` lifetime in rustls's
-/// `kx_groups: Vec<&'static dyn SupportedKxGroup>` field), so this should
-/// be called once at startup — wrapping the same provider repeatedly
-/// would leak memory on every call.
+/// `kx_groups: Vec<&'static dyn SupportedKxGroup>` field). To keep that
+/// leak bounded, `tls.rs` calls this through a `OnceLock` per provider
+/// variant — every `PqcHttpClient::new` reuses the same wrapped
+/// provider rather than allocating a fresh set.
 pub fn instrument_provider(provider: CryptoProvider) -> CryptoProvider {
     let wrapped: Vec<&'static dyn SupportedKxGroup> = provider
         .kx_groups
