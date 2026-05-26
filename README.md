@@ -114,7 +114,7 @@ The flow:
    - creates a [GitHub Release](https://github.com/sriharsha-y/pqc-mobile-client/releases) at the tag with the CHANGELOG entries as the body
 5. The same workflow's downstream jobs build Android + iOS artifacts and attach them as release assets:
    - `pqc-mobile-client-<version>-android.tar.gz` (`.so` files + Kotlin bindings)
-   - `pqc-mobile-client-<version>-ios.zip` (XCFramework + Swift bindings)
+   - `PqcCore-<version>.zip` (XCFramework + Swift binding + LICENSE — consumed by `PqcCore.podspec` over `:http`)
 
 No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained automatically.
 

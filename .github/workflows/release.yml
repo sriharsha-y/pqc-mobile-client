@@ -181,34 +181,28 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           mkdir -p dist
 
-          # Manual-vendor bundle: keep the existing layout (PqcCore.xcframework
-          # + swift/) for consumers that drop the assets into their project
-          # tree by hand or want to inspect the bindings separately.
-          ARCHIVE="pqc-mobile-client-${VERSION}-ios.zip"
-          (cd generated && zip -r "../dist/${ARCHIVE}" PqcCore.xcframework swift)
-          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
-
-          # CocoaPods-consumable bundle: PqcCore.xcframework + pqc.swift
-          # + LICENSE at the top level, so PqcCore.podspec's :http source
-          # unpacks to a Pod root where source_files / vendored_frameworks
-          # paths resolve directly.
-          COCOAPODS_ARCHIVE="PqcCore-${VERSION}.zip"
-          STAGE="dist/_cocoapods-stage"
+          # Single iOS release asset: PqcCore.xcframework + pqc.swift +
+          # LICENSE at the top level. This is what PqcCore.podspec's
+          # :http source unpacks into the Pod root, and what SPM (planned)
+          # will reference as a binaryTarget zip. Also serves as the
+          # manual-vendor distribution — the xcframework already bundles
+          # its own Headers/ + modulemap per slice, and pqc.swift is the
+          # only Swift binding consumers need outside the framework.
+          ARCHIVE="PqcCore-${VERSION}.zip"
+          STAGE="dist/_stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -R generated/PqcCore.xcframework "$STAGE/"
           cp generated/swift/pqc.swift "$STAGE/"
           cp LICENSE "$STAGE/"
-          (cd "$STAGE" && zip -r "../${COCOAPODS_ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
+          (cd "$STAGE" && zip -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
           rm -rf "$STAGE"
-          echo "COCOAPODS_ARCHIVE=${COCOAPODS_ARCHIVE}" >> $GITHUB_ENV
+          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pqc-ios
-          path: |
-            dist/${{ env.ARCHIVE }}
-            dist/${{ env.COCOAPODS_ARCHIVE }}
+          path: dist/${{ env.ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
 
@@ -238,7 +232,6 @@ jobs:
         run: |
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
             dist/pqc-mobile-client-*-android.tar.gz \
-            dist/pqc-mobile-client-*-ios.zip \
             dist/PqcCore-*.zip \
             --repo "${{ github.repository }}" \
             --clobber
