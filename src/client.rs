@@ -116,11 +116,13 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|_| PqcError::InvalidResponse)?
-            .to_vec();
+        // A TCP reset, h2 GOAWAY, or carrier-handover during body read is
+        // a transport-level failure, not a response-shape one. Routing
+        // through map_reqwest_err lets it surface as Network / Timeout /
+        // Tls, so the retry contract documented above also covers
+        // body-phase failures. InvalidResponse is reserved for cases
+        // where the bytes arrived but were structurally unusable.
+        let body = resp.bytes().await.map_err(map_reqwest_err)?.to_vec();
 
         // The KEX group rustls selected on the most-recent handshake.
         // See kx_tracker module for the recording mechanism and the
