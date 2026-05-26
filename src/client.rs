@@ -45,7 +45,13 @@ impl PqcHttpClient {
             return Err(PqcError::InvalidRequest);
         }
 
-        let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
+        // reqwest builder failures at this point are not caller-config
+        // errors — pin/base64 validation already ran in build_tls_config.
+        // What's left is TLS-stack init or platform trust-store access,
+        // both of which fit PqcError::Tls better than InvalidRequest.
+        // Mis-routing them as InvalidRequest tells the consumer to fix
+        // their config when there's nothing they can change.
+        let client = builder.build().map_err(|_| PqcError::Tls)?;
 
         Ok(Self {
             inner: client,
