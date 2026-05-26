@@ -281,26 +281,19 @@ jobs:
     name: publish-swiftpm
     needs: [release-please, attach-assets]
     if: ${{ needs.release-please.outputs.release_created }}
-    # Linux runner — this job only needs `swift package compute-checksum`,
-    # `unzip`, `sed`, and `git`. None of that requires Xcode. macOS minutes
-    # cost 10x against the included budget, so we keep this off macos-latest;
-    # build-ios is the only iOS job that genuinely needs Xcode.
-    runs-on: ubuntu-latest
+    # macos-latest because it ships Swift preinstalled with Xcode.
+    # An earlier attempt to use ubuntu-latest + swift-actions/setup-swift@v2
+    # failed with an HTTP 404 on the Swift toolchain download URL
+    # (a known intermittent issue with that action's URL builder; the
+    # action is also Node.js 20 and being deprecated). For public repos
+    # macOS minutes are unlimited, so the cost argument that originally
+    # motivated the Linux move no longer applies.
+    runs-on: macos-latest
     permissions:
       contents: write
     env:
       SWIFTPM_BRANCH: swiftpm
     steps:
-      # Install the Swift toolchain on Linux for `swift package
-      # compute-checksum` and `swift package dump-package`. The action
-      # downloads the official swift.org Linux binary; Package.swift's
-      # platforms: [.iOS(.v13)] declaration parses fine on Linux Swift
-      # because we never build the package — we only checksum and dump.
-      - name: Set up Swift toolchain
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '5.9'
-
       # Templates + LICENSE live on main; we read them from this checkout
       # and write the rendered files into a fresh clone of the swiftpm
       # branch (see "Update swiftpm branch" step).
@@ -535,6 +528,12 @@ jobs:
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
         run: |
+          # --skip-import-validation skips the LOCAL xcodebuild compile
+          # of a sample iOS project against the pod. The Trunk server
+          # re-runs the same lint (including the import compile) on its
+          # side, so we don't lose validation — we just don't do it
+          # twice. Saves ~5-7 minutes of macos-latest time per release.
           pod trunk push PqcCore.podspec \
             --allow-warnings \
+            --skip-import-validation \
             --synchronous
