@@ -216,7 +216,10 @@ mod tests {
     #[test]
     fn url_substring_does_not_contaminate_classification() {
         let url = "https://api.example.com/v1/certificates/list";
-        let msg = format!("error sending request for url ({}): connection refused", url);
+        let msg = format!(
+            "error sending request for url ({}): connection refused",
+            url
+        );
         let stripped = msg.replace(url, "");
         let lower = stripped.to_lowercase();
         assert!(!lower.contains("certificate"));
