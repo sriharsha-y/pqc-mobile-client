@@ -25,6 +25,12 @@ Pod::Spec.new do |s|
 
   s.source_files      = 'pqc.swift'
   s.vendored_frameworks = 'PqcCore.xcframework'
+  # Defensive: tell CocoaPods to preserve the xcframework directory
+  # verbatim when synthesising the Pods/ tree. Modern CocoaPods (1.10+)
+  # handles vendored_frameworks correctly without this for :git sources,
+  # but :http sources occasionally hit edge cases where slices get
+  # stripped during Pod target install. Cheap insurance.
+  s.preserve_paths    = 'PqcCore.xcframework'
 
   # The vendored static archive references Security.framework symbols
   # (rustls-platform-verifier's SecTrust* / SecKey* / SecCertificate*
