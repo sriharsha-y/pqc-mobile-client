@@ -87,7 +87,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
         val pqcReq = HttpRequest(
             method = req.method.toPqcMethod(),
             url = req.url.toString(),
-            headers = req.headers.toMap(),
+            headers = req.headers.toMultimap(),
             body = req.body?.let { okio.Buffer().also { b -> it.writeTo(b) }.readByteArray() },
             timeoutMs = null,
         )
@@ -200,7 +200,7 @@ suspend fun fetchBalance(): String {
     val resp = pqc.request(HttpRequest(
         method = HttpMethod.GET,
         url = "https://api.bank.example/accounts/123/balance",
-        headers = mapOf("Authorization" to "Bearer $token"),
+        headers = mapOf("Authorization" to listOf("Bearer $token")),
         body = null,
         timeoutMs = null,
     ))
@@ -236,7 +236,7 @@ Debug-build verification call:
 val resp = pqc.request(HttpRequest(
     method = HttpMethod.GET,
     url = "https://pq.cloudflareresearch.com/",
-    headers = emptyMap(), body = null, timeoutMs = 5000UL,
+    headers = emptyMap<String, List<String>>(), body = null, timeoutMs = 5000UL,
 ))
 android.util.Log.i("PQC", "negotiated group: ${resp.negotiatedNamedGroup}")
 ```

@@ -109,7 +109,7 @@ final class PqcURLProtocol: URLProtocol {
                 let pqcReq = HttpRequest(
                     method: req.httpMethod.flatMap(HttpMethod.from) ?? .get,
                     url: req.url!.absoluteString,
-                    headers: (req.allHTTPHeaderFields ?? [:]),
+                    headers: (req.allHTTPHeaderFields ?? [:]).mapValues { [$0] },
                     body: req.httpBody,
                     timeoutMs: nil
                 )
@@ -204,7 +204,7 @@ func fetchBalance() async throws -> Data {
     let resp = try await pqc.request(req: HttpRequest(
         method: .get,
         url: "https://api.bank.example/accounts/123/balance",
-        headers: ["Authorization": "Bearer \(token)"],
+        headers: ["Authorization": ["Bearer \(token)"]],
         body: nil,
         timeoutMs: nil
     ))
@@ -265,7 +265,7 @@ Task {
     let resp = try await PqcURLProtocol.client.request(req: HttpRequest(
         method: .get,
         url: "https://pq.cloudflareresearch.com/",
-        headers: [:], body: nil, timeoutMs: 5000
+        headers: [:] as [String: [String]], body: nil, timeoutMs: 5000
     ))
     print("negotiated group:", resp.negotiatedNamedGroup)
 }
