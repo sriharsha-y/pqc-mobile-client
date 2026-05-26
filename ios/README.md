@@ -49,9 +49,29 @@ Once the pod is also published to the CocoaPods trunk registry (planned), the sy
 pod 'PqcCore', '~> 0.2.0'
 ```
 
-### Swift Package Manager
+### Swift Package Manager (recommended for native iOS apps)
 
-Planned. Will resolve `Package.swift` from a dedicated `swiftpm` branch that points at the same release-asset XCFramework zip. Until shipped, native iOS apps can use CocoaPods above.
+In your app's `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.2.0")
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "PqcCore", package: "pqc-mobile-client"),
+        ]
+    )
+]
+```
+
+Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
+
+Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at the `swiftpm` branch's `Package.swift`. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches the matching release asset (`PqcCore-0.2.0.zip`) — same artifact CocoaPods consumes. SPM verifies the SHA256 checksum at download time.
+
+The `swiftpm` branch is auto-maintained by the release workflow. Do not consume `main` directly via SPM — `main` has no `Package.swift` at root, only the Rust crate sources.
 
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 
