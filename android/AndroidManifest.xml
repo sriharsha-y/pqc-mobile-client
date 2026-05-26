@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Minimal manifest — AGP 8+ takes the package from `namespace` in
+     build.gradle.kts. No permissions or components are needed; the
+     library never starts an activity or service of its own. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
