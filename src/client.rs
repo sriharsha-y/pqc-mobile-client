@@ -86,7 +86,19 @@ impl PqcHttpClient {
         let resp = builder.send().await.map_err(map_reqwest_err)?;
 
         let status = resp.status().as_u16();
-        let negotiated_protocol = format!("{:?}", resp.version());
+        // The UDL contract (pqc.udl) documents this field as the
+        // negotiated ALPN protocol id ("h2", "http/1.1"). `http::Version`
+        // Debug renders as "HTTP/2.0" / "HTTP/1.1", which is a different
+        // string and breaks string-equality checks in consumer code.
+        // Translate explicitly so the value matches the documented contract.
+        let negotiated_protocol = match resp.version() {
+            reqwest::Version::HTTP_09 => "http/0.9".to_string(),
+            reqwest::Version::HTTP_10 => "http/1.0".to_string(),
+            reqwest::Version::HTTP_11 => "http/1.1".to_string(),
+            reqwest::Version::HTTP_2 => "h2".to_string(),
+            reqwest::Version::HTTP_3 => "h3".to_string(),
+            other => format!("{:?}", other),
+        };
 
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         for (k, v) in resp.headers() {
