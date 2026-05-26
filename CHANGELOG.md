@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.2.0...v0.2.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* **release:** unblock all three publish channels on v0.2.1 ([fe74ecb](https://github.com/sriharsha-y/pqc-mobile-client/commit/fe74ecb4659471b42cd12abca7cc00ebd775ec4e))
+
 ## [0.2.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.1.1...v0.2.0) (2026-05-26)
 
 
