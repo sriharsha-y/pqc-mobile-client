@@ -452,3 +452,34 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSWORD }}
         run: gradle publishAndReleaseToMavenCentral --no-configuration-cache
+
+  publish-cocoapods:
+    name: publish-cocoapods
+    needs: [release-please, attach-assets]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CocoaPods Trunk registry stores podspecs centrally so
+      # consumers can write `pod 'PqcCore', '~> 0.2.0'` without the
+      # long :podspec URL form. `pod trunk push` lints the podspec
+      # against the live :http source (which by now has been uploaded
+      # by attach-assets at the matching version tag), then registers
+      # the spec under the authenticated session.
+      #
+      # COCOAPODS_TRUNK_TOKEN is read from the env by the CocoaPods
+      # CLI. Obtain it once locally via
+      #   `pod trunk register <email> '<name>'`
+      # which mails a verification link; clicking the link populates
+      # ~/.cocoapods/trunk/token. Copy that token value into the
+      # COCOAPODS_TRUNK_TOKEN repo secret.
+      - name: Publish podspec to CocoaPods Trunk
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+        run: |
+          pod trunk push PqcCore.podspec \
+            --allow-warnings \
+            --synchronous

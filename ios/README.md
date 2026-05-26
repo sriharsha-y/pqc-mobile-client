@@ -35,19 +35,21 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 
 ### CocoaPods (recommended for RN apps; works for native)
 
-The project's `PqcCore.podspec` points at the GitHub Release asset, so consumers do **not** need a local build of this repo. In the consumer's `Podfile`:
+The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
+
+```ruby
+pod 'PqcCore', '~> 0.2.0'
+```
+
+`pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
+
+Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
 pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.2.0/PqcCore.podspec'
 ```
 
-Pin the version in the URL to whatever release you want. CocoaPods downloads the matching `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the release on `pod install` — no `./scripts/build-ios.sh` required.
-
-Once the pod is also published to the CocoaPods trunk registry (planned), the syntax shortens to:
-
-```ruby
-pod 'PqcCore', '~> 0.2.0'
-```
+Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
 
 ### Swift Package Manager (recommended for native iOS apps)
 
