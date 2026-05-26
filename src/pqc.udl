@@ -36,7 +36,10 @@ enum HttpMethod {
 dictionary HttpRequest {
     HttpMethod method;
     string url;
-    record<string, string> headers;
+    // Multi-value to mirror the response side. RFC 7230 §3.2.2 allows
+    // most headers to repeat; Cookie (RFC 6265 §5.4) and Set-Cookie are
+    // notable cases where multi-value semantics differ from comma-joined.
+    record<string, sequence<string>> headers;
     bytes? body;
     u64? timeout_ms;
 };
@@ -45,9 +48,16 @@ dictionary HttpResponse {
     u16 status;
     record<string, sequence<string>> headers;
     bytes body;
-    // The TLS named group actually negotiated (e.g. "X25519MLKEM768" or "X25519").
+    // The TLS named group recorded by the MOST RECENT handshake in this
+    // process (e.g. "X25519MLKEM768", "X25519", "unknown" if no handshake
+    // has happened yet). NOT per-request: HTTP/2 connection reuse and
+    // concurrent requests across multiple clients can attribute one
+    // connection's group to another request. Suitable for process-level
+    // telemetry ("is PQC engaged at all on this device?"), not for
+    // per-request attribution. For per-request truth, use server-side
+    // TLS observability (Akamai DataStream 2 etc.).
     string negotiated_named_group;
-    // Negotiated ALPN protocol (e.g. "h2", "http/1.1").
+    // Negotiated ALPN protocol (e.g. "h2", "http/1.1"). Per-request.
     string negotiated_protocol;
 };
 

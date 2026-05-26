@@ -33,41 +33,37 @@ generated/kotlin/
 
 ## 2. Packaging options
 
-### A — Ship as an AAR (recommended for distribution)
+### A — Maven Central (recommended)
 
-A thin Android library module bundles the `.so` files and the generated Kotlin, then publishes to internal Artifactory. Minimal `build.gradle.kts`:
+The library publishes to Maven Central on every release under the coordinates `io.github.sriharsha-y:pqc-mobile-client`. In the consumer's `build.gradle.kts`:
 
 ```kotlin
-plugins {
-    id("com.android.library")
-    kotlin("android")
-}
-
-android {
-    namespace = "com.yourorg.pqc"
-    compileSdk = 35
-    defaultConfig { minSdk = 29 }
-    sourceSets["main"].apply {
-        jniLibs.srcDir("../target/jniLibs")
-        java.srcDir("../generated/kotlin")
-    }
-}
-
 dependencies {
-    implementation("net.java.dev.jna:jna:5.14.0@aar")           // UniFFI runtime
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    implementation("io.github.sriharsha-y:pqc-mobile-client:0.2.0")
 }
 ```
 
-Publish to Artifactory as `com.yourorg.pqc:pqc-mobile-client:0.1.0`.
+That pulls the AAR (with `arm64-v8a`, `armeabi-v7a`, `x86_64` slices), the Kotlin bindings, and the JNA + kotlinx-coroutines transitive dependencies in one declaration. No local cargo build, no manual `.so` vendoring.
 
-### B — Drop straight into the consumer Android project
+### B — Tarball from the GitHub Release (no Maven access)
 
-For early iteration without publishing an AAR, copy:
-- `target/jniLibs/*` → `app/src/main/jniLibs/`
-- `generated/kotlin/uniffi/pqc/pqc.kt` → `app/src/main/java/uniffi/pqc/pqc.kt`
+For consumers behind corporate proxies that block Maven Central, or for early integration before Maven Central publication is ready, download `pqc-mobile-client-X.Y.Z-android.tar.gz` from the release page and unpack:
 
-Add the JNA + coroutines deps to the consumer's `build.gradle`. Works but won't survive an Expo `prebuild`.
+- `jniLibs/*` → `app/src/main/jniLibs/`
+- `kotlin/uniffi/pqc/pqc.kt` → `app/src/main/java/uniffi/pqc/pqc.kt`
+
+Add the JNA + coroutines deps to the consumer's `build.gradle` manually. Works but won't survive an Expo `prebuild`.
+
+### C — Local Gradle module (development)
+
+If you're hacking on `pqc-mobile-client` itself, build locally:
+
+```bash
+./scripts/build-android.sh
+cd android && gradle assembleRelease
+```
+
+The AAR lands at `android/build/outputs/aar/pqc-mobile-client-release.aar`. Reference it from the consumer with `implementation(files("path/to/pqc-mobile-client-release.aar"))` plus the JNA + coroutines deps.
 
 ## 3. Native Android — OkHttp / Retrofit / Ktor
 
@@ -87,7 +83,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
         val pqcReq = HttpRequest(
             method = req.method.toPqcMethod(),
             url = req.url.toString(),
-            headers = req.headers.toMap(),
+            headers = req.headers.toMultimap(),
             body = req.body?.let { okio.Buffer().also { b -> it.writeTo(b) }.readByteArray() },
             timeoutMs = null,
         )
@@ -200,7 +196,7 @@ suspend fun fetchBalance(): String {
     val resp = pqc.request(HttpRequest(
         method = HttpMethod.GET,
         url = "https://api.bank.example/accounts/123/balance",
-        headers = mapOf("Authorization" to "Bearer $token"),
+        headers = mapOf("Authorization" to listOf("Bearer $token")),
         body = null,
         timeoutMs = null,
     ))
@@ -236,7 +232,7 @@ Debug-build verification call:
 val resp = pqc.request(HttpRequest(
     method = HttpMethod.GET,
     url = "https://pq.cloudflareresearch.com/",
-    headers = emptyMap(), body = null, timeoutMs = 5000UL,
+    headers = emptyMap<String, List<String>>(), body = null, timeoutMs = 5000UL,
 ))
 android.util.Log.i("PQC", "negotiated group: ${resp.negotiatedNamedGroup}")
 ```

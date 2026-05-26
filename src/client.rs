@@ -37,12 +37,21 @@ impl PqcHttpClient {
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
-        // HTTP/3 (QUIC) — opt-in. Adds the h3-quinn dependency footprint;
-        // gated until the corresponding cargo feature is enabled.
-        // if config.enable_http3 {
-        //     builder = builder.http3_prior_knowledge();
-        // }
+        // HTTP/3 (QUIC) — opt-in, but not yet wired (would pull in
+        // h3-quinn). Reject explicitly so a caller that requests it
+        // doesn't silently get HTTP/2 and make latency/observability
+        // decisions on a false premise.
+        if config.enable_http3 {
+            return Err(PqcError::InvalidRequest);
+        }
 
+        // reqwest::ClientBuilder::build failures at this point are
+        // residual wiring errors (DNS resolver init, proxy load, etc.)
+        // — TLS is already validated by build_tls_config + accepted by
+        // use_preconfigured_tls. None of the existing PqcError variants
+        // fit perfectly; map to InvalidRequest to match the UDL
+        // constructor doc which lists "rustls failing to build the TLS
+        // config" under this variant.
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
         Ok(Self {
@@ -64,10 +73,13 @@ impl PqcHttpClient {
 
         let mut builder = self.inner.request(method, &req.url);
 
-        for (k, v) in &req.headers {
+        for (k, values) in &req.headers {
             let name = HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            let value = HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            builder = builder.header(name, value);
+            for v in values {
+                let value =
+                    HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
+                builder = builder.header(name.clone(), value);
+            }
         }
 
         if let Some(body) = req.body {
@@ -84,7 +96,19 @@ impl PqcHttpClient {
         let resp = builder.send().await.map_err(map_reqwest_err)?;
 
         let status = resp.status().as_u16();
-        let negotiated_protocol = format!("{:?}", resp.version());
+        // The UDL contract (pqc.udl) documents this field as the
+        // negotiated ALPN protocol id ("h2", "http/1.1"). `http::Version`
+        // Debug renders as "HTTP/2.0" / "HTTP/1.1", which is a different
+        // string and breaks string-equality checks in consumer code.
+        // Translate explicitly so the value matches the documented contract.
+        let negotiated_protocol = match resp.version() {
+            reqwest::Version::HTTP_09 => "http/0.9".to_string(),
+            reqwest::Version::HTTP_10 => "http/1.0".to_string(),
+            reqwest::Version::HTTP_11 => "http/1.1".to_string(),
+            reqwest::Version::HTTP_2 => "h2".to_string(),
+            reqwest::Version::HTTP_3 => "h3".to_string(),
+            other => format!("{:?}", other),
+        };
 
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         for (k, v) in resp.headers() {
@@ -102,10 +126,25 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
+        // A TCP reset, h2 GOAWAY, or carrier-handover during body read is
+        // a transport-level failure. Map it to Timeout / Network only —
+        // skip the substring-based handshake-error classification that
+        // map_reqwest_err does, because handshake-time variants
+        // (PinningFailure, TrustVerification, Tls) are structurally
+        // impossible mid-body: the handshake already completed.
+        // Substring-matching here would falsely trip the
+        // "do NOT retry, alert security" branch on a mid-stream TLS
+        // close_notify (which has "tls" in its error chain).
         let body = resp
             .bytes()
             .await
-            .map_err(|_| PqcError::InvalidResponse)?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    PqcError::Timeout
+                } else {
+                    PqcError::Network
+                }
+            })?
             .to_vec();
 
         // The KEX group rustls selected on the most-recent handshake.
@@ -142,9 +181,19 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
         return PqcError::Timeout;
     }
 
+    // The outermost reqwest error Display embeds the request URL
+    // ("error sending request for url (https://api.example.com/v1/certificates/list)"),
+    // which contaminates the substring match: a URL containing "certificate"
+    // would silently map to TrustVerification even for a plain DNS failure.
+    // Strip the URL from every frame before lowercase matching.
+    let url_str = e.url().map(|u| u.to_string());
+
     let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
     while let Some(err) = src {
-        let msg = err.to_string();
+        let mut msg = err.to_string();
+        if let Some(ref u) = url_str {
+            msg = msg.replace(u, "");
+        }
         let lower = msg.to_lowercase();
         if lower.contains("pinning failure") {
             return PqcError::PinningFailure;
@@ -172,5 +221,21 @@ mod tests {
         let msg =
             "certificate pinning failure: leaf SPKI does not match any configured pin".to_string();
         assert!(msg.to_lowercase().contains("pinning failure"));
+    }
+
+    /// Regression: a URL containing "certificate" in its path must not
+    /// cause map_reqwest_err to misclassify a plain network failure as
+    /// TrustVerification. Tests the URL-stripping branch.
+    #[test]
+    fn url_substring_does_not_contaminate_classification() {
+        let url = "https://api.example.com/v1/certificates/list";
+        let msg = format!(
+            "error sending request for url ({}): connection refused",
+            url
+        );
+        let stripped = msg.replace(url, "");
+        let lower = stripped.to_lowercase();
+        assert!(!lower.contains("certificate"));
+        assert!(!lower.contains("pinning failure"));
     }
 }

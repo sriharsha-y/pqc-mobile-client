@@ -13,9 +13,12 @@ generated/
 # macOS
 .DS_Store
 
-# Android
+# Android — Gradle build outputs and tooling caches for the library
+# module rooted at android/.
 android/build/
 android/.gradle/
+android/.kotlin/
+android/local.properties
 local.properties
 
 # iOS
@@ -26,6 +29,10 @@ xcuserdata/
 # Logs / scratch
 *.log
 .scratch/
+
+# Claude Code local files (per-user, not committed)
+.claude/
+CLAUDE.md
 
 # Node
 node_modules/

@@ -85,10 +85,14 @@ public final class PqcURLProtocol: URLProtocol {
                         ]
                     )
                 }
+                // URLRequest.allHTTPHeaderFields is [String: String] — Apple
+                // already comma-joins duplicate headers upstream, so we wrap
+                // each value in a single-element array to satisfy the
+                // [String: [String]] shape on HttpRequest.headers.
                 let pqcReq = HttpRequest(
                     method: req.httpMethod.flatMap(Self.parseMethod) ?? .get,
                     url: url.absoluteString,
-                    headers: req.allHTTPHeaderFields ?? [:],
+                    headers: (req.allHTTPHeaderFields ?? [:]).mapValues { [$0] },
                     body: req.httpBody,
                     timeoutMs: nil
                 )
@@ -102,18 +106,18 @@ public final class PqcURLProtocol: URLProtocol {
                 }
                 headerFields["X-Pqc-Negotiated-Group"] = pqcResp.negotiatedNamedGroup
 
-                // Map the Rust core's `negotiated_protocol` string (formatted
-                // from `http::Version` via `Debug`, e.g. "HTTP/1.1") into a
-                // value HTTPURLResponse will accept. Defaults to HTTP/1.1 on
+                // Map the Rust core's `negotiated_protocol` string (the
+                // ALPN protocol id — "h2", "http/1.1", etc.) into a value
+                // HTTPURLResponse will accept. Defaults to HTTP/1.1 on
                 // unknown values rather than fabricating HTTP/2 — wrong
                 // telemetry is worse than conservative telemetry.
                 let httpVersion: String = {
                     switch pqcResp.negotiatedProtocol {
-                    case "HTTP/0.9", "HTTP/1.0": return "HTTP/1.0"
-                    case "HTTP/1.1":              return "HTTP/1.1"
-                    case "HTTP/2.0", "HTTP/2":    return "HTTP/2.0"
-                    case "HTTP/3.0", "HTTP/3":    return "HTTP/3.0"
-                    default:                       return "HTTP/1.1"
+                    case "http/0.9", "http/1.0": return "HTTP/1.0"
+                    case "http/1.1":             return "HTTP/1.1"
+                    case "h2":                   return "HTTP/2.0"
+                    case "h3":                   return "HTTP/3.0"
+                    default:                     return "HTTP/1.1"
                     }
                 }()
                 guard let response = HTTPURLResponse(

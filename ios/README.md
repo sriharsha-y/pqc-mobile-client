@@ -35,36 +35,45 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 
 ### CocoaPods (recommended for RN apps; works for native)
 
-Local pod the consumer app references. Skeleton `PqcCore.podspec`:
+The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
 
 ```ruby
-Pod::Spec.new do |s|
-  s.name             = 'PqcCore'
-  s.version          = '0.1.0'
-  s.summary          = 'Post-Quantum TLS HTTPS client.'
-  s.homepage         = 'https://example.invalid/pqc-mobile-client'
-  s.license          = { :type => 'Apache-2.0' }
-  s.author           = 'Mobile Platform'
-  s.source           = { :path => '.' }
-  s.platform         = :ios, '15.1'
-  s.swift_version    = '5.9'
-
-  s.source_files     = '../generated/swift/pqc.swift'
-  s.vendored_frameworks = '../generated/PqcCore.xcframework'
-
-  s.pod_target_xcconfig = { 'OTHER_LDFLAGS' => '-lc++' }
-end
+pod 'PqcCore', '~> 0.2.0'
 ```
 
-In the consumer's `Podfile`:
+`pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
+
+Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
-pod 'PqcCore', :path => '../../pqc-mobile-client/ios'
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.2.0/PqcCore.podspec'
 ```
 
-### Swift Package Manager (recommended for pure native apps)
+Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
 
-A `Package.swift` wrapping the XCFramework + the generated Swift file. SPM is the modern path for native iOS apps; RN apps overwhelmingly stay on CocoaPods, so use CocoaPods there to avoid mixed-tooling pain.
+### Swift Package Manager (recommended for native iOS apps)
+
+In your app's `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.2.0")
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "PqcCore", package: "pqc-mobile-client"),
+        ]
+    )
+]
+```
+
+Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
+
+Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at the `swiftpm` branch's `Package.swift`. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.2.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.2.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
+
+The `swiftpm` branch is auto-maintained by the release workflow. Do not consume `main` directly via SPM — `main` has no `Package.swift` at root, only the Rust crate sources.
 
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 
@@ -109,7 +118,7 @@ final class PqcURLProtocol: URLProtocol {
                 let pqcReq = HttpRequest(
                     method: req.httpMethod.flatMap(HttpMethod.from) ?? .get,
                     url: req.url!.absoluteString,
-                    headers: (req.allHTTPHeaderFields ?? [:]),
+                    headers: (req.allHTTPHeaderFields ?? [:]).mapValues { [$0] },
                     body: req.httpBody,
                     timeoutMs: nil
                 )
@@ -204,7 +213,7 @@ func fetchBalance() async throws -> Data {
     let resp = try await pqc.request(req: HttpRequest(
         method: .get,
         url: "https://api.bank.example/accounts/123/balance",
-        headers: ["Authorization": "Bearer \(token)"],
+        headers: ["Authorization": ["Bearer \(token)"]],
         body: nil,
         timeoutMs: nil
     ))
@@ -265,7 +274,7 @@ Task {
     let resp = try await PqcURLProtocol.client.request(req: HttpRequest(
         method: .get,
         url: "https://pq.cloudflareresearch.com/",
-        headers: [:], body: nil, timeoutMs: 5000
+        headers: [:] as [String: [String]], body: nil, timeoutMs: 5000
     ))
     print("negotiated group:", resp.negotiatedNamedGroup)
 }

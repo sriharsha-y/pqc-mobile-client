@@ -19,9 +19,9 @@ cd "$ROOT"
 # aws-lc-sys to build C objects) and rustc's linker read these vars; if
 # they disagree, the linker errors with "object file built for newer iOS
 # version than being linked" and __chkstk_darwin and friends go undefined.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.1}"
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-13.0}"
 # Simulator builds use this independent target var.
-export IPHONESIMULATOR_DEPLOYMENT_TARGET="${IPHONESIMULATOR_DEPLOYMENT_TARGET:-15.1}"
+export IPHONESIMULATOR_DEPLOYMENT_TARGET="${IPHONESIMULATOR_DEPLOYMENT_TARGET:-13.0}"
 
 echo "==> IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET"
 

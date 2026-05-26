@@ -37,11 +37,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # iOS deployment-target floor — must match PqcCore.podspec's
-  # `s.platform = :ios, '15.1'`. Pinning here (rather than relying on
-  # build-ios.sh's `${IPHONEOS_DEPLOYMENT_TARGET:-15.1}` default) keeps
+  # `s.platform = :ios, '13.0'`. Pinning here (rather than relying on
+  # build-ios.sh's `${IPHONEOS_DEPLOYMENT_TARGET:-13.0}` default) keeps
   # the contract in one place: bumping the floor requires changing this
   # workflow AND the podspec together.
-  IPHONEOS_DEPLOYMENT_TARGET: "15.1"
+  IPHONEOS_DEPLOYMENT_TARGET: "13.0"
 
 jobs:
   release-please:
@@ -55,11 +55,15 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: rp
         with:
-          release-type: rust
-          package-name: pqc_client
-          # Treat 0.x.y like 1.x.y for the purpose of choosing bump levels —
-          # feat: → 0.minor, fix: → 0.patch (rather than everything → patch).
-          bump-minor-pre-major: true
+          # Config-file mode (release-please-config.json +
+          # .release-please-manifest.json). This is what release-please v4
+          # expects natively and is required to use `extra-files`, which
+          # is how we keep PqcCore.podspec's version in lockstep with
+          # Cargo.toml. Without that, the podspec stays at whatever
+          # version it was last manually bumped to, and `s.source { :tag
+          # => s.version.to_s }` resolves to a stale git tag.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   build-android:
     name: build-android
@@ -145,28 +149,101 @@ jobs:
       # fail the release if any appear.
       - name: Guard against CLI-feature bloat regression
         run: |
-          AR=generated/PqcCore.xcframework/ios-arm64/libpqc_client.a
-          if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
-            echo "::error::iOS static archive contains uniffi-bindgen CLI symbols (clap / goblin / uniffi_bindgen_main)."
-            echo "The 'cli' cargo feature appears to have leaked into the cross-compile."
+          # Scan every slice in the xcframework, not just the device
+          # slice. A target-conditional feature unification (e.g. via a
+          # cfg(target_arch="x86_64") dev-dep) could leak CLI symbols
+          # into the simulator slice only, leaving the device slice
+          # clean — that would pass a device-only check and ship bloat
+          # to every developer running on the simulator.
+          shopt -s nullglob
+          archives=(generated/PqcCore.xcframework/*/libpqc_client.a)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No libpqc_client.a archives found under generated/PqcCore.xcframework/."
+            exit 1
+          fi
+          # Assert both expected slices exist by name. Catches a silent
+          # build regression where (e.g.) the simulator step in
+          # scripts/build-ios.sh fails non-fatally and ships an iOS-only
+          # asset — consumers on Apple Silicon Mac running SwiftUI
+          # Previews then hit "no compatible slice" link errors.
+          for required in ios-arm64 ios-arm64_x86_64-simulator; do
+            if [ ! -f "generated/PqcCore.xcframework/${required}/libpqc_client.a" ]; then
+              echo "::error::Expected slice generated/PqcCore.xcframework/${required}/libpqc_client.a is missing."
+              echo "::error::Audit scripts/build-ios.sh — one of the cargo --target steps probably failed silently."
+              exit 1
+            fi
+          done
+          fail=0
+          for AR in "${archives[@]}"; do
+            if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
+              echo "::error::Slice $AR contains uniffi-bindgen CLI symbols (clap / goblin / uniffi_bindgen_main)."
+              fail=1
+            else
+              echo "OK: no CLI symbols in $AR"
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::The 'cli' cargo feature appears to have leaked into the cross-compile."
             echo "Audit Cargo.toml's uniffi dep features and the build invocation in scripts/build-ios.sh."
             exit 1
           fi
-          echo "OK: no CLI symbols in $AR"
 
       - name: Package
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
-          ARCHIVE="pqc-mobile-client-${VERSION}-ios.zip"
           mkdir -p dist
-          (cd generated && zip -r "../dist/${ARCHIVE}" PqcCore.xcframework swift)
+
+          # Produce two iOS release zips:
+          #
+          # - PqcCore-X.Y.Z.zip: fat zip with PqcCore.xcframework +
+          #   pqc.swift + LICENSE at top level. Consumed by
+          #   PqcCore.podspec's :http source; the Swift binding +
+          #   license sit alongside the framework so CocoaPods can
+          #   pick them up directly from the Pod root.
+          #
+          # - PqcCore-X.Y.Z.xcframework.zip: slim zip with only
+          #   PqcCore.xcframework. Consumed by SPM's binaryTarget;
+          #   Apple's spec says "a ZIP archive that contains your
+          #   XCFramework" — SPM currently tolerates siblings but the
+          #   tolerance is implementation behaviour, not documented
+          #   contract. Slim zip future-proofs against Apple ever
+          #   enforcing single-item zips.
+          ARCHIVE="PqcCore-${VERSION}.zip"
+          SPM_ARCHIVE="PqcCore-${VERSION}.xcframework.zip"
+
+          # TZ=UTC + zip -X strip variable timestamps and extra fields,
+          # making the zip layer's contribution to the SHA256 stable
+          # across rebuilds of the same content. (The xcframework's own
+          # internal timestamps from xcodebuild are still variable, so
+          # full bit-for-bit reproducibility requires SOURCE_DATE_EPOCH
+          # plumbing — this is just the cheap defensive layer.)
+
+          # Fat zip (CocoaPods)
+          STAGE="dist/_stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R generated/PqcCore.xcframework "$STAGE/"
+          cp generated/swift/pqc.swift "$STAGE/"
+          cp LICENSE "$STAGE/"
+          (cd "$STAGE" && TZ=UTC zip -X -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
+          rm -rf "$STAGE"
+
+          # Slim zip (SPM)
+          STAGE_SPM="dist/_stage_spm"
+          rm -rf "$STAGE_SPM" && mkdir -p "$STAGE_SPM"
+          cp -R generated/PqcCore.xcframework "$STAGE_SPM/"
+          (cd "$STAGE_SPM" && TZ=UTC zip -X -r "../${SPM_ARCHIVE}" PqcCore.xcframework)
+          rm -rf "$STAGE_SPM"
+
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
+          echo "SPM_ARCHIVE=${SPM_ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pqc-ios
-          path: dist/${{ env.ARCHIVE }}
+          path: |
+            dist/${{ env.ARCHIVE }}
+            dist/${{ env.SPM_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
 
@@ -196,6 +273,268 @@ jobs:
         run: |
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
             dist/pqc-mobile-client-*-android.tar.gz \
-            dist/pqc-mobile-client-*-ios.zip \
+            dist/PqcCore-*.zip \
             --repo "${{ github.repository }}" \
             --clobber
+
+  publish-swiftpm:
+    name: publish-swiftpm
+    needs: [release-please, attach-assets]
+    if: ${{ needs.release-please.outputs.release_created }}
+    # Linux runner — this job only needs `swift package compute-checksum`,
+    # `unzip`, `sed`, and `git`. None of that requires Xcode. macOS minutes
+    # cost 10x against the included budget, so we keep this off macos-latest;
+    # build-ios is the only iOS job that genuinely needs Xcode.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SWIFTPM_BRANCH: swiftpm
+    steps:
+      # Install the Swift toolchain on Linux for `swift package
+      # compute-checksum` and `swift package dump-package`. The action
+      # downloads the official swift.org Linux binary; Package.swift's
+      # platforms: [.iOS(.v13)] declaration parses fine on Linux Swift
+      # because we never build the package — we only checksum and dump.
+      - name: Set up Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '5.9'
+
+      # Templates + LICENSE live on main; we read them from this checkout
+      # and write the rendered files into a fresh clone of the swiftpm
+      # branch (see "Update swiftpm branch" step).
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-checkout
+
+      - name: Download release asset, checksum, render Package.swift
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.release-please.outputs.version }}"
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          STAGE="$(mktemp -d)"
+
+          # Download both iOS zips:
+          #   - PqcCore-X.Y.Z.zip: fat zip, used to extract pqc.swift
+          #   - PqcCore-X.Y.Z.xcframework.zip: slim zip, what SPM's
+          #     binaryTarget URL points at and what we checksum
+          gh release download "$TAG" \
+            -p "PqcCore-${VERSION}.zip" \
+            -p "PqcCore-${VERSION}.xcframework.zip" \
+            -D "$STAGE" \
+            --repo "${{ github.repository }}"
+
+          # SPM verifies the binaryTarget archive against this checksum
+          # at resolve time. swift package compute-checksum is the
+          # canonical tool. We checksum the SLIM zip, since that is
+          # what SPM downloads.
+          CHECKSUM="$(swift package compute-checksum "$STAGE/PqcCore-${VERSION}.xcframework.zip")"
+
+          # Extract pqc.swift from the fat zip for placement under
+          # Sources/PqcCore on the swiftpm branch. SPM cannot extract
+          # arbitrary files out of a binaryTarget archive, so the Swift
+          # binding has to be a real source file in the swiftpm branch.
+          unzip -j "$STAGE/PqcCore-${VERSION}.zip" pqc.swift -d "$STAGE/"
+
+          sed \
+            -e "s|{{VERSION}}|${VERSION}|g" \
+            -e "s|{{CHECKSUM}}|${CHECKSUM}|g" \
+            main-checkout/.github/swiftpm-template/Package.swift.in \
+            > "$STAGE/Package.swift"
+
+          cp main-checkout/LICENSE "$STAGE/"
+          cp main-checkout/.github/swiftpm-template/README.md "$STAGE/"
+          # PqcCore.podspec is the CocoaPods manifest. Carry it onto the
+          # swiftpm branch too, so consumers using
+          #   pod 'PqcCore', :podspec => 'https://raw.../vX.Y.Z/PqcCore.podspec'
+          # resolve through the same tag the SPM consumers do. The version
+          # line was already bumped by release-please before the workflow
+          # ran (via release-please-config.json extra-files).
+          cp main-checkout/PqcCore.podspec "$STAGE/"
+
+          echo "STAGE=$STAGE" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Update swiftpm branch and re-point release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+
+          if git ls-remote --exit-code --heads "$REPO_URL" "$SWIFTPM_BRANCH" >/dev/null 2>&1; then
+            # Branch exists: clone single-branch and clear its tracked files.
+            git clone --branch "$SWIFTPM_BRANCH" --single-branch "$REPO_URL" .
+            git rm -rf . 2>/dev/null || true
+          else
+            # First run: bootstrap an orphan branch.
+            git init -b "$SWIFTPM_BRANCH"
+            git remote add origin "$REPO_URL"
+          fi
+
+          # Lay down the new tree.
+          mkdir -p Sources/PqcCore
+          cp "$STAGE/Package.swift" .
+          cp "$STAGE/PqcCore.podspec" .
+          cp "$STAGE/pqc.swift" Sources/PqcCore/
+          cp "$STAGE/LICENSE" .
+          cp "$STAGE/README.md" .
+
+          git add -A
+          # --allow-empty makes the job safely re-runnable. If a transient
+          # failure earlier in the workflow caused this job to abort after
+          # the swiftpm branch was already pushed in a prior run, the new
+          # staging tree may be byte-identical and `git commit` would
+          # otherwise exit non-zero with "nothing to commit", aborting the
+          # tag retarget below — leaving the v-tag pointed at the wrong
+          # commit until manual intervention.
+          git commit --allow-empty -m "release: ${TAG}"
+
+          # Fail fast if the rendered Package.swift is malformed. This
+          # runs BEFORE we push the branch and move the tag; a broken
+          # manifest at this point would otherwise be visible to every
+          # SPM consumer the moment the tag moves. swift package
+          # dump-package parses the manifest and prints the resolved
+          # model, exiting non-zero on syntax/type errors.
+          swift package --package-path . dump-package > /dev/null
+
+          git push -u origin "HEAD:$SWIFTPM_BRANCH"
+
+          # Move the release tag from the release-please commit on main
+          # to this swiftpm-branch commit. SPM resolves `from: "X.Y.Z"`
+          # by walking tags and reading Package.swift at the tagged
+          # commit, so the tag must point where Package.swift lives.
+          # Force is required because release-please already created the
+          # tag pointing at main.
+          git tag -f "$TAG"
+          git push --force origin "$TAG"
+
+  publish-maven:
+    name: publish-maven
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Rust + Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct from the build-android job's cache so concurrent
+          # runs don't fight over the same key. The two jobs do
+          # essentially the same Rust compile; we accept that
+          # duplication in exchange for cleaner failure isolation
+          # (a Maven publish credential issue shouldn't sink the
+          # tarball release asset).
+          shared-key: release-publish-maven
+
+      - name: Install cargo-ndk
+        run: cargo install --locked cargo-ndk
+
+      - name: Resolve NDK path
+        run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
+
+      - name: Build native + Kotlin bindings
+        run: ./scripts/build-android.sh
+
+      # Pinned Gradle version so the build is reproducible. The repo
+      # doesn't ship a wrapper (no gradlew committed) — setup-gradle's
+      # gradle-version input installs the requested version on PATH.
+      # Bump this in lockstep with android/build.gradle.kts's AGP +
+      # Kotlin plugin versions.
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # Vanniktech's plugin reads credentials from these standard
+      # ORG_GRADLE_PROJECT_* env vars. publishAndReleaseToMavenCentral
+      # signs all artifacts with the in-memory GPG key, uploads them
+      # to the Sonatype Central Portal staging repository, closes the
+      # repository, and triggers automatic release once Sonatype's
+      # validation passes — all in one task.
+      - name: Publish to Maven Central
+        working-directory: android
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSWORD }}
+        run: gradle publishAndReleaseToMavenCentral --no-configuration-cache
+
+  publish-cocoapods:
+    name: publish-cocoapods
+    needs: [release-please, attach-assets]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the CocoaPods version so a future runner-image bump can't
+      # silently break the publish step. ~> 1.15 covers the modern
+      # xcframework + :http source handling we rely on.
+      - name: Pin CocoaPods version
+        run: sudo gem install cocoapods -v '~> 1.15' --no-document
+
+      - name: Verify trunk token is present
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+        # Fail fast with a clear message rather than producing a
+        # confusing mid-push 401 if the secret somehow wasn't propagated.
+        run: |
+          if [ -z "$COCOAPODS_TRUNK_TOKEN" ]; then
+            echo "::error::COCOAPODS_TRUNK_TOKEN repo secret is not set; cannot push to Trunk."
+            exit 1
+          fi
+
+      # The CocoaPods Trunk registry stores podspecs centrally so
+      # consumers can write `pod 'PqcCore', '~> 0.2.0'` without the
+      # long :podspec URL form. `pod trunk push` lints the podspec
+      # against the live :http source (which by now has been uploaded
+      # by attach-assets at the matching version tag), then registers
+      # the spec under the authenticated session.
+      #
+      # ── IMPORTANT: this job REQUIRES the repo to be public. ──
+      # Trunk's server-side lint downloads the :http asset to validate
+      # the podspec; a private GitHub release returns 404 to
+      # unauthenticated GETs and the push fails. Flip the repo public
+      # before merging any release PR after this job lands.
+      #
+      # COCOAPODS_TRUNK_TOKEN: obtain once locally via
+      #   `pod trunk register <email> '<name>'`
+      # which mails a verification link; clicking it stores the token
+      # in ~/.netrc under `machine trunk.cocoapods.org`. Copy that
+      # password value into the COCOAPODS_TRUNK_TOKEN repo secret.
+      - name: Publish podspec to CocoaPods Trunk
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+        run: |
+          pod trunk push PqcCore.podspec \
+            --allow-warnings \
+            --synchronous

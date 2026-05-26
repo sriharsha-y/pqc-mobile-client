@@ -15,7 +15,7 @@ pub enum HttpMethod {
 pub struct HttpRequest {
     pub method: HttpMethod,
     pub url: String,
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
     pub timeout_ms: Option<u64>,
 }
