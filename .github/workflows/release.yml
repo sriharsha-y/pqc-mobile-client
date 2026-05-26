@@ -285,6 +285,13 @@ jobs:
 
           cp main-checkout/LICENSE "$STAGE/"
           cp main-checkout/.github/swiftpm-template/README.md "$STAGE/"
+          # PqcCore.podspec is the CocoaPods manifest. Carry it onto the
+          # swiftpm branch too, so consumers using
+          #   pod 'PqcCore', :podspec => 'https://raw.../vX.Y.Z/PqcCore.podspec'
+          # resolve through the same tag the SPM consumers do. The version
+          # line was already bumped by release-please before the workflow
+          # ran (via release-please-config.json extra-files).
+          cp main-checkout/PqcCore.podspec "$STAGE/"
 
           echo "STAGE=$STAGE" >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -314,6 +321,7 @@ jobs:
           # Lay down the new tree.
           mkdir -p Sources/PqcCore
           cp "$STAGE/Package.swift" .
+          cp "$STAGE/PqcCore.podspec" .
           cp "$STAGE/pqc.swift" Sources/PqcCore/
           cp "$STAGE/LICENSE" .
           cp "$STAGE/README.md" .
