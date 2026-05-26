@@ -161,6 +161,18 @@ jobs:
             echo "::error::No libpqc_client.a archives found under generated/PqcCore.xcframework/."
             exit 1
           fi
+          # Assert both expected slices exist by name. Catches a silent
+          # build regression where (e.g.) the simulator step in
+          # scripts/build-ios.sh fails non-fatally and ships an iOS-only
+          # asset — consumers on Apple Silicon Mac running SwiftUI
+          # Previews then hit "no compatible slice" link errors.
+          for required in ios-arm64 ios-arm64_x86_64-simulator; do
+            if [ ! -f "generated/PqcCore.xcframework/${required}/libpqc_client.a" ]; then
+              echo "::error::Expected slice generated/PqcCore.xcframework/${required}/libpqc_client.a is missing."
+              echo "::error::Audit scripts/build-ios.sh — one of the cargo --target steps probably failed silently."
+              exit 1
+            fi
+          done
           fail=0
           for AR in "${archives[@]}"; do
             if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
@@ -378,7 +390,14 @@ jobs:
           cp "$STAGE/README.md" .
 
           git add -A
-          git commit -m "release: ${TAG}"
+          # --allow-empty makes the job safely re-runnable. If a transient
+          # failure earlier in the workflow caused this job to abort after
+          # the swiftpm branch was already pushed in a prior run, the new
+          # staging tree may be byte-identical and `git commit` would
+          # otherwise exit non-zero with "nothing to commit", aborting the
+          # tag retarget below — leaving the v-tag pointed at the wrong
+          # commit until manual intervention.
+          git commit --allow-empty -m "release: ${TAG}"
 
           # Fail fast if the rendered Package.swift is malformed. This
           # runs BEFORE we push the branch and move the tag; a broken
