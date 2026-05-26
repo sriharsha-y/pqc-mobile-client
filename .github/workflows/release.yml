@@ -463,6 +463,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin the CocoaPods version so a future runner-image bump can't
+      # silently break the publish step. ~> 1.15 covers the modern
+      # xcframework + :http source handling we rely on.
+      - name: Pin CocoaPods version
+        run: sudo gem install cocoapods -v '~> 1.15' --no-document
+
+      - name: Verify trunk token is present
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+        # Fail fast with a clear message rather than producing a
+        # confusing mid-push 401 if the secret somehow wasn't propagated.
+        run: |
+          if [ -z "$COCOAPODS_TRUNK_TOKEN" ]; then
+            echo "::error::COCOAPODS_TRUNK_TOKEN repo secret is not set; cannot push to Trunk."
+            exit 1
+          fi
+
       # The CocoaPods Trunk registry stores podspecs centrally so
       # consumers can write `pod 'PqcCore', '~> 0.2.0'` without the
       # long :podspec URL form. `pod trunk push` lints the podspec
@@ -470,12 +487,17 @@ jobs:
       # by attach-assets at the matching version tag), then registers
       # the spec under the authenticated session.
       #
-      # COCOAPODS_TRUNK_TOKEN is read from the env by the CocoaPods
-      # CLI. Obtain it once locally via
+      # ── IMPORTANT: this job REQUIRES the repo to be public. ──
+      # Trunk's server-side lint downloads the :http asset to validate
+      # the podspec; a private GitHub release returns 404 to
+      # unauthenticated GETs and the push fails. Flip the repo public
+      # before merging any release PR after this job lands.
+      #
+      # COCOAPODS_TRUNK_TOKEN: obtain once locally via
       #   `pod trunk register <email> '<name>'`
-      # which mails a verification link; clicking the link populates
-      # ~/.cocoapods/trunk/token. Copy that token value into the
-      # COCOAPODS_TRUNK_TOKEN repo secret.
+      # which mails a verification link; clicking it stores the token
+      # in ~/.netrc under `machine trunk.cocoapods.org`. Copy that
+      # password value into the COCOAPODS_TRUNK_TOKEN repo secret.
       - name: Publish podspec to CocoaPods Trunk
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
