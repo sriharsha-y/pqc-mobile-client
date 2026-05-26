@@ -37,11 +37,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # iOS deployment-target floor — must match PqcCore.podspec's
-  # `s.platform = :ios, '15.1'`. Pinning here (rather than relying on
-  # build-ios.sh's `${IPHONEOS_DEPLOYMENT_TARGET:-15.1}` default) keeps
+  # `s.platform = :ios, '13.0'`. Pinning here (rather than relying on
+  # build-ios.sh's `${IPHONEOS_DEPLOYMENT_TARGET:-13.0}` default) keeps
   # the contract in one place: bumping the floor requires changing this
   # workflow AND the podspec together.
-  IPHONEOS_DEPLOYMENT_TARGET: "15.1"
+  IPHONEOS_DEPLOYMENT_TARGET: "13.0"
 
 jobs:
   release-please:

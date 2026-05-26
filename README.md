@@ -5,7 +5,7 @@
 [![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
 [![release](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/release.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/releases)
 
-Post-Quantum TLS HTTPS client for mobile apps — **iOS 15.1+** and **Android API 29+**. Single Rust core built on `rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`, exposed to Kotlin and Swift via UniFFI.
+Post-Quantum TLS HTTPS client for mobile apps — **iOS 13.0+** and **Android API 24+**. Single Rust core built on `rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`, exposed to Kotlin and Swift via UniFFI.
 
 Designed for any mobile app — **native iOS (Swift/Obj-C), native Android (Kotlin/Java), or React Native** — that needs to negotiate `X25519MLKEM768` against PQC-enabled servers (Akamai, Cloudflare, AWS) on OS versions that don't have native PQC TLS yet.
 
@@ -15,8 +15,8 @@ Designed for any mobile app — **native iOS (Swift/Obj-C), native Android (Kotl
 
 Akamai's edge has hybrid PQC TLS (`X25519MLKEM768`, IANA codepoint `0x11EC`) enabled. iOS 26+ and Chrome already negotiate it by default, but:
 
-- **iOS 15.1–18:** no native PQC TLS. `URLSession`'s TLS engine is closed; ATS doesn't expose group selection.
-- **Android API 29+:** system Conscrypt does not advertise `X25519MLKEM768` by default on any shipped Android release (incl. Android 17). Google has not committed to a default-on date.
+- **iOS 13–18:** no native PQC TLS. `URLSession`'s TLS engine is closed; ATS doesn't expose group selection.
+- **Android API 24+:** system Conscrypt does not advertise `X25519MLKEM768` by default on any shipped Android release (incl. Android 17). Google has not committed to a default-on date.
 - **Cronet** ships PQC via Chrome's BoringSSL, but the only Maven-published artifact that includes PQC requires Google Play Services (no GMS → no PQC). The `cronet-embedded` Maven artifact is frozen at Chromium 113 (pre-PQC).
 
 This crate provides a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability.
@@ -137,7 +137,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
 | Negotiated TLS group reporting on `HttpResponse` | ✅ Via instrumented `CryptoProvider` (see `src/kx_tracker.rs`) |
 | Android GMS + non-GMS devices | ✅ |
-| iOS 15.1 – 18 | ✅ |
+| iOS 13 – 18 | ✅ |
 | iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |
 
 ## What this does NOT cover

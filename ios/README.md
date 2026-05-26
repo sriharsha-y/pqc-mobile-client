@@ -46,7 +46,7 @@ Pod::Spec.new do |s|
   s.license          = { :type => 'Apache-2.0' }
   s.author           = 'Mobile Platform'
   s.source           = { :path => '.' }
-  s.platform         = :ios, '15.1'
+  s.platform         = :ios, '13.0'
   s.swift_version    = '5.9'
 
   s.source_files     = '../generated/swift/pqc.swift'

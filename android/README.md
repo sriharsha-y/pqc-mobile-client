@@ -46,7 +46,7 @@ plugins {
 android {
     namespace = "com.yourorg.pqc"
     compileSdk = 35
-    defaultConfig { minSdk = 29 }
+    defaultConfig { minSdk = 24 }
     sourceSets["main"].apply {
         jniLibs.srcDir("../target/jniLibs")
         java.srcDir("../generated/kotlin")
