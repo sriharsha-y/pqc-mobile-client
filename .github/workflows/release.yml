@@ -114,6 +114,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Stash the raw native+bindings so publish-maven can consume them
+      # without redoing the cargo-ndk cross-compile. Saves ~3 min of
+      # redundant work on every release. Tarball avoids the brittle
+      # upload-artifact v4 path-preservation semantics for nested dirs.
+      - name: Bundle native libs + Kotlin bindings for downstream jobs
+        run: tar -czf /tmp/android-native.tar.gz target/jniLibs generated/kotlin
+
+      - name: Upload native + bindings (for publish-maven)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqc-android-native
+          path: /tmp/android-native.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   build-ios:
     name: build-ios
     needs: release-please
@@ -413,7 +428,12 @@ jobs:
 
   publish-maven:
     name: publish-maven
-    needs: [release-please]
+    # Depend on build-android so we can reuse its cargo-ndk output rather
+    # than rebuilding from scratch. Failure isolation is preserved: a
+    # Sonatype credential issue here doesn't affect the tarball that
+    # attach-assets uploads, because build-android has already succeeded
+    # before this job starts.
+    needs: [release-please, build-android]
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     permissions:
@@ -426,33 +446,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Rust + Android targets
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add \
-            aarch64-linux-android \
-            armv7-linux-androideabi \
-            x86_64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
+      # Pull the pre-built .so + Kotlin bindings from build-android.
+      # Saves ~3 min per release vs re-running cargo-ndk here.
+      - name: Download native + bindings from build-android
+        uses: actions/download-artifact@v4
         with:
-          # Distinct from the build-android job's cache so concurrent
-          # runs don't fight over the same key. The two jobs do
-          # essentially the same Rust compile; we accept that
-          # duplication in exchange for cleaner failure isolation
-          # (a Maven publish credential issue shouldn't sink the
-          # tarball release asset).
-          shared-key: release-publish-maven
-
-      - name: Install cargo-ndk
-        run: cargo install --locked cargo-ndk
-
-      - name: Resolve NDK path
-        run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
-
-      - name: Build native + Kotlin bindings
-        run: ./scripts/build-android.sh
+          name: pqc-android-native
+          path: /tmp
+      - name: Extract native + bindings
+        run: tar -xzf /tmp/android-native.tar.gz
 
       # Pinned Gradle version so the build is reproducible. The repo
       # doesn't ship a wrapper (no gradlew committed) — setup-gradle's
@@ -463,12 +465,44 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      # Sanity-check the GPG_SIGNING_KEY format BEFORE handing it to
+      # Gradle. We've seen multiple "Could not read PGP secret key"
+      # failures and need to know whether the secret is the documented
+      # raw ASCII-armored format or accidentally base64 / corrupted.
+      # The check inspects only the first line, never echoing the
+      # actual key bytes. ::add-mask:: hides the line content from
+      # logs even if it leaks.
+      - name: Sanity-check GPG_SIGNING_KEY format
+        env:
+          KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        run: |
+          first_line=$(printf '%s' "$KEY" | head -1)
+          echo "::add-mask::$first_line"
+          if [ "$first_line" = "-----BEGIN PGP PRIVATE KEY BLOCK-----" ]; then
+            echo "OK: secret begins with PGP PRIVATE KEY BLOCK armor header."
+          else
+            # Don't echo the actual first line — print only its byte length
+            # and a category hint without revealing content.
+            len=$(printf '%s' "$first_line" | wc -c | tr -d ' ')
+            echo "::warning::GPG_SIGNING_KEY first line is NOT '-----BEGIN PGP PRIVATE KEY BLOCK-----'."
+            echo "::warning::First-line byte length: $len"
+            if [ "$len" -gt 60 ] && [ "$len" -lt 80 ]; then
+              echo "::warning::Length suggests this may be base64-wrapped content (76-col wrap default)."
+            fi
+            echo "::warning::Vanniktech 0.30 does not base64-decode; it passes the value verbatim to Gradle's useInMemoryPgpKeys which expects ASCII-armored."
+            echo "::error::Re-export with: gpg --armor --export-secret-keys KEYID | gh secret set GPG_SIGNING_KEY"
+            exit 1
+          fi
+
       # Vanniktech's plugin reads credentials from these standard
       # ORG_GRADLE_PROJECT_* env vars. publishAndReleaseToMavenCentral
       # signs all artifacts with the in-memory GPG key, uploads them
       # to the Sonatype Central Portal staging repository, closes the
       # repository, and triggers automatic release once Sonatype's
       # validation passes — all in one task.
+      # --stacktrace gives us the full exception chain on signing
+      # failures so we can distinguish armor-parse errors from
+      # passphrase-decryption errors.
       - name: Publish to Maven Central
         working-directory: android
         env:
@@ -477,7 +511,7 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSWORD }}
-        run: gradle publishAndReleaseToMavenCentral --no-configuration-cache
+        run: gradle publishAndReleaseToMavenCentral --no-configuration-cache --stacktrace
 
   publish-cocoapods:
     name: publish-cocoapods
