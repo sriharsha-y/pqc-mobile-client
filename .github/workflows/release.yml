@@ -194,7 +194,13 @@ jobs:
           cp -R generated/PqcCore.xcframework "$STAGE/"
           cp generated/swift/pqc.swift "$STAGE/"
           cp LICENSE "$STAGE/"
-          (cd "$STAGE" && zip -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
+          # TZ=UTC + zip -X strip variable timestamps and extra fields,
+          # making the zip layer's contribution to the SHA256 stable
+          # across rebuilds of the same content. (The xcframework's own
+          # internal timestamps from xcodebuild are still variable, so
+          # full bit-for-bit reproducibility requires SOURCE_DATE_EPOCH
+          # plumbing — this is just the cheap defensive layer.)
+          (cd "$STAGE" && TZ=UTC zip -X -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
           rm -rf "$STAGE"
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
