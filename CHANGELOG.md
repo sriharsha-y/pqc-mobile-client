@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.1.0...v0.1.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* asset size + build hygiene (audit follow-ups) ([4911da7](https://github.com/sriharsha-y/pqc-mobile-client/commit/4911da7d4f1b28a6814765bc95a9ca48e8bc63b9))
+* **rn-sample:** declare non-exempt encryption in iOS Info.plist ([00e97e8](https://github.com/sriharsha-y/pqc-mobile-client/commit/00e97e8a9f8cb7879ff7d81f12a27dd17e850f80))
+* **rn-sample:** harden iOS pod for use_frameworks! and drop dead pbxproj setting ([aaed855](https://github.com/sriharsha-y/pqc-mobile-client/commit/aaed8550f4a095ef9846e8ba936dfaab8344d572))
+* **rn-sample:** register PqcURLProtocol.swift in iOS project so it compiles ([009c85e](https://github.com/sriharsha-y/pqc-mobile-client/commit/009c85e8d04b69bd21376c90b41b813f690131e7))
+
+
+### Performance Improvements
+
+* **build:** gate uniffi-bindgen CLI behind feature flag ([eac1400](https://github.com/sriharsha-y/pqc-mobile-client/commit/eac1400102d5fcf41ccc41f5b6b6ae042be8a28a))
+
 ## 0.1.0 (2026-05-22)
 
 
