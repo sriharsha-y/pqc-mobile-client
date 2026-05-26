@@ -127,12 +127,25 @@ impl PqcHttpClient {
         }
 
         // A TCP reset, h2 GOAWAY, or carrier-handover during body read is
-        // a transport-level failure, not a response-shape one. Routing
-        // through map_reqwest_err lets it surface as Network / Timeout /
-        // Tls, so the retry contract documented above also covers
-        // body-phase failures. InvalidResponse is reserved for cases
-        // where the bytes arrived but were structurally unusable.
-        let body = resp.bytes().await.map_err(map_reqwest_err)?.to_vec();
+        // a transport-level failure. Map it to Timeout / Network only —
+        // skip the substring-based handshake-error classification that
+        // map_reqwest_err does, because handshake-time variants
+        // (PinningFailure, TrustVerification, Tls) are structurally
+        // impossible mid-body: the handshake already completed.
+        // Substring-matching here would falsely trip the
+        // "do NOT retry, alert security" branch on a mid-stream TLS
+        // close_notify (which has "tls" in its error chain).
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    PqcError::Timeout
+                } else {
+                    PqcError::Network
+                }
+            })?
+            .to_vec();
 
         // The KEX group rustls selected on the most-recent handshake.
         // See kx_tracker module for the recording mechanism and the
