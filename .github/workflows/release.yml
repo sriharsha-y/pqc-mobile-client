@@ -149,14 +149,32 @@ jobs:
       # fail the release if any appear.
       - name: Guard against CLI-feature bloat regression
         run: |
-          AR=generated/PqcCore.xcframework/ios-arm64/libpqc_client.a
-          if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
-            echo "::error::iOS static archive contains uniffi-bindgen CLI symbols (clap / goblin / uniffi_bindgen_main)."
-            echo "The 'cli' cargo feature appears to have leaked into the cross-compile."
+          # Scan every slice in the xcframework, not just the device
+          # slice. A target-conditional feature unification (e.g. via a
+          # cfg(target_arch="x86_64") dev-dep) could leak CLI symbols
+          # into the simulator slice only, leaving the device slice
+          # clean — that would pass a device-only check and ship bloat
+          # to every developer running on the simulator.
+          shopt -s nullglob
+          archives=(generated/PqcCore.xcframework/*/libpqc_client.a)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No libpqc_client.a archives found under generated/PqcCore.xcframework/."
+            exit 1
+          fi
+          fail=0
+          for AR in "${archives[@]}"; do
+            if nm "$AR" 2>/dev/null | grep -qE "_clap_(builder|derive)|_goblin|_uniffi_bindgen_main"; then
+              echo "::error::Slice $AR contains uniffi-bindgen CLI symbols (clap / goblin / uniffi_bindgen_main)."
+              fail=1
+            else
+              echo "OK: no CLI symbols in $AR"
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::The 'cli' cargo feature appears to have leaked into the cross-compile."
             echo "Audit Cargo.toml's uniffi dep features and the build invocation in scripts/build-ios.sh."
             exit 1
           fi
-          echo "OK: no CLI symbols in $AR"
 
       - name: Package
         run: |
