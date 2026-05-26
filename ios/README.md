@@ -71,7 +71,7 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
 
-Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at the `swiftpm` branch's `Package.swift`. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches the matching release asset (`PqcCore-0.2.0.zip`) — same artifact CocoaPods consumes. SPM verifies the SHA256 checksum at download time.
+Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at the `swiftpm` branch's `Package.swift`. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.2.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.2.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
 
 The `swiftpm` branch is auto-maintained by the release workflow. Do not consume `main` directly via SPM — `main` has no `Package.swift` at root, only the Rust crate sources.
 
