@@ -527,13 +527,50 @@ jobs:
       - name: Publish podspec to CocoaPods Trunk
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+          VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           # --skip-import-validation skips the LOCAL xcodebuild compile
-          # of a sample iOS project against the pod. The Trunk server
-          # re-runs the same lint (including the import compile) on its
-          # side, so we don't lose validation — we just don't do it
-          # twice. Saves ~5-7 minutes of macos-latest time per release.
+          # of a sample iOS project against the pod. Trunk's server runs
+          # its own full lint on submission, so we don't lose
+          # validation — just don't do it twice. Saves ~5-7 min/release.
+          #
+          # We deliberately do NOT pass --synchronous. The flag only
+          # switches the client-side lint repo from the CDN-backed
+          # TrunkSource to the canonical github.com/CocoaPods/Specs.git;
+          # it doesn't add publish confirmation. Worse, in synchronous
+          # mode the Trunk server makes an extra GitHub commit-API call
+          # to record attribution AFTER the spec is already registered,
+          # and a frequent timeout there has bitten us twice in a row
+          # despite the spec being successfully published. See
+          # research notes referencing CocoaPods/CocoaPods#12286 and
+          # trunk.cocoapods.org pods_controller.rb verify_github_responses!
+          set +e
           pod trunk push PqcCore.podspec \
             --allow-warnings \
-            --skip-import-validation \
-            --synchronous
+            --skip-import-validation
+          push_exit=$?
+          set -e
+
+          if [ $push_exit -eq 0 ]; then
+            echo "::notice::pod trunk push completed cleanly."
+            exit 0
+          fi
+
+          # pod trunk push exited non-zero. The most likely cause is the
+          # cosmetic "GitHub commit API timed out" error that fires
+          # AFTER the spec was already accepted server-side. Verify
+          # against Trunk's API directly: if our version is registered,
+          # the publish actually succeeded.
+          echo "::warning::pod trunk push exited $push_exit — verifying via Trunk API..."
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "https://trunk.cocoapods.org/api/v1/pods/PqcCore" 2>/dev/null \
+                 | grep -q "\"name\":\"${VERSION}\""; then
+              echo "::notice::Trunk API confirms PqcCore ${VERSION} is registered. Treating as success."
+              exit 0
+            fi
+            echo "Attempt $i: Trunk API does not yet show ${VERSION}. Waiting 10s..."
+            sleep 10
+          done
+
+          echo "::error::pod trunk push exited $push_exit AND PqcCore ${VERSION} is not on Trunk after 60s of polling. Treat as a real failure."
+          exit 1
