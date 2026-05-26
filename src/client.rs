@@ -37,11 +37,13 @@ impl PqcHttpClient {
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
-        // HTTP/3 (QUIC) — opt-in. Adds the h3-quinn dependency footprint;
-        // gated until the corresponding cargo feature is enabled.
-        // if config.enable_http3 {
-        //     builder = builder.http3_prior_knowledge();
-        // }
+        // HTTP/3 (QUIC) — opt-in, but not yet wired (would pull in
+        // h3-quinn). Reject explicitly so a caller that requests it
+        // doesn't silently get HTTP/2 and make latency/observability
+        // decisions on a false premise.
+        if config.enable_http3 {
+            return Err(PqcError::InvalidRequest);
+        }
 
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
