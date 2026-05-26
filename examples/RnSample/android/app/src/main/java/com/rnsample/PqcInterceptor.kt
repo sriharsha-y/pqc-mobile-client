@@ -86,19 +86,18 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
     }
 
     /**
-     * Map the Rust core's `negotiated_protocol` string (formatted from
-     * `http::Version` via `Debug`, e.g. "HTTP/1.1" or "HTTP/2.0") to
-     * OkHttp's [Protocol] enum. Defaults to HTTP/1.1 on unknown values
-     * rather than fabricating HTTP/2 — wrong telemetry is worse than
-     * conservative telemetry. OkHttp lacks an HTTP/3 enum, so HTTP/3
-     * is reported as HTTP/2 (the closest OkHttp can express).
+     * Map the Rust core's `negotiated_protocol` string (the ALPN
+     * protocol id — "h2", "http/1.1", etc.) to OkHttp's [Protocol]
+     * enum. Defaults to HTTP/1.1 on unknown values rather than
+     * fabricating HTTP/2 — wrong telemetry is worse than conservative
+     * telemetry. OkHttp lacks an HTTP/3 enum, so h3 is reported as
+     * HTTP/2 (the closest OkHttp can express).
      */
     private fun parseProtocol(raw: String): Protocol = when (raw) {
-        "HTTP/0.9" -> Protocol.HTTP_1_0
-        "HTTP/1.0" -> Protocol.HTTP_1_0
-        "HTTP/1.1" -> Protocol.HTTP_1_1
-        "HTTP/2.0", "HTTP/2" -> Protocol.HTTP_2
-        "HTTP/3.0", "HTTP/3" -> Protocol.HTTP_2
+        "http/0.9", "http/1.0" -> Protocol.HTTP_1_0
+        "http/1.1" -> Protocol.HTTP_1_1
+        "h2" -> Protocol.HTTP_2
+        "h3" -> Protocol.HTTP_2
         else -> Protocol.HTTP_1_1
     }
 
