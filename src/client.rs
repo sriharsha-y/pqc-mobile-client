@@ -72,10 +72,13 @@ impl PqcHttpClient {
 
         let mut builder = self.inner.request(method, &req.url);
 
-        for (k, v) in &req.headers {
+        for (k, values) in &req.headers {
             let name = HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            let value = HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            builder = builder.header(name, value);
+            for v in values {
+                let value =
+                    HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
+                builder = builder.header(name.clone(), value);
+            }
         }
 
         if let Some(body) = req.body {

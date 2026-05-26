@@ -36,7 +36,10 @@ enum HttpMethod {
 dictionary HttpRequest {
     HttpMethod method;
     string url;
-    record<string, string> headers;
+    // Multi-value to mirror the response side. RFC 7230 §3.2.2 allows
+    // most headers to repeat; Cookie (RFC 6265 §5.4) and Set-Cookie are
+    // notable cases where multi-value semantics differ from comma-joined.
+    record<string, sequence<string>> headers;
     bytes? body;
     u64? timeout_ms;
 };
