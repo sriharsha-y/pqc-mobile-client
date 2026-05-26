@@ -384,3 +384,71 @@ jobs:
           # tag pointing at main.
           git tag -f "$TAG"
           git push --force origin "$TAG"
+
+  publish-maven:
+    name: publish-maven
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Rust + Android targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct from the build-android job's cache so concurrent
+          # runs don't fight over the same key. The two jobs do
+          # essentially the same Rust compile; we accept that
+          # duplication in exchange for cleaner failure isolation
+          # (a Maven publish credential issue shouldn't sink the
+          # tarball release asset).
+          shared-key: release-publish-maven
+
+      - name: Install cargo-ndk
+        run: cargo install --locked cargo-ndk
+
+      - name: Resolve NDK path
+        run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
+
+      - name: Build native + Kotlin bindings
+        run: ./scripts/build-android.sh
+
+      # Pinned Gradle version so the build is reproducible. The repo
+      # doesn't ship a wrapper (no gradlew committed) — setup-gradle's
+      # gradle-version input installs the requested version on PATH.
+      # Bump this in lockstep with android/build.gradle.kts's AGP +
+      # Kotlin plugin versions.
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # Vanniktech's plugin reads credentials from these standard
+      # ORG_GRADLE_PROJECT_* env vars. publishAndReleaseToMavenCentral
+      # signs all artifacts with the in-memory GPG key, uploads them
+      # to the Sonatype Central Portal staging repository, closes the
+      # repository, and triggers automatic release once Sonatype's
+      # validation passes — all in one task.
+      - name: Publish to Maven Central
+        working-directory: android
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.GPG_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSWORD }}
+        run: gradle publishAndReleaseToMavenCentral --no-configuration-cache
