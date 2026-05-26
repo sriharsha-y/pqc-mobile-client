@@ -35,36 +35,23 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 
 ### CocoaPods (recommended for RN apps; works for native)
 
-Local pod the consumer app references. Skeleton `PqcCore.podspec`:
+The project's `PqcCore.podspec` points at the GitHub Release asset, so consumers do **not** need a local build of this repo. In the consumer's `Podfile`:
 
 ```ruby
-Pod::Spec.new do |s|
-  s.name             = 'PqcCore'
-  s.version          = '0.1.0'
-  s.summary          = 'Post-Quantum TLS HTTPS client.'
-  s.homepage         = 'https://example.invalid/pqc-mobile-client'
-  s.license          = { :type => 'Apache-2.0' }
-  s.author           = 'Mobile Platform'
-  s.source           = { :path => '.' }
-  s.platform         = :ios, '13.0'
-  s.swift_version    = '5.9'
-
-  s.source_files     = '../generated/swift/pqc.swift'
-  s.vendored_frameworks = '../generated/PqcCore.xcframework'
-
-  s.pod_target_xcconfig = { 'OTHER_LDFLAGS' => '-lc++' }
-end
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.2.0/PqcCore.podspec'
 ```
 
-In the consumer's `Podfile`:
+Pin the version in the URL to whatever release you want. CocoaPods downloads the matching `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the release on `pod install` — no `./scripts/build-ios.sh` required.
+
+Once the pod is also published to the CocoaPods trunk registry (planned), the syntax shortens to:
 
 ```ruby
-pod 'PqcCore', :path => '../../pqc-mobile-client/ios'
+pod 'PqcCore', '~> 0.2.0'
 ```
 
-### Swift Package Manager (recommended for pure native apps)
+### Swift Package Manager
 
-A `Package.swift` wrapping the XCFramework + the generated Swift file. SPM is the modern path for native iOS apps; RN apps overwhelmingly stay on CocoaPods, so use CocoaPods there to avoid mixed-tooling pain.
+Planned. Will resolve `Package.swift` from a dedicated `swiftpm` branch that points at the same release-asset XCFramework zip. Until shipped, native iOS apps can use CocoaPods above.
 
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 

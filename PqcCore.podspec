@@ -4,18 +4,27 @@ Pod::Spec.new do |s|
   s.summary          = 'Post-Quantum TLS HTTPS client (Rust + UniFFI) — iOS XCFramework + Swift bindings.'
   s.description      = <<-DESC
     Vendors PqcCore.xcframework (rustls + rustls-post-quantum + aws-lc-rs)
-    and the UniFFI-generated Swift binding. Run ./scripts/build-ios.sh in
-    this repo first to produce the XCFramework at generated/PqcCore.xcframework.
+    and the UniFFI-generated Swift binding. Consumers do not need a local
+    build; the podspec fetches the prebuilt XCFramework + Swift binding from
+    the matching GitHub release asset (PqcCore-X.Y.Z.zip).
   DESC
   s.homepage         = 'https://github.com/sriharsha-y/pqc-mobile-client'
-  s.license          = { :type => 'Apache-2.0' }
+  s.license          = { :type => 'Apache-2.0', :file => 'LICENSE' }
   s.author           = { 'Harsha Yarabarla' => 'harsha.yarabarla@gmail.com' }
-  s.source           = { :git => 'https://github.com/sriharsha-y/pqc-mobile-client.git', :tag => s.version.to_s }
+  # :http source points at the per-release prebuilt bundle attached to
+  # the GitHub release. CocoaPods downloads, verifies, and unpacks the
+  # zip into the Pod root — paths below are relative to that root.
+  # The CI release flow (release.yml: build-ios → Package step) is the
+  # sole producer of these zips; the layout is contract-locked.
+  s.source = {
+    :http => "https://github.com/sriharsha-y/pqc-mobile-client/releases/download/v#{s.version}/PqcCore-#{s.version}.zip",
+    :type => 'zip',
+  }
   s.platform         = :ios, '13.0'
   s.swift_version    = '5.9'
 
-  s.source_files      = 'generated/swift/pqc.swift'
-  s.vendored_frameworks = 'generated/PqcCore.xcframework'
+  s.source_files      = 'pqc.swift'
+  s.vendored_frameworks = 'PqcCore.xcframework'
 
   # static_framework = true is required when a Pod both vendors an
   # XCFramework AND ships Swift sources, especially under
