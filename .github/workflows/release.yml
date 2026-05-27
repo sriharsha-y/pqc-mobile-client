@@ -296,29 +296,28 @@ jobs:
     name: publish-swiftpm
     needs: [release-please, attach-assets]
     if: ${{ needs.release-please.outputs.release_created }}
-    # macos-latest because it ships Swift preinstalled with Xcode.
-    # An earlier attempt to use ubuntu-latest + swift-actions/setup-swift@v2
-    # failed with an HTTP 404 on the Swift toolchain download URL
-    # (a known intermittent issue with that action's URL builder; the
-    # action is also Node.js 20 and being deprecated). For public repos
-    # macOS minutes are unlimited, so the cost argument that originally
-    # motivated the Linux move no longer applies.
+    # macos-latest because Swift is preinstalled with Xcode. `swift
+    # package compute-checksum` and `swift package dump-package` need
+    # the toolchain. Public repos get unlimited macOS minutes so the
+    # cost argument that originally motivated trying Linux doesn't
+    # apply.
     runs-on: macos-latest
     permissions:
       contents: write
-    env:
-      SWIFTPM_BRANCH: swiftpm
     steps:
-      # Templates + LICENSE live on main; we read them from this checkout
-      # and write the rendered files into a fresh clone of the swiftpm
-      # branch (see "Update swiftpm branch" step).
-      - name: Checkout main
+      - name: Checkout main (for the template + last-release Package.swift)
         uses: actions/checkout@v4
         with:
           ref: main
-          path: main-checkout
+          # fetch-depth: 0 so we can push back a tag-move below.
+          fetch-depth: 0
+          # Use the workflow token explicitly so the later git push has
+          # write permission via the smart-protocol (REST API writes to
+          # git/refs require additional scopes the default token may not
+          # carry).
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download release asset, checksum, render Package.swift
+      - name: Render Package.swift + Sources/PqcCore/pqc.swift from the release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -343,86 +342,57 @@ jobs:
           CHECKSUM="$(swift package compute-checksum "$STAGE/PqcCore-${VERSION}.xcframework.zip")"
 
           # Extract pqc.swift from the fat zip for placement under
-          # Sources/PqcCore on the swiftpm branch. SPM cannot extract
-          # arbitrary files out of a binaryTarget archive, so the Swift
-          # binding has to be a real source file in the swiftpm branch.
+          # Sources/PqcCore. SPM cannot extract arbitrary files out of
+          # a binaryTarget archive, so the Swift binding has to live as
+          # a real source file at the package's source root.
           unzip -j "$STAGE/PqcCore-${VERSION}.zip" pqc.swift -d "$STAGE/"
 
+          # Render Package.swift from the template directly into the
+          # working tree at the repo root, overwriting the previous
+          # release's values.
           sed \
             -e "s|{{VERSION}}|${VERSION}|g" \
             -e "s|{{CHECKSUM}}|${CHECKSUM}|g" \
-            main-checkout/.github/swiftpm-template/Package.swift.in \
-            > "$STAGE/Package.swift"
+            .github/swiftpm-template/Package.swift.in \
+            > Package.swift
 
-          cp main-checkout/LICENSE "$STAGE/"
-          cp main-checkout/.github/swiftpm-template/README.md "$STAGE/"
-          # PqcCore.podspec is the CocoaPods manifest. Carry it onto the
-          # swiftpm branch too, so consumers using
-          #   pod 'PqcCore', :podspec => 'https://raw.../vX.Y.Z/PqcCore.podspec'
-          # resolve through the same tag the SPM consumers do. The version
-          # line was already bumped by release-please before the workflow
-          # ran (via release-please-config.json extra-files).
-          cp main-checkout/PqcCore.podspec "$STAGE/"
+          mkdir -p Sources/PqcCore
+          cp "$STAGE/pqc.swift" Sources/PqcCore/pqc.swift
 
-          echo "STAGE=$STAGE" >> $GITHUB_ENV
+          # Fail fast if the rendered Package.swift is malformed. Runs
+          # BEFORE we commit + force-move the tag.
+          swift package --package-path . dump-package > /dev/null
+          echo "Package.swift renders cleanly for $VERSION."
+
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
 
-      - name: Update swiftpm branch and re-point release tag
+      - name: Commit Package.swift + pqc.swift to main, re-point release tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          WORK="$(mktemp -d)"
-          cd "$WORK"
+          # If neither file changed (e.g., re-run of a release that
+          # already pushed), --allow-empty makes the job safely
+          # idempotent — the tag re-point still runs.
+          git add Package.swift Sources/PqcCore/pqc.swift
+          git commit --allow-empty -m "chore(release): swiftpm metadata for ${TAG} [skip ci]"
 
-          if git ls-remote --exit-code --heads "$REPO_URL" "$SWIFTPM_BRANCH" >/dev/null 2>&1; then
-            # Branch exists: clone single-branch and clear its tracked files.
-            git clone --branch "$SWIFTPM_BRANCH" --single-branch "$REPO_URL" .
-            git rm -rf . 2>/dev/null || true
-          else
-            # First run: bootstrap an orphan branch.
-            git init -b "$SWIFTPM_BRANCH"
-            git remote add origin "$REPO_URL"
-          fi
+          # Push the commit. Branch protection on main may require this
+          # to go via a PR, but for an automated workflow-token-authored
+          # commit it usually is allowed (matching GitHub's default
+          # "bot-author exemption" if the rule is configured).
+          git push origin HEAD:main
 
-          # Lay down the new tree.
-          mkdir -p Sources/PqcCore
-          cp "$STAGE/Package.swift" .
-          cp "$STAGE/PqcCore.podspec" .
-          cp "$STAGE/pqc.swift" Sources/PqcCore/
-          cp "$STAGE/LICENSE" .
-          cp "$STAGE/README.md" .
-
-          git add -A
-          # --allow-empty makes the job safely re-runnable. If a transient
-          # failure earlier in the workflow caused this job to abort after
-          # the swiftpm branch was already pushed in a prior run, the new
-          # staging tree may be byte-identical and `git commit` would
-          # otherwise exit non-zero with "nothing to commit", aborting the
-          # tag retarget below — leaving the v-tag pointed at the wrong
-          # commit until manual intervention.
-          git commit --allow-empty -m "release: ${TAG}"
-
-          # Fail fast if the rendered Package.swift is malformed. This
-          # runs BEFORE we push the branch and move the tag; a broken
-          # manifest at this point would otherwise be visible to every
-          # SPM consumer the moment the tag moves. swift package
-          # dump-package parses the manifest and prints the resolved
-          # model, exiting non-zero on syntax/type errors.
-          swift package --package-path . dump-package > /dev/null
-
-          git push -u origin "HEAD:$SWIFTPM_BRANCH"
-
-          # Move the release tag from the release-please commit on main
-          # to this swiftpm-branch commit. SPM resolves `from: "X.Y.Z"`
-          # by walking tags and reading Package.swift at the tagged
-          # commit, so the tag must point where Package.swift lives.
-          # Force is required because release-please already created the
-          # tag pointing at main.
+          # Move the release tag from the release-please commit (where
+          # Package.swift had the PREVIOUS version's checksum) to this
+          # new commit (where Package.swift matches the just-uploaded
+          # asset). Both commits are on main, so release-please's
+          # tag-walk still finds the tag as an ancestor — the orphan
+          # swiftpm-branch design that previously broke this anchor is
+          # gone.
           git tag -f "$TAG"
           git push --force origin "$TAG"
 
