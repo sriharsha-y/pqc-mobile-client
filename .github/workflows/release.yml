@@ -101,9 +101,17 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
+          # Include android/libs/ — the rustls-platform-verifier Kotlin
+          # glue jar that build-android.sh extracted out of the vendored
+          # crate AAR. Tarball consumers (the "behind a corporate proxy /
+          # no Maven Central" path) need it on their compile/runtime
+          # classpath; without it they hit
+          #   NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier
+          # on the first handshake.
           tar -czf "dist/${ARCHIVE}" \
               -C target jniLibs \
-              -C ../generated kotlin
+              -C ../generated kotlin \
+              -C ../android libs
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
@@ -118,8 +126,13 @@ jobs:
       # without redoing the cargo-ndk cross-compile. Saves ~3 min of
       # redundant work on every release. Tarball avoids the brittle
       # upload-artifact v4 path-preservation semantics for nested dirs.
+      #
+      # Also stash android/libs/ — that's where build-android.sh extracts
+      # the rustls-platform-verifier Kotlin glue jar so AGP can bundle
+      # it into our AAR. publish-maven must see it at gradle-assemble
+      # time or the published AAR loses those classes.
       - name: Bundle native libs + Kotlin bindings for downstream jobs
-        run: tar -czf /tmp/android-native.tar.gz target/jniLibs generated/kotlin
+        run: tar -czf /tmp/android-native.tar.gz target/jniLibs generated/kotlin android/libs
 
       - name: Upload native + bindings (for publish-maven)
         uses: actions/upload-artifact@v4
@@ -427,10 +440,12 @@ jobs:
         run: tar -xzf /tmp/android-native.tar.gz
 
       # Pinned Gradle version so the build is reproducible. The repo
-      # doesn't ship a wrapper (no gradlew committed) — setup-gradle's
-      # gradle-version input installs the requested version on PATH.
-      # Bump this in lockstep with android/build.gradle.kts's AGP +
-      # Kotlin plugin versions.
+      # ships a wrapper at android/gradlew also pinned to 8.7 (see
+      # android/gradle/wrapper/gradle-wrapper.properties). We still use
+      # setup-gradle here for the action's caching/instrumentation, but
+      # the actual gradle version is locked by the wrapper. Bump BOTH
+      # in lockstep with android/build.gradle.kts's AGP + Kotlin plugin
+      # versions.
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'

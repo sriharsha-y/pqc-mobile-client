@@ -52,6 +52,40 @@ jobs:
       - name: Build native libraries + Kotlin bindings
         run: ./scripts/build-android.sh
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Assemble the actual AAR via the wrapper so we can assert what
+      # ends up inside it. Without this step, a regression that drops
+      # the fat-AAR `api(fileTree("libs"))` wiring would only surface
+      # post-Maven-Central-publish as a downstream NoClassDefFoundError.
+      - name: Assemble AAR
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      # Fat-AAR contract assertion: the published AAR MUST embed
+      # rustls-platform-verifier's classes.jar under libs/ — without it
+      # consumers crash at first TLS handshake with
+      #   NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier
+      # See android/build.gradle.kts (api(fileTree("libs"))) +
+      # scripts/build-android.sh (jar extraction).
+      - name: Assert fat-AAR bundles rustls-platform-verifier
+        run: |
+          AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
+          if [ ! -f "$AAR" ]; then
+            echo "::error::Expected AAR at $AAR"
+            exit 1
+          fi
+          if ! unzip -l "$AAR" | grep -qE 'libs/rustls-platform-verifier-[0-9.]+\.jar'; then
+            echo "::error::$AAR is missing libs/rustls-platform-verifier-*.jar."
+            echo "::error::Audit android/build.gradle.kts's api(fileTree(\"libs\")) and scripts/build-android.sh's extraction step."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          echo "OK: AAR contains the bundled rustls-platform-verifier jar."
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -59,5 +93,6 @@ jobs:
           path: |
             target/jniLibs/
             generated/kotlin/
+            android/build/outputs/aar/
           if-no-files-found: error
           retention-days: 14

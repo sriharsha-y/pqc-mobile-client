@@ -56,3 +56,8 @@ examples/*/android/app/src/main/jniLibs/
 examples/*/android/app/src/main/java/uniffi/
 examples/*/ios/PqcCore.xcframework/
 examples/*/ios/RnSample/pqc.swift
+
+# Auto-extracted upstream jars (rustls-platform-verifier Kotlin glue,
+# pulled out of the vendored Maven AAR by scripts/build-android.sh).
+# Regenerated on every build; not source.
+android/libs/
