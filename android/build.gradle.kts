@@ -9,7 +9,7 @@ plugins {
 // release-please-config.json's extra-files rewrites this version literal
 // on each release (via the x-release-please-version marker). Keep the
 // format `version = "X.Y.Z"` so the generic updater regex matches.
-version = "0.2.1" // x-release-please-version
+version = "0.3.0" // x-release-please-version
 group = "io.github.sriharsha-y"
 
 android {
