@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.2.1...v0.3.0) (2026-05-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **spm:** Package.swift lives on main; remove the orphan swiftpm branch design
+
+### Bug Fixes
+
+* **release:** dedup cargo-ndk between build-android and publish-maven + GPG diagnostics ([5f90cb7](https://github.com/sriharsha-y/pqc-mobile-client/commit/5f90cb7fe82a77cb42686bd9dcc1334ce8d401b3))
+* **release:** treat cocoapods post-publish API timeout as success when Trunk confirms registration ([7dbe798](https://github.com/sriharsha-y/pqc-mobile-client/commit/7dbe7982246f029308f7a4337c3f6dd958e48231))
+* **spm:** Package.swift lives on main; remove the orphan swiftpm branch design ([603e9d5](https://github.com/sriharsha-y/pqc-mobile-client/commit/603e9d537522865d19defe01f4e5789a3509e288))
+
 ## [0.2.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.2.0...v0.2.1) (2026-05-26)
 
 
