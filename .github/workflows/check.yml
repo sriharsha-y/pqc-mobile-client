@@ -51,7 +51,12 @@ jobs:
         # Includes the smoke test against pq.cloudflareresearch.com. If CF's
         # PQ endpoint is down, re-run via workflow_dispatch; we want loud
         # signal when negotiation breaks rather than silently green.
-        run: cargo test --release --locked -- --nocapture
+        #
+        # --test-threads=1 because the smoke suite reads from a global
+        # kx_tracker (see src/pqc.udl HttpResponse doc). Parallel runs
+        # let one test's handshake clobber another test's read, making
+        # classical_fallback_github flap.
+        run: cargo test --release --locked -- --nocapture --test-threads=1
 
   # Security + supply-chain checks: cargo-audit scans the locked dep tree
   # against the RustSec advisory database; cargo-deny enforces the license
