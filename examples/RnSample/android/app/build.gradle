@@ -113,6 +113,10 @@ android {
 // paths actually exist.
 android.sourceSets["main"].jniLibs.srcDir(file("../../../../target/jniLibs"))
 android.sourceSets["main"].java.srcDir(file("../../../../generated/kotlin"))
+// Hand-written glue that ships with the published AAR — when consuming
+// via Maven Central these come bundled, but local development consumes
+// the raw bindings so we have to add the source set explicitly.
+android.sourceSets["main"].java.srcDir(file("../../../../android/src/main/kotlin"))
 
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
@@ -129,4 +133,40 @@ dependencies {
     // request API.
     implementation("net.java.dev.jna:jna:5.14.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+
+    // rustls-platform-verifier's Android JVM support classes
+    // (org.rustls.platformverifier.CertificateVerifier). The Rust crate's
+    // JNI shim calls back into these for X509 chain validation; without
+    // them the first handshake throws NoClassDefFoundError.
+    //
+    // Source of truth: the parent repo's android/libs/ directory, populated
+    // by scripts/build-android.sh by extracting the jar out of the
+    // Cargo-vendored rustls-platform-verifier-android crate. The published
+    // Maven Central AAR bundles this jar internally (api(fileTree("libs"))
+    // in android/build.gradle.kts), but THIS SAMPLE consumes the library via
+    // source paths (target/jniLibs + generated/kotlin) — source-path mode
+    // skips AAR packaging entirely, so the bundled jar never reaches us.
+    // Pull straight from the parent's android/libs/ instead of hand-vendoring
+    // a private copy in app/libs/. Version-agnostic so a bump in the upstream
+    // rustls-platform-verifier crate flows through with no edits here.
+    implementation(fileTree("../../../../android/libs") { include "*.jar" })
+}
+
+// Fail-fast guard mirroring android/build.gradle.kts's preBuild check.
+// fileTree resolving to an empty set is a silent Gradle failure — the build
+// completes, the app links, and the first TLS handshake at runtime crashes
+// with NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier.
+// Loud error at configure time beats a runtime crash on a real device.
+afterEvaluate {
+    def libsDir = file("../../../../android/libs")
+    def jars = libsDir.exists() ? fileTree(libsDir) { include "*.jar" }.files : []
+    if (jars.isEmpty()) {
+        throw new GradleException(
+            "Sample expects rustls-platform-verifier jar at ${libsDir.canonicalPath}/*.jar\n" +
+            "Run scripts/build-android.sh from the repo root first — it extracts the\n" +
+            "upstream Kotlin glue out of the rustls-platform-verifier-android crate\n" +
+            "and writes it to android/libs/. Or run examples/RnSample/scripts/wire-pqc.sh\n" +
+            "which invokes both build-android.sh and build-ios.sh."
+        )
+    }
 }
