@@ -136,6 +136,16 @@ impl ServerCertVerifier for PinningVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+
+    // RFC 7250 raw-public-key mode is opt-in client-side; today the
+    // platform verifier returns `false`. Delegating defensively so that
+    // if rustls-platform-verifier ever flips this for a future Apple /
+    // Android trust-store API, we don't silently downgrade the signal
+    // to `false` and confuse rustls's chain-parsing branch.
+    // https://docs.rs/rustls/0.23.40/rustls/client/danger/trait.ServerCertVerifier.html#method.requires_raw_public_keys
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
 }
 
 /// SHA-256 of the DER-encoded SPKI extracted from an X.509 certificate.
@@ -151,14 +161,30 @@ pub fn extract_spki_sha256(cert: &CertificateDer<'_>) -> Option<SpkiHash> {
 
 /// Decode a list of base64-encoded SPKI SHA-256 strings into raw 32-byte hashes.
 /// Returns `PqcError::InvalidRequest` if any entry is malformed.
+///
+/// Accepts BOTH standard (`+`/`/`) and URL-safe (`-`/`_`) base64
+/// alphabets, with or without padding. The UDL's `pinned_cert_sha256`
+/// doc-comment promises both, and the two alphabets show up in the
+/// wild for the same use case: openssl emits standard; JWT-adjacent
+/// tooling and Android Keystore exports emit URL-safe. Refusing one
+/// or the other would be a silent footgun — the pin just "never
+/// matches" with no useful error.
 pub fn decode_pin_list(encoded: &[String]) -> Result<Vec<SpkiHash>, PqcError> {
-    use base64::engine::general_purpose::STANDARD;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     use base64::Engine;
 
     encoded
         .iter()
         .map(|s| {
-            let bytes = STANDARD.decode(s).map_err(|_| PqcError::InvalidRequest)?;
+            // Try alphabets in order; first to decode wins. The wrong
+            // alphabet on a given string fails fast with an
+            // InvalidByte error, so the fall-through is cheap.
+            let bytes = STANDARD
+                .decode(s)
+                .or_else(|_| STANDARD_NO_PAD.decode(s))
+                .or_else(|_| URL_SAFE.decode(s))
+                .or_else(|_| URL_SAFE_NO_PAD.decode(s))
+                .map_err(|_| PqcError::InvalidRequest)?;
             bytes.try_into().map_err(|_| PqcError::InvalidRequest)
         })
         .collect()
@@ -352,5 +378,41 @@ mod tests {
     fn decode_pin_list_empty_returns_empty() {
         let decoded = decode_pin_list(&[]).unwrap();
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_pin_list_accepts_url_safe_alphabet() {
+        use base64::engine::general_purpose::URL_SAFE;
+        use base64::Engine;
+        // Construct a 32-byte payload whose base64 encoding actually
+        // contains the URL-safe-distinctive characters '-' and '_'
+        // (which standard base64 would emit as '+' and '/'). The byte
+        // sequence 0xFB 0xFF picks up both in adjacent positions.
+        let raw: [u8; 32] = [0xFB, 0xFF]
+            .iter()
+            .cycle()
+            .take(32)
+            .copied()
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let encoded = URL_SAFE.encode(raw);
+        assert!(
+            encoded.contains('-') || encoded.contains('_'),
+            "test fixture should exercise URL-safe alphabet, got {encoded}"
+        );
+        let decoded = decode_pin_list(&[encoded]).expect("URL-safe base64 must decode");
+        assert_eq!(decoded[0], raw);
+    }
+
+    #[test]
+    fn decode_pin_list_accepts_unpadded_url_safe() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let raw = [0x42u8; 32];
+        let encoded = URL_SAFE_NO_PAD.encode(raw);
+        assert!(!encoded.ends_with('='), "test fixture should be unpadded");
+        let decoded = decode_pin_list(&[encoded]).expect("unpadded URL-safe must decode");
+        assert_eq!(decoded[0], raw);
     }
 }
