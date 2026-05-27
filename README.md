@@ -9,8 +9,6 @@ Post-Quantum TLS HTTPS client for mobile apps — **iOS 13.0+** and **Android AP
 
 Designed for any mobile app — **native iOS (Swift/Obj-C), native Android (Kotlin/Java), or React Native** — that needs to negotiate `X25519MLKEM768` against PQC-enabled servers (Akamai, Cloudflare, AWS) on OS versions that don't have native PQC TLS yet.
 
-> Companion design docs: [`PQC_MOBILE_ANALYSIS.md`](../commshub/PQC_MOBILE_ANALYSIS.md), [`PQC_RN_IMPLEMENTATION.md`](../commshub/PQC_RN_IMPLEMENTATION.md).
-
 ## Why this exists
 
 Akamai's edge has hybrid PQC TLS (`X25519MLKEM768`, IANA codepoint `0x11EC`) enabled. iOS 26+ and Chrome already negotiate it by default, but:
@@ -25,12 +23,12 @@ This crate provides a **unified, single-codebase, FIPS-validated** alternative t
 
 | Consumer | Pattern | Doc |
 |---|---|---|
-| Native Android app (Kotlin/Java) using OkHttp / Retrofit / Ktor | Custom `Interceptor` that delegates to `PqcHttpClient` | [`android/README.md`](android/README.md) Section 3 |
-| Native Android app using `HttpURLConnection` or no framework | Call `PqcHttpClient` directly from Kotlin/Java | [`android/README.md`](android/README.md) Section 6 |
-| React Native Android app | Same `Interceptor` installed via `OkHttpClientProvider.setOkHttpClientFactory` | [`android/README.md`](android/README.md) Section 5 |
-| Native iOS app using `URLSession` | Register `PqcURLProtocol` on the session config | [`ios/README.md`](ios/README.md) Section 3 |
-| Native iOS app using a custom HTTP client (AsyncHTTPClient, etc.) | Call `PqcHttpClient` directly from Swift/Obj-C | [`ios/README.md`](ios/README.md) Section 5 |
-| React Native iOS app | `PqcURLProtocol` registered via `RCTSetCustomNSURLSessionConfigurationProvider` | [`ios/README.md`](ios/README.md) Section 6 |
+| Native Android app (Kotlin/Java) using OkHttp / Retrofit / Ktor | Custom `Interceptor` that delegates to `PqcHttpClient` | [`docs/android.md`](docs/android.md) Section 3 |
+| Native Android app using `HttpURLConnection` or no framework | Call `PqcHttpClient` directly from Kotlin/Java | [`docs/android.md`](docs/android.md) Section 6 |
+| React Native Android app | Same `Interceptor` installed via `OkHttpClientProvider.setOkHttpClientFactory` | [`docs/android.md`](docs/android.md) Section 5 |
+| Native iOS app using `URLSession` | Register `PqcURLProtocol` on the session config | [`docs/ios.md`](docs/ios.md) Section 3 |
+| Native iOS app using a custom HTTP client (AsyncHTTPClient, etc.) | Call `PqcHttpClient` directly from Swift/Obj-C | [`docs/ios.md`](docs/ios.md) Section 5 |
+| React Native iOS app | `PqcURLProtocol` registered via `RCTSetCustomNSURLSessionConfigurationProvider` | [`docs/ios.md`](docs/ios.md) Section 6 |
 
 The Rust core, Kotlin bindings, and Swift bindings are **identical** across all six consumers. Only the integration glue at the call site differs.
 
@@ -68,28 +66,39 @@ pqc-mobile-client/
 │   ├── lib.rs              UniFFI entry point
 │   ├── pqc.udl             UniFFI interface (generates Kotlin + Swift bindings)
 │   ├── client.rs           PqcHttpClient implementation (wraps reqwest)
-│   ├── config.rs           Configuration types
+│   ├── config.rs           PqcConfig + RedirectPolicy
 │   ├── tls.rs              rustls + PQC + platform-verifier wiring
+│   ├── pinning.rs          SPKI SHA-256 leaf-strict cert pinning
+│   ├── kx_tracker.rs       Instrumented CryptoProvider — records negotiated TLS group
+│   ├── android_init.rs     JNI bridge — hands Application Context to rustls-platform-verifier
 │   ├── error.rs            PqcError enum
 │   └── types.rs            HttpRequest / HttpResponse / HttpMethod
+├── android/                Gradle library module (publishes the AAR to Maven Central)
+│   ├── build.gradle.kts    AGP + Maven publish + fat-AAR bundling
+│   ├── src/main/kotlin/    PqcAndroidInit.kt (JNI bridge consumer-side)
+│   └── gradlew             Pinned Gradle 8.7 wrapper
 ├── tests/
-│   └── smoke.rs            Network smoke test against Cloudflare PQ endpoint
+│   └── smoke.rs            Network smoke test against Cloudflare PQ endpoint (requires --test-threads=1)
 ├── scripts/
 │   ├── setup.sh            One-time developer setup
-│   ├── build-android.sh    Cross-compile to all Android ABIs + Kotlin bindings
-│   └── build-ios.sh        Build XCFramework + Swift bindings
-├── android/README.md       Consumption guide (native + React Native)
-├── ios/README.md           Consumption guide (native + React Native)
-├── PqcCore.podspec         Local CocoaPod that vendors the iOS XCFramework
-├── examples/RnSample/      Runnable React Native sample app (see its README)
-└── docs/                   (populate as design evolves)
+│   ├── build-android.sh    Cross-compile all Android ABIs + Kotlin bindings + extract rustls-pv jar
+│   └── build-ios.sh        Build XCFramework + Swift bindings + create repo-root symlinks
+├── docs/android.md         Android consumption guide (native + React Native)
+├── docs/ios.md             iOS consumption guide (native + React Native)
+├── PqcCore.podspec         CocoaPod manifest — published to CocoaPods Trunk
+├── Package.swift           SwiftPM manifest (regenerated each release by publish-swiftpm)
+├── Sources/PqcCore/        SPM source root — pqc.swift (ABI-locked to last release)
+└── examples/RnSample/      Runnable React Native sample app (see its README)
 ```
 
 ## Quick start
 
 ```bash
 ./scripts/setup.sh                 # one-time: rust targets, cargo-ndk
-cargo test -- --nocapture          # sanity-test against pq.cloudflareresearch.com
+cargo test -- --nocapture --test-threads=1   # sanity-test against pq.cloudflareresearch.com
+# --test-threads=1 is required: the smoke suite reads from a process-global
+# kx_tracker (see src/pqc.udl HttpResponse doc) — parallel tests would cross-
+# contaminate each other's reads.
 ./scripts/build-android.sh         # cross-compile all Android ABIs + Kotlin bindings
 ./scripts/build-ios.sh             # build XCFramework + Swift bindings
 ```
@@ -123,19 +132,19 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | Capability | Status |
 |---|---|
 | HTTP/1.1, HTTP/2 (via reqwest + hyper) | ✅ |
-| HTTP/3 / QUIC | ❌ Not yet wired (`enable_http3` config field is accepted but the `h3-quinn` dep + branch in `client.rs` are commented out) |
+| HTTP/3 / QUIC | ❌ Not supported (no config field; would require adding `h3-quinn` + a new HTTP/3 client path) |
 | Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
 | Classical fallback (X25519, P-256) | ✅ Automatic |
 | System trust store (iOS Keychain / Android KeyStore) | ✅ Via `rustls-platform-verifier` |
 | Cert pinning (SPKI SHA-256) | ✅ Layered on top of platform verifier; empty pin list disables |
-| Cookies | ✅ `reqwest` cookie store |
-| gzip / brotli decompression | ✅ |
-| Redirects | ✅ |
+| Cookies | ✅ Opt-in via `enableCookies`; off by default (session-leak vector for banking) |
+| gzip / brotli decompression | ✅ Body size capped via `maxBodyBytes` (default 16 MiB) to defuse decompression bombs |
+| Redirects | ✅ `RedirectPolicy::SameOriginOnly` by default; also `NoRedirects` / `Limited(max)` |
 | Connection pooling | ✅ |
-| Timeouts (connect / read / total) | ✅ |
+| Timeouts (connect / total) | ✅ `connectTimeoutMs` separated from `defaultTimeoutMs` so connect can fail fast on cell handover |
 | Cancellation | ✅ Via UniFFI async + tokio |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
-| Negotiated TLS group reporting on `HttpResponse` | ✅ Via instrumented `CryptoProvider` (see `src/kx_tracker.rs`) |
+| Negotiated TLS group + ALPN reporting on `HttpResponse` | ✅ `negotiatedNamedGroup` (process-global, see UDL caveat) and `negotiatedProtocol` (per-request ALPN) via instrumented `CryptoProvider` (`src/kx_tracker.rs`) |
 | Android GMS + non-GMS devices | ✅ |
 | iOS 13 – 18 | ✅ |
 | iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |

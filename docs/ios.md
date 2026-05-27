@@ -38,7 +38,7 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
 
 ```ruby
-pod 'PqcCore', '~> 0.2.0'
+pod 'PqcCore', '~> 0.3.0'
 ```
 
 `pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
@@ -46,7 +46,7 @@ pod 'PqcCore', '~> 0.2.0'
 Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
-pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.2.0/PqcCore.podspec'
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.3.0/PqcCore.podspec'
 ```
 
 Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
@@ -57,7 +57,7 @@ In your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.2.0")
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.3.0")
 ],
 targets: [
     .target(
@@ -71,7 +71,7 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
 
-Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.2.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.2.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
+Behind the scenes: SPM resolves `from: "0.3.0"` to the `v0.3.0` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.3.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.3.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
 
 `Package.swift` at the repo root is auto-maintained by the release workflow's `publish-swiftpm` job, which rewrites it with the latest version + URL + checksum on every release and re-points the release tag to the resulting commit.
 
@@ -90,13 +90,22 @@ final class PqcURLProtocol: URLProtocol {
         // ... full hostname list to route through PQC
     ]
 
-    static let client: PqcHttpClient = {
-        PqcHttpClient(config: PqcConfig(
-            pinnedCertSha256: CertPins.spkiSha256,
-            enablePostQuantum: true,
-            enableHttp3: false,
-            defaultTimeoutMs: 15_000
-        ))
+    static let client: PqcHttpClient? = {
+        // The PqcHttpClient constructor throws on malformed config
+        // (e.g. bad base64 in pinnedCertSha256). Wrap in try? and
+        // gracefully degrade rather than crashing the app.
+        try? PqcHttpClient(
+            config: PqcConfig(
+                pinnedCertSha256: CertPins.spkiSha256,
+                enablePostQuantum: true,
+                defaultTimeoutMs: 15_000,
+                connectTimeoutMs: nil,           // 10s default
+                maxBodyBytes: nil,               // 16 MiB default
+                enableCookies: false,            // banking: no auto cookie jar
+                userAgent: "MyApp/1.0",          // identify to bank WAF / Akamai
+                redirectPolicy: .sameOriginOnly  // refuse cross-origin 3xx
+            )
+        )
     }()
 
     private var task: Task<Void, Never>?
@@ -122,7 +131,11 @@ final class PqcURLProtocol: URLProtocol {
                     body: req.httpBody,
                     timeoutMs: nil
                 )
-                let pqcResp = try await Self.client.request(req: pqcReq)
+                guard let pqcClient = Self.client else {
+                    throw NSError(domain: "PqcURLProtocol", code: -3,
+                                  userInfo: [NSLocalizedDescriptionKey: "PqcHttpClient unavailable"])
+                }
+                let pqcResp = try await pqcClient.request(req: pqcReq)
                 let nsResp = HTTPURLResponse(
                     url: req.url!,
                     statusCode: Int(pqcResp.status),
@@ -202,12 +215,18 @@ let af = Session(configuration: cfg)
 For new code paths or non-URLSession-based clients, call `PqcHttpClient` directly. The UniFFI-generated Swift class has Swift-native `async`/`throws`.
 
 ```swift
-let pqc = PqcHttpClient(config: PqcConfig(
-    pinnedCertSha256: [],
-    enablePostQuantum: true,
-    enableHttp3: false,
-    defaultTimeoutMs: 10_000
-))
+let pqc = try PqcHttpClient(
+    config: PqcConfig(
+        pinnedCertSha256: [],
+        enablePostQuantum: true,
+        defaultTimeoutMs: 10_000,
+        connectTimeoutMs: nil,           // 10s default
+        maxBodyBytes: nil,               // 16 MiB default
+        enableCookies: false,
+        userAgent: "MyApp/1.0",
+        redirectPolicy: .sameOriginOnly
+    )
+)
 
 func fetchBalance() async throws -> Data {
     let resp = try await pqc.request(req: HttpRequest(
@@ -286,7 +305,7 @@ For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named gr
 
 ## 10. SPKI cert pinning — how to compute hashes
 
-`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI). Empty array disables pinning.
+`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty array disables pinning.
 
 Compute from a live server:
 

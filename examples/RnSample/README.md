@@ -44,14 +44,14 @@ The Metro bundler starts in a separate terminal automatically. The app shows a c
 
 ### Android — `OkHttpClientProvider` swap
 
-- `android/app/build.gradle` adds `net.java.dev.jna:jna` and `kotlinx-coroutines-core` deps, and points `jniLibs.srcDir` + `java.srcDir` at the repo's build outputs (`../../../../target/jniLibs` and `../../../../generated/kotlin`).
+- `android/app/build.gradle` adds `net.java.dev.jna:jna` and `kotlinx-coroutines-core` deps; points `jniLibs.srcDir` + `java.srcDir` at the repo's build outputs (`../../../../target/jniLibs` and `../../../../generated/kotlin`); and pulls the rustls-platform-verifier Kotlin glue via `fileTree("../../../../android/libs")` (extracted by `scripts/build-android.sh`). An `afterEvaluate` guard fails the build with a friendly error if those jars are missing — e.g. if you run `./gradlew` on a fresh checkout without `wire-pqc.sh`.
 - `android/app/src/main/java/com/rnsample/MainApplication.kt` installs the factory in `onCreate()` **before** `super.onCreate()` — late install silently no-ops per [react-native#34789](https://github.com/facebook/react-native/issues/34789).
 - `android/app/src/main/java/com/rnsample/PqcInterceptor.kt` adapts OkHttp's `Interceptor` contract to `PqcHttpClient.request()`. Must be the **last** interceptor; later ones never fire because the Rust core terminates the chain.
 - `android/app/proguard-rules.pro` keeps `uniffi.pqc.**`, JNA, and JNI methods so R8 doesn't strip them.
 
 ### iOS — `URLProtocol` interception
 
-- `ios/Podfile` adds `pod 'PqcCore', :path => '../../../'` pointing at the repo-root `PqcCore.podspec`, which vendors the XCFramework + Swift binding.
+- `ios/Podfile` adds `pod 'PqcCore', :path => '../../../'` pointing at the repo-root `PqcCore.podspec`, which vendors the XCFramework + Swift binding. The podspec uses bare paths (`pqc.swift`, `PqcCore.xcframework`) so the published release zip works directly; for local `:path` mode, `scripts/build-ios.sh` materializes those bare names as repo-root symlinks into `generated/`. Run `scripts/build-ios.sh` (or `wire-pqc.sh`) before `pod install` or it will fail to find the sources.
 - `ios/RnSample/PqcURLProtocol.swift` is the `URLProtocol` subclass. Sample intercepts every `https://`; a real app should narrow this to specific hostnames.
 - `ios/RnSample/AppDelegate.mm` calls `RCTSetCustomNSURLSessionConfigurationProvider(...)` from `didFinishLaunchingWithOptions`. The provider returns a `URLSessionConfiguration` with `[PqcURLProtocol class]` prepended to `protocolClasses` — *except* on iOS 26+ where the native URLSession already negotiates PQC.
 
@@ -71,6 +71,6 @@ If the on-screen text reads `kex = X25519MLKEM768`, the handshake succeeded with
 
 This sample intentionally elides things a real banking app needs:
 
-- No cert pinning configured (the integration accepts an empty `pinnedCertSha256` list). See [`../../android/README.md` Section 10](../../android/README.md) and [`../../ios/README.md` Section 10](../../ios/README.md) for how to compute and configure pins.
+- No cert pinning configured (the integration accepts an empty `pinnedCertSha256` list). See [`../../docs/android.md` Section 10](../../docs/android.md) and [`../../docs/ios.md` Section 10](../../docs/ios.md) for how to compute and configure pins.
 - `PqcURLProtocol.swift` intercepts every `https://` URL — a real app should restrict to known API hostnames so 3rd-party SDKs and CDN traffic continue to use URLSession's native stack.
 - WebViews (`react-native-webview`) and 3rd-party native SDKs (Firebase, Sentry, payment SDKs, etc.) bring their own HTTP stacks and are NOT covered by the swap. See [`../../README.md`](../../README.md) for the full coverage matrix.

@@ -67,7 +67,7 @@ Commits should appear authored by the human who made the change. **No** AI/model
 # `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
 # The `--features cli` gate is critical: it keeps clap / goblin /
 # uniffi_bindgen out of the iOS / Android cross-compiled archives.
-cargo test --release               # unit + smoke tests
+cargo test --release -- --test-threads=1   # unit + smoke tests (serial required: kx_tracker is process-global)
 ./scripts/build-android.sh         # cross-compile + Kotlin bindings
 ./scripts/build-ios.sh             # XCFramework + Swift bindings
 cargo fmt && cargo clippy --all-targets -- -D warnings
