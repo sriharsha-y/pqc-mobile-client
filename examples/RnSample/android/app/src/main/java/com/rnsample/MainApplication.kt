@@ -18,6 +18,8 @@ import com.facebook.soloader.SoLoader
 import okhttp3.OkHttpClient
 import uniffi.pqc.PqcConfig
 import uniffi.pqc.PqcHttpClient
+import uniffi.pqc.RedirectPolicy
+import uniffi.pqc.android.PqcAndroidInit
 import java.util.concurrent.TimeUnit
 
 class MainApplication : Application(), ReactApplication {
@@ -56,6 +58,13 @@ class MainApplication : Application(), ReactApplication {
   }
 
   private fun installPqcOkHttpFactory() {
+    // Hand the Application Context to rustls-platform-verifier BEFORE
+    // constructing PqcHttpClient — the constructor builds the TLS
+    // config, which calls the verifier, which requires this init.
+    // Without it the first request throws
+    //   uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized
+    PqcAndroidInit.init(this)
+
     val pqc = try {
       PqcHttpClient(
         PqcConfig(
@@ -63,8 +72,22 @@ class MainApplication : Application(), ReactApplication {
           // base64(SHA-256(SPKI)) for the production cert + at least one backup.
           pinnedCertSha256 = emptyList(),
           enablePostQuantum = true,
-          enableHttp3 = false,
           defaultTimeoutMs = 15_000UL,
+          // null lets the client pick its built-in defaults (10s connect,
+          // 16 MiB body cap). For a production banking app, set these
+          // explicitly per your SLO so they survive a defaults change.
+          connectTimeoutMs = null,
+          maxBodyBytes = null,
+          // Banking clients should NOT auto-attach Set-Cookie across
+          // endpoints (session-leak vector). Round-trip cookies via
+          // headers explicitly when needed.
+          enableCookies = false,
+          // Identify the app to Akamai Bot Manager / bank WAFs.
+          userAgent = "RnSample/0.3.1 (pqc-mobile-client)",
+          // Refuse cross-origin redirects so the pin / PQ guarantees of
+          // the original handshake can never be silently dropped by a
+          // 3xx to a different host.
+          redirectPolicy = RedirectPolicy.SameOriginOnly,
         )
       )
     } catch (t: Throwable) {

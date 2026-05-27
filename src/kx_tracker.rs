@@ -3,9 +3,19 @@
 //! `reqwest` doesn't expose the negotiated named group on its `Response`,
 //! and the rustls `ClientConnection` isn't reachable from inside reqwest's
 //! transport stack. To recover this information we wrap each
-//! `SupportedKxGroup` in the crypto provider so that — when rustls picks
-//! one and calls `start()` on it during handshake — the wrapper records
-//! the chosen `NamedGroup` into a process-global atomic.
+//! `SupportedKxGroup`, and the `ActiveKeyExchange` it produces, so that
+//! when rustls finishes the handshake it records the chosen `NamedGroup`
+//! into a process-global atomic.
+//!
+//! Recording happens in `ActiveKeyExchange::complete()` — NOT
+//! `SupportedKxGroup::start()`. `start()` is called per group the client
+//! pre-computes a key_share for in ClientHello (or before a retry); on
+//! servers that respond with HelloRetryRequest the server-selected
+//! group is different from the one(s) `start()` ran for, so a tracker
+//! hooked at `start()` reports the client's first offer instead of the
+//! group that actually carried the handshake. `complete()` runs exactly
+//! once per handshake, with the server's final choice as the
+//! `peer_pub_key`'s implied group — so it's the right place to record.
 //!
 //! Concurrency note: the recorded value is process-wide. Sequential
 //! request patterns (the common case for a banking app) read accurate
@@ -15,15 +25,15 @@
 //! DataStream 2.
 //!
 //! Caveat: handshakes are not free, so under HTTP/2 keep-alive pooling
-//! `start()` is called only when a new TLS connection is established —
-//! not on every request. The "last negotiated group" reflects the most
-//! recent handshake, which is stable across the pool's lifetime.
+//! `complete()` is called only when a new TLS connection is established
+//! — not on every request. The "last negotiated group" reflects the
+//! most recent handshake, which is stable across the pool's lifetime.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU16, Ordering};
 
-use rustls::crypto::{ActiveKeyExchange, CryptoProvider, SupportedKxGroup};
-use rustls::NamedGroup;
+use rustls::crypto::{ActiveKeyExchange, CryptoProvider, SharedSecret, SupportedKxGroup};
+use rustls::{NamedGroup, ProtocolVersion};
 
 /// IANA codepoint registry reserves 0; we use it as the "no handshake yet" sentinel.
 const UNSET: u16 = 0;
@@ -54,8 +64,9 @@ fn record_group(group: NamedGroup) {
     LAST_NEGOTIATED_GROUP.store(u16::from(group), Ordering::Relaxed);
 }
 
-/// Wraps a `SupportedKxGroup` so that selecting it for a handshake records
-/// the chosen `NamedGroup` into the global tracker.
+/// Wraps a `SupportedKxGroup` so that the `ActiveKeyExchange` it returns
+/// is itself wrapped to record the group at handshake completion (which
+/// is exactly the server-selected group; see module docs).
 struct TrackingKxGroup {
     inner: &'static dyn SupportedKxGroup,
 }
@@ -72,8 +83,88 @@ impl SupportedKxGroup for TrackingKxGroup {
     }
 
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, rustls::Error> {
-        record_group(self.inner.name());
-        self.inner.start()
+        // start() may be called for groups the client merely OFFERS in
+        // ClientHello but the server doesn't pick (incl. before a
+        // HelloRetryRequest). Don't record here — wrap the
+        // ActiveKeyExchange instead so we only record once the server
+        // actually drives the handshake to completion with this group.
+        let inner = self.inner.start()?;
+        let name = self.inner.name();
+        Ok(Box::new(TrackingActiveKeyExchange { inner, name }))
+    }
+
+    // Delegate metadata methods to the inner so our wrapper doesn't
+    // silently report defaults that disagree with reality. None of
+    // these affect correctness today (default `fips() == false` and
+    // `usable_for_version() == true` happen to match aws-lc-rs's
+    // current report), but the wrapper would silently misreport if
+    // rustls / rustls-post-quantum / aws-lc-rs ever toggles these.
+    // Authoritative trait:
+    //   https://docs.rs/rustls/0.23.40/rustls/crypto/trait.SupportedKxGroup.html
+    fn fips(&self) -> bool {
+        self.inner.fips()
+    }
+
+    fn usable_for_version(&self, version: ProtocolVersion) -> bool {
+        self.inner.usable_for_version(version)
+    }
+}
+
+/// Wraps an `ActiveKeyExchange` to record the group's name when the
+/// handshake completes — i.e. when rustls calls `complete()` with the
+/// peer's key_share. That call happens exactly once per handshake, on
+/// the group the server actually selected.
+struct TrackingActiveKeyExchange {
+    inner: Box<dyn ActiveKeyExchange>,
+    name: NamedGroup,
+}
+
+impl ActiveKeyExchange for TrackingActiveKeyExchange {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, rustls::Error> {
+        // Record BEFORE delegating: complete() consumes self, and we
+        // want the side-effect even if the inner call errors so that
+        // a failed-handshake post-mortem can still see the attempted
+        // group.
+        record_group(self.name);
+        self.inner.complete(peer_pub_key)
+    }
+
+    // Hybrid (MLKEM) groups carry a classical sub-component. If the
+    // server HelloRetryRequest's specifically to use just that classical
+    // half (rather than switching to a different group entirely),
+    // rustls calls these two methods on the original hybrid
+    // ActiveKeyExchange — NOT on a freshly-started classical one.
+    // The default trait impls return `None` / `unreachable!()`, which
+    // would mis-hide the hybrid nature of the inner and panic at HRR
+    // time. Delegating fixes a real iOS-only crash against github.com:
+    //   PqcCore.UniffiInternalError on the call from PqcURLProtocol,
+    // which corresponds to rustls hitting the `unreachable!()` in
+    // crypto::ActiveKeyExchange::complete_hybrid_component.
+    fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
+        self.inner.hybrid_component()
+    }
+
+    fn complete_hybrid_component(
+        self: Box<Self>,
+        peer_pub_key: &[u8],
+    ) -> Result<SharedSecret, rustls::Error> {
+        // Record the CLASSICAL component's group, since that's what the
+        // server is committing to. inner.hybrid_component() returns
+        // (NamedGroup::X25519, key_share_bytes) for X25519MLKEM768; we
+        // re-derive the name rather than caching it so we stay correct
+        // if rustls-post-quantum adds more hybrid combos later.
+        if let Some((classical, _)) = self.inner.hybrid_component() {
+            record_group(classical);
+        }
+        self.inner.complete_hybrid_component(peer_pub_key)
+    }
+
+    fn pub_key(&self) -> &[u8] {
+        self.inner.pub_key()
+    }
+
+    fn group(&self) -> NamedGroup {
+        self.inner.group()
     }
 }
 

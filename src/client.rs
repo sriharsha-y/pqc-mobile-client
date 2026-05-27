@@ -2,12 +2,23 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::redirect::Policy;
 
-use crate::config::PqcConfig;
+use crate::config::{PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
 use crate::kx_tracker::last_negotiated_group_str;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
+
+/// Default body cap when `PqcConfig::max_body_bytes == None`.
+/// 16 MiB is generous for any banking JSON payload and small enough
+/// that a hostile decompression bomb can't OOM the host app.
+const DEFAULT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Default connect timeout when `PqcConfig::connect_timeout_ms == None`.
+/// Sized for cellular handover: long enough to absorb a single retry
+/// of the SYN, short enough to fail fast and surface to the user.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The HTTPS client exposed to Kotlin / Swift via UniFFI.
 ///
@@ -16,6 +27,7 @@ use crate::types::{HttpMethod, HttpRequest, HttpResponse};
 pub struct PqcHttpClient {
     inner: reqwest::Client,
     default_timeout: Option<Duration>,
+    max_body_bytes: u64,
 }
 
 impl PqcHttpClient {
@@ -28,22 +40,63 @@ impl PqcHttpClient {
 
         let mut builder = reqwest::Client::builder()
             .use_preconfigured_tls(tls)
-            .cookie_store(true)
+            .cookie_store(config.enable_cookies)
             .gzip(true)
             .brotli(true)
-            .pool_max_idle_per_host(10);
+            // 0 = no idle pool. Mobile clients lose idle sockets on
+            // cell↔wifi handover (interface goes away, the kernel
+            // keeps the FD but the route is gone); the next request
+            // would stall until tcp_keepalive fires (default 2h).
+            // Forcing a fresh handshake per request avoids the stall
+            // at the cost of one extra RTT per call. The PQ TLS 1.3
+            // handshake is one round-trip anyway, so the cost is
+            // bounded.
+            .pool_max_idle_per_host(0)
+            // Keep-alive on the TCP socket itself: detects dead
+            // peers faster than the default OS heartbeat. 30s
+            // matches RFC 1122 §4.2.3.6 guidance for interactive
+            // mobile clients.
+            .tcp_keepalive(Duration::from_secs(30));
+
+        builder = builder.connect_timeout(
+            config
+                .connect_timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_CONNECT_TIMEOUT),
+        );
 
         if let Some(timeout_ms) = config.default_timeout_ms {
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
-        // HTTP/3 (QUIC) — opt-in, but not yet wired (would pull in
-        // h3-quinn). Reject explicitly so a caller that requests it
-        // doesn't silently get HTTP/2 and make latency/observability
-        // decisions on a false premise.
-        if config.enable_http3 {
-            return Err(PqcError::InvalidRequest);
+        if let Some(ref ua) = config.user_agent {
+            builder = builder.user_agent(ua.clone());
         }
+
+        builder = builder.redirect(match config.redirect_policy {
+            RedirectPolicy::NoRedirects {} => Policy::none(),
+            RedirectPolicy::SameOriginOnly {} => Policy::custom(|attempt| {
+                // attempt.url() = destination; attempt.previous() = chain.
+                // First entry is the original request URL.
+                let previous = attempt.previous().first();
+                let same_origin = match previous {
+                    Some(prev) => {
+                        attempt.url().scheme() == prev.scheme()
+                            && attempt.url().host_str() == prev.host_str()
+                            && attempt.url().port_or_known_default() == prev.port_or_known_default()
+                    }
+                    None => true,
+                };
+                if same_origin && attempt.previous().len() < 10 {
+                    attempt.follow()
+                } else if !same_origin {
+                    attempt.stop()
+                } else {
+                    attempt.error("too many redirects")
+                }
+            }),
+            RedirectPolicy::Limited { max } => Policy::limited(max.into()),
+        });
 
         // reqwest::ClientBuilder::build failures at this point are
         // residual wiring errors (DNS resolver init, proxy load, etc.)
@@ -57,9 +110,26 @@ impl PqcHttpClient {
         Ok(Self {
             inner: client,
             default_timeout: config.default_timeout_ms.map(Duration::from_millis),
+            max_body_bytes: config.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
         })
     }
+}
 
+// `async_runtime = "tokio"` tells UniFFI to drive our async exports
+// using a real tokio runtime. Without it, UniFFI's default executor is
+// not tokio-aware — reqwest/hyper's I/O calls (which depend on tokio's
+// reactor) panic at runtime with:
+//
+//   rustPanic("there is no reactor running, must be called from the
+//             context of a Tokio 1.x runtime")
+//
+// The macOS smoke test masks the bug because `#[tokio::test]` creates
+// its own runtime; the panic only surfaces when the method is called
+// through the FFI bridge (i.e., from a Swift/Kotlin consumer).
+// Constructor stays in a plain impl above because uniffi's proc-macro
+// export does not support associated functions.
+#[uniffi::export(async_runtime = "tokio")]
+impl PqcHttpClient {
     pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
         let method = match req.method {
             HttpMethod::Get => reqwest::Method::GET,
@@ -126,26 +196,47 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        // A TCP reset, h2 GOAWAY, or carrier-handover during body read is
-        // a transport-level failure. Map it to Timeout / Network only —
-        // skip the substring-based handshake-error classification that
-        // map_reqwest_err does, because handshake-time variants
-        // (PinningFailure, TrustVerification, Tls) are structurally
-        // impossible mid-body: the handshake already completed.
-        // Substring-matching here would falsely trip the
-        // "do NOT retry, alert security" branch on a mid-stream TLS
-        // close_notify (which has "tls" in its error chain).
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| {
+        // Stream the body with a hard cap, so a decompression bomb (a
+        // 1 KiB gzip/brotli stream that expands to gigabytes — CWE-409)
+        // can't OOM the host app. We can't trust Content-Length: it's
+        // pre-decompression for compressed bodies, and easily lied
+        // about. The only safe bound is "stop counting decompressed
+        // bytes when we exceed the cap." Tripping the cap returns
+        // InvalidResponse rather than a half-filled buffer so the
+        // caller knows the data is incomplete.
+        //
+        // A TCP reset, h2 GOAWAY, or carrier-handover during body read
+        // is a transport-level failure. Map to Timeout / Network only
+        // — skip the typed rustls classifier in map_reqwest_err,
+        // because handshake-time variants (PinningFailure,
+        // TrustVerification, Tls) are structurally impossible mid-body:
+        // the handshake already completed.
+        let cap = self.max_body_bytes;
+        let mut body = Vec::new();
+        let mut stream = resp;
+        loop {
+            let next = stream.chunk().await.map_err(|e| {
                 if e.is_timeout() {
                     PqcError::Timeout
                 } else {
                     PqcError::Network
                 }
-            })?
-            .to_vec();
+            })?;
+            match next {
+                Some(chunk) => {
+                    // Pre-check: would appending overflow the cap? Use
+                    // checked arithmetic so a 2^63-byte chunk on a 32-bit
+                    // device can't wrap. Saturating add would also work;
+                    // explicit overflow check makes intent clearer.
+                    let projected = (body.len() as u64).saturating_add(chunk.len() as u64);
+                    if projected > cap {
+                        return Err(PqcError::InvalidResponse);
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                None => break,
+            }
+        }
 
         // The KEX group rustls selected on the most-recent handshake.
         // See kx_tracker module for the recording mechanism and the
@@ -166,28 +257,44 @@ impl PqcHttpClient {
 /// callers can distinguish a transient network blip (retry) from a
 /// pinning / trust / TLS failure (do NOT retry, alert security).
 ///
-/// reqwest doesn't expose typed access to the underlying `rustls::Error`,
-/// so we walk the error source chain and pattern-match on the rendered
-/// message. The strings checked here are produced by:
-///   - our own `PinningVerifier` (`"certificate pinning failure..."`)
-///   - rustls's `CertificateError` variants (contain "certificate")
-///   - rustls's TLS / handshake errors (contain "tls" or "handshake")
-///
-/// Fragile against upstream message renames, so it's wrapped in a unit
-/// test (see tests below) and the substrings are kept broad rather than
-/// exact. If a finer typed surface lands in rustls/reqwest, prefer that.
+/// Strategy:
+///   1. Walk the `source()` chain and try to **downcast to `&rustls::Error`**
+///      — `rustls::Error: 'static`, so `Any::downcast_ref` works through
+///      `dyn std::error::Error + 'static`. This is the authoritative path
+///      and avoids string fragility entirely.
+///   2. As a defensive fallback, do the legacy substring matching against
+///      our own `PinningVerifier` message. Substrings on rustls strings
+///      were brittle because variants like `PeerIncompatible(...)` and
+///      `AlertReceived(...)` render with neither "tls" nor "handshake" in
+///      their Display, so a server `protocol_version` alert was being
+///      mis-classified as `Network` (would trigger a retry on a hard
+///      negotiation failure). Typed match avoids that entire class of bug.
 fn map_reqwest_err(e: reqwest::Error) -> PqcError {
     if e.is_timeout() {
         return PqcError::Timeout;
     }
 
-    // The outermost reqwest error Display embeds the request URL
-    // ("error sending request for url (https://api.example.com/v1/certificates/list)"),
-    // which contaminates the substring match: a URL containing "certificate"
-    // would silently map to TrustVerification even for a plain DNS failure.
-    // Strip the URL from every frame before lowercase matching.
     let url_str = e.url().map(|u| u.to_string());
 
+    // Pass 1: typed downcast. `rustls::Error` is the authoritative shape.
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(err) = src {
+        if let Some(rustls_err) = err.downcast_ref::<rustls::Error>() {
+            return classify_rustls_error(rustls_err);
+        }
+        src = err.source();
+    }
+
+    // Pass 2: substring fallback. Used to catch:
+    //   - our own PinningVerifier's "certificate pinning failure: ..."
+    //     message (PinningError is a rustls `OtherError(Box<dyn Error>)`
+    //     wrapper around a String, so downcasting catches it as
+    //     `rustls::Error::Other(...)` only, not as our pinning type).
+    //   - any case where the rustls error surfaces only via reqwest's
+    //     own wrapping (older versions, non-rustls TLS backends compiled
+    //     into a future build, etc.).
+    // The outermost reqwest error Display embeds the request URL, which
+    // contaminates the substring match — strip first.
     let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
     while let Some(err) = src {
         let mut msg = err.to_string();
@@ -207,6 +314,81 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
         src = err.source();
     }
     PqcError::Network
+}
+
+/// Map a `rustls::Error` variant to a `PqcError`. `rustls::Error` is
+/// `#[non_exhaustive]`, so a wildcard arm is REQUIRED by the compiler
+/// — we cannot get a compile-time "you forgot a variant" guarantee
+/// here. The explicit enumeration below is therefore a *security signal
+/// guarantee*, not a forward-compatibility guarantee: every variant we
+/// list deliberately classifies into a specific `PqcError`, and the
+/// `_` wildcard conservatively maps unknowns to `PqcError::Tls`.
+///
+/// Trade-off: a future rustls variant that semantically means
+/// "certificate trust verification failed" (e.g., a future cert-policy
+/// or SCT-related variant) will silently land in `Tls` instead of
+/// `TrustVerification`, downgrading the security signal consumers
+/// branch on for alerting. Mitigation: **on every `rustls` minor-
+/// version bump, re-audit the upstream `enum Error` and extend the
+/// match arms below before merging.** The doc comment on the wildcard
+/// arm below is the second reminder.
+///
+/// Reference: https://docs.rs/rustls/0.23.40/rustls/enum.Error.html
+fn classify_rustls_error(e: &rustls::Error) -> PqcError {
+    use rustls::Error as R;
+    match e {
+        // Certificate chain validation failed (platform verifier rejected
+        // the chain). Maps to TrustVerification — the platform refused to
+        // trust this peer.
+        R::InvalidCertificate(_) | R::InvalidCertRevocationList(_) => PqcError::TrustVerification,
+
+        // Our own PinningVerifier surfaces failures via
+        // rustls::Error::Other(OtherError(...))). Walk the inner source
+        // to recover the marker. If we can't, fall through to Tls (the
+        // pin failure is at least handshake-time).
+        R::Other(other) => {
+            let msg = other.to_string().to_lowercase();
+            if msg.contains("pinning failure") {
+                PqcError::PinningFailure
+            } else {
+                PqcError::Tls
+            }
+        }
+
+        // Server alerts, version mismatches, protocol violations — all
+        // handshake-time TLS failures, none transient. Critically,
+        // PeerIncompatible / PeerMisbehaved / AlertReceived were being
+        // mis-classified as Network by the legacy substring path because
+        // their Display strings don't contain "tls" or "handshake".
+        R::AlertReceived(_)
+        | R::PeerIncompatible(_)
+        | R::PeerMisbehaved(_)
+        | R::InappropriateMessage { .. }
+        | R::InappropriateHandshakeMessage { .. }
+        | R::InvalidEncryptedClientHello(_)
+        | R::InvalidMessage(_)
+        | R::NoCertificatesPresented
+        | R::UnsupportedNameType
+        | R::DecryptError
+        | R::EncryptError
+        | R::PeerSentOversizedRecord
+        | R::NoApplicationProtocol
+        | R::BadMaxFragmentSize
+        | R::HandshakeNotComplete
+        | R::FailedToGetCurrentTime
+        | R::FailedToGetRandomBytes
+        | R::InconsistentKeys(_)
+        | R::General(_) => PqcError::Tls,
+
+        // `Error` is #[non_exhaustive]. Unknown future variants land
+        // here. Conservative default: a known-handshake-stage failure
+        // → Tls (do NOT retry as Network). REMINDER: re-audit this
+        // match against the upstream `enum Error` on every rustls
+        // minor bump — a new TrustVerification-shaped variant silently
+        // landing here downgrades the security signal consumers
+        // branch on.
+        _ => PqcError::Tls,
+    }
 }
 
 #[cfg(test)]
@@ -237,5 +419,45 @@ mod tests {
         let lower = stripped.to_lowercase();
         assert!(!lower.contains("certificate"));
         assert!(!lower.contains("pinning failure"));
+    }
+
+    /// The substring classifier mis-classified these rustls variants as
+    /// `Network` because their Display strings contain neither "tls" nor
+    /// "handshake". The typed `classify_rustls_error` path must catch
+    /// them as `Tls` so retry policies treat them as terminal
+    /// negotiation failures, not transient blips.
+    #[test]
+    fn rustls_alert_classified_as_tls_not_network() {
+        use super::classify_rustls_error;
+        use rustls::AlertDescription;
+        let err = rustls::Error::AlertReceived(AlertDescription::ProtocolVersion);
+        assert!(matches!(
+            classify_rustls_error(&err),
+            crate::error::PqcError::Tls
+        ));
+    }
+
+    #[test]
+    fn rustls_invalid_certificate_classified_as_trust_verification() {
+        use super::classify_rustls_error;
+        use rustls::CertificateError;
+        let err = rustls::Error::InvalidCertificate(CertificateError::Expired);
+        assert!(matches!(
+            classify_rustls_error(&err),
+            crate::error::PqcError::TrustVerification
+        ));
+    }
+
+    #[test]
+    fn rustls_other_with_pinning_marker_classified_as_pinning() {
+        use super::classify_rustls_error;
+        // Mirror what `pinning.rs` actually emits.
+        let inner: Box<dyn std::error::Error + Send + Sync + 'static> =
+            "certificate pinning failure: leaf SPKI does not match any configured pin".into();
+        let err = rustls::Error::Other(rustls::OtherError(std::sync::Arc::from(inner)));
+        assert!(matches!(
+            classify_rustls_error(&err),
+            crate::error::PqcError::PinningFailure
+        ));
     }
 }

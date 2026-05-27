@@ -29,7 +29,7 @@ public final class PqcURLProtocol: URLProtocol {
     // NOTE: pinnedCertSha256 is [] in the sample. A real banking app
     // MUST populate this with base64(SHA-256(SPKI)) for the production
     // leaf cert (+ a pre-deployed next leaf for rotation). See
-    // pqc-mobile-client/ios/README.md §10.
+    // pqc-mobile-client/docs/ios.md §10.
     // Named `httpClient` rather than `client` to avoid shadowing
     // URLProtocol's inherited instance property `client: URLProtocolClient?`
     // (the loading-system delegate we call back into via
@@ -40,8 +40,20 @@ public final class PqcURLProtocol: URLProtocol {
                 config: PqcConfig(
                     pinnedCertSha256: [],
                     enablePostQuantum: true,
-                    enableHttp3: false,
-                    defaultTimeoutMs: 15_000
+                    defaultTimeoutMs: 15_000,
+                    // nil → built-in defaults (10s connect, 16 MiB body
+                    // cap). Set explicitly in production to survive a
+                    // defaults change.
+                    connectTimeoutMs: nil,
+                    maxBodyBytes: nil,
+                    // Banking clients should not auto-attach cookies.
+                    enableCookies: false,
+                    // Identify to bank WAFs / Akamai Bot Manager.
+                    userAgent: "RnSample/0.3.1 (pqc-mobile-client)",
+                    // Cross-origin redirects would re-handshake to a
+                    // different host whose pin / PQ guarantees are
+                    // independent — refuse them.
+                    redirectPolicy: .sameOriginOnly
                 )
             )
         } catch {
