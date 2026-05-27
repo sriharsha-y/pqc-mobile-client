@@ -41,17 +41,28 @@ lipo -create \
     target/x86_64-apple-ios/release/libpqc_client.a \
     -output target/ios-sim/libpqc_client.a
 
-echo "==> Generating Swift bindings"
+echo "==> Generating Swift bindings (via --library mode)"
+# We use --library not --udl so the bindgen sees BOTH UDL declarations
+# AND proc-macro-exported (#[uniffi::export]) methods. The PqcHttpClient
+# `request` method specifically lives in a proc-macro impl block in
+# src/client.rs (annotated `async_runtime = "tokio"` so the FFI bridge
+# drives reqwest/hyper on a real tokio runtime); --udl-only mode would
+# miss it and the resulting Swift binding wouldn't expose `request`.
+#
+# --library mode needs a built dylib of the crate; build a host one.
+cargo build --release --features cli
+HOST_DYLIB="target/release/libpqc_client.dylib"
+if [ ! -f "$HOST_DYLIB" ]; then
+    echo "::error::Expected host dylib at $HOST_DYLIB after cargo build."
+    exit 1
+fi
+
 rm -rf generated/swift
 mkdir -p generated/swift
-# --features cli enables the uniffi-bindgen binary (gated by
-# required-features in Cargo.toml). The cross-compile builds above are
-# intentionally feature-free so clap / goblin / uniffi_bindgen don't
-# get linked into the .a archive shipped to consumers.
 cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --language swift \
     --out-dir generated/swift \
-    src/pqc.udl
+    --library "$HOST_DYLIB"
 
 # UniFFI emits {pqc.swift, pqcFFI.h, pqcFFI.modulemap}.
 # The XCFramework needs the .h + a `module.modulemap` inside its Headers/
@@ -72,9 +83,19 @@ xcodebuild -create-xcframework \
         -headers "$HEADERS_DIR" \
     -output generated/PqcCore.xcframework
 
+# Repo-root symlinks for local Pod consumption. PqcCore.podspec's
+# `s.source_files` / `s.vendored_frameworks` reference bare `pqc.swift`
+# and `PqcCore.xcframework` because that's the layout inside the release
+# zip the published Pod fetches. For the example app's `:path => '../../../'`
+# Pod entry, the Pod root IS the repo root — these symlinks make the bare
+# names resolve to the just-built `generated/` artefacts. Both symlinks
+# are ignored in .gitignore.
+ln -sfn generated/swift/pqc.swift pqc.swift
+ln -sfn generated/PqcCore.xcframework PqcCore.xcframework
+
 echo
 echo "iOS build complete:"
-echo "  XCFramework:    generated/PqcCore.xcframework"
-echo "  Swift binding:  generated/swift/pqc.swift"
+echo "  XCFramework:    generated/PqcCore.xcframework  (symlinked at ./PqcCore.xcframework)"
+echo "  Swift binding:  generated/swift/pqc.swift      (symlinked at ./pqc.swift)"
 echo
-echo "Next: consume from a CocoaPod or SPM package (see ios/README.md)."
+echo "Next: consume from a CocoaPod or SPM package (see docs/ios.md)."

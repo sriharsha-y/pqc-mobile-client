@@ -5,7 +5,13 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-platform :ios, min_ios_version_supported
+# Floor the sample at iOS 13.0 explicitly to match PqcCore.podspec's
+# `s.platform = :ios, '13.0'` and the IPHONEOS_DEPLOYMENT_TARGET pin in
+# .github/workflows/release.yml. RN's `min_ios_version_supported` macro
+# tracks RN's own floor (currently 13.4) and could drift independently;
+# pinning here keeps the sample reproducible against the published Pod's
+# advertised minimum so a downward RN bump doesn't silently mismatch.
+platform :ios, '13.0'
 prepare_react_native_project!
 
 linkage = ENV['USE_FRAMEWORKS']
@@ -23,9 +29,11 @@ target 'RnSample' do
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
-  # pqc-mobile-client: vendors PqcCore.xcframework + the UniFFI Swift binding
-  # from the repo root. Run `./scripts/build-ios.sh` at the repo root first so
-  # generated/PqcCore.xcframework exists.
+  # pqc-mobile-client via the local podspec at the repo root. PqcCore.podspec
+  # references `pqc.swift` and `PqcCore.xcframework` (bare) so the release-zip
+  # consumer path Just Works; for this local :path mode, `scripts/build-ios.sh`
+  # creates matching symlinks at the repo root pointing into `generated/`.
+  # Run `./scripts/build-ios.sh` first or `pod install` will fail to find them.
   pod 'PqcCore', :path => '../../../'
 
   target 'RnSampleTests' do

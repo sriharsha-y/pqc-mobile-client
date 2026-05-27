@@ -22,7 +22,6 @@ android/local.properties
 local.properties
 
 # iOS
-ios/build/
 *.xcuserstate
 xcuserdata/
 
@@ -61,3 +60,9 @@ examples/*/ios/RnSample/pqc.swift
 # pulled out of the vendored Maven AAR by scripts/build-android.sh).
 # Regenerated on every build; not source.
 android/libs/
+
+# Repo-root symlinks created by scripts/build-ios.sh so the local
+# PqcCore.podspec :path consumption finds the bare names the published
+# podspec uses. Pure build artefacts; the real files live under generated/.
+/PqcCore.xcframework
+/pqc.swift
