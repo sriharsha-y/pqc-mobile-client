@@ -1,22 +1,11 @@
 name: release
 
-# Conventional-commits driven release workflow using release-please.
+# Conventional-commits release workflow (release-please).
 #
-# Flow:
-#   1. Commit to main with conventional-commit subject lines:
-#        feat(client): add HTTP/3 support       → bumps minor (pre-1.0: patch unless bump-minor-pre-major)
-#        fix(tls): handle malformed pin         → bumps patch
-#        chore: bump deps                       → no version bump
-#        feat!: drop iOS 14 support             → bumps major (or minor in 0.x with bump-minor-pre-major)
-#   2. release-please opens / updates a release PR ("chore: release X.Y.Z") that:
-#        - bumps version in Cargo.toml
-#        - updates CHANGELOG.md (grouped by Features / Bug Fixes / etc.)
-#   3. Merge that release PR. release-please then:
-#        - creates git tag vX.Y.Z
-#        - creates a GitHub Release whose body is the CHANGELOG entries for this version
-#   4. The build-android, build-ios, and attach-assets jobs run conditionally
-#      on `release_created`, attaching the AAR + XCFramework archives to the
-#      newly-created release.
+# Flow: conventional commits on main → release-please opens a "release
+# X.Y.Z" PR (bumps Cargo.toml + CHANGELOG) → merging it tags vX.Y.Z and cuts
+# a GitHub Release → the build-*/attach-assets jobs (gated on release_created)
+# build and attach the AAR + XCFramework.
 
 on:
   push:
@@ -101,13 +90,9 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
-          # Include android/libs/ — the rustls-platform-verifier Kotlin
-          # glue jar that build-android.sh extracted out of the vendored
-          # crate AAR. Tarball consumers (the "behind a corporate proxy /
-          # no Maven Central" path) need it on their compile/runtime
-          # classpath; without it they hit
-          #   NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier
-          # on the first handshake.
+          # Include android/libs/ (the rustls-platform-verifier glue jar):
+          # tarball consumers need it on their classpath or the first
+          # handshake hits NoClassDefFoundError: CertificateVerifier.
           tar -czf "dist/${ARCHIVE}" \
               -C target jniLibs \
               -C ../generated kotlin \
@@ -122,15 +107,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Stash the raw native+bindings so publish-maven can consume them
-      # without redoing the cargo-ndk cross-compile. Saves ~3 min of
-      # redundant work on every release. Tarball avoids the brittle
-      # upload-artifact v4 path-preservation semantics for nested dirs.
-      #
-      # Also stash android/libs/ — that's where build-android.sh extracts
-      # the rustls-platform-verifier Kotlin glue jar so AGP can bundle
-      # it into our AAR. publish-maven must see it at gradle-assemble
-      # time or the published AAR loses those classes.
+      # Stash native+bindings+android/libs so publish-maven reuses them
+      # without re-running cargo-ndk. android/libs must be present at
+      # gradle-assemble time or the AAR loses the rustls-pv glue classes.
       - name: Bundle native libs + Kotlin bindings for downstream jobs
         run: tar -czf /tmp/android-native.tar.gz target/jniLibs generated/kotlin android/libs
 
@@ -168,32 +147,21 @@ jobs:
       - name: Build
         run: ./scripts/build-ios.sh
 
-      # Defense in depth: the `cli` cargo feature is supposed to keep
-      # uniffi-bindgen + clap + goblin out of the iOS static archive. If
-      # a future Cargo.toml edit, --all-features invocation, or workspace
-      # addition accidentally re-activates the feature for the cross-
-      # compile, the archive balloons from ~58 MB back to ~90 MB and
-      # ships bloated assets. Grep the .a for telltale CLI symbols and
-      # fail the release if any appear.
+      # Defense in depth: if the `cli` feature ever leaks into the cross-
+      # compile, uniffi-bindgen/clap/goblin bloat the archive ~58→90 MB.
+      # Fail the release if telltale CLI symbols appear in any slice.
       - name: Guard against CLI-feature bloat regression
         run: |
-          # Scan every slice in the xcframework, not just the device
-          # slice. A target-conditional feature unification (e.g. via a
-          # cfg(target_arch="x86_64") dev-dep) could leak CLI symbols
-          # into the simulator slice only, leaving the device slice
-          # clean — that would pass a device-only check and ship bloat
-          # to every developer running on the simulator.
+          # Scan every slice: a target-conditional leak could hit only the
+          # simulator slice and pass a device-only check.
           shopt -s nullglob
           archives=(generated/PqcCore.xcframework/*/libpqc_client.a)
           if [ ${#archives[@]} -eq 0 ]; then
             echo "::error::No libpqc_client.a archives found under generated/PqcCore.xcframework/."
             exit 1
           fi
-          # Assert both expected slices exist by name. Catches a silent
-          # build regression where (e.g.) the simulator step in
-          # scripts/build-ios.sh fails non-fatally and ships an iOS-only
-          # asset — consumers on Apple Silicon Mac running SwiftUI
-          # Previews then hit "no compatible slice" link errors.
+          # Assert both slices exist — catches build-ios.sh silently
+          # shipping an iOS-only asset (breaks the Apple-Silicon simulator).
           for required in ios-arm64 ios-arm64_x86_64-simulator; do
             if [ ! -f "generated/PqcCore.xcframework/${required}/libpqc_client.a" ]; then
               echo "::error::Expected slice generated/PqcCore.xcframework/${required}/libpqc_client.a is missing."
@@ -221,30 +189,16 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           mkdir -p dist
 
-          # Produce two iOS release zips:
-          #
-          # - PqcCore-X.Y.Z.zip: fat zip with PqcCore.xcframework +
-          #   pqc.swift + LICENSE at top level. Consumed by
-          #   PqcCore.podspec's :http source; the Swift binding +
-          #   license sit alongside the framework so CocoaPods can
-          #   pick them up directly from the Pod root.
-          #
-          # - PqcCore-X.Y.Z.xcframework.zip: slim zip with only
-          #   PqcCore.xcframework. Consumed by SPM's binaryTarget;
-          #   Apple's spec says "a ZIP archive that contains your
-          #   XCFramework" — SPM currently tolerates siblings but the
-          #   tolerance is implementation behaviour, not documented
-          #   contract. Slim zip future-proofs against Apple ever
-          #   enforcing single-item zips.
+          # Two iOS zips:
+          # - PqcCore-X.Y.Z.zip: fat (xcframework + pqc.swift + LICENSE) for
+          #   PqcCore.podspec's :http source.
+          # - PqcCore-X.Y.Z.xcframework.zip: slim (xcframework only) for SPM's
+          #   binaryTarget — future-proofs against Apple enforcing single-item zips.
           ARCHIVE="PqcCore-${VERSION}.zip"
           SPM_ARCHIVE="PqcCore-${VERSION}.xcframework.zip"
 
-          # TZ=UTC + zip -X strip variable timestamps and extra fields,
-          # making the zip layer's contribution to the SHA256 stable
-          # across rebuilds of the same content. (The xcframework's own
-          # internal timestamps from xcodebuild are still variable, so
-          # full bit-for-bit reproducibility requires SOURCE_DATE_EPOCH
-          # plumbing — this is just the cheap defensive layer.)
+          # TZ=UTC + zip -X strip timestamps so the zip layer's SHA256 is
+          # stable across rebuilds (xcframework internals still vary).
 
           # Fat zip (CocoaPods)
           STAGE="dist/_stage"
@@ -399,13 +353,9 @@ jobs:
           # "bot-author exemption" if the rule is configured).
           git push origin HEAD:main
 
-          # Move the release tag from the release-please commit (where
-          # Package.swift had the PREVIOUS version's checksum) to this
-          # new commit (where Package.swift matches the just-uploaded
-          # asset). Both commits are on main, so release-please's
-          # tag-walk still finds the tag as an ancestor — the orphan
-          # swiftpm-branch design that previously broke this anchor is
-          # gone.
+          # Move the release tag onto this commit (where Package.swift
+          # matches the uploaded asset). Both commits are on main, so
+          # release-please's tag-walk still finds it.
           git tag -f "$TAG"
           git push --force origin "$TAG"
 
@@ -450,13 +400,9 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # Sanity-check the GPG_SIGNING_KEY format BEFORE handing it to
-      # Gradle. We've seen multiple "Could not read PGP secret key"
-      # failures and need to know whether the secret is the documented
-      # raw ASCII-armored format or accidentally base64 / corrupted.
-      # The check inspects only the first line, never echoing the
-      # actual key bytes. ::add-mask:: hides the line content from
-      # logs even if it leaks.
+      # Sanity-check GPG_SIGNING_KEY format before Gradle (we've hit
+      # "Could not read PGP secret key" from base64/corrupted secrets).
+      # Inspects only the first line; ::add-mask:: hides it from logs.
       - name: Sanity-check GPG_SIGNING_KEY format
         env:
           KEY: ${{ secrets.GPG_SIGNING_KEY }}
@@ -479,15 +425,9 @@ jobs:
             exit 1
           fi
 
-      # Vanniktech's plugin reads credentials from these standard
-      # ORG_GRADLE_PROJECT_* env vars. publishAndReleaseToMavenCentral
-      # signs all artifacts with the in-memory GPG key, uploads them
-      # to the Sonatype Central Portal staging repository, closes the
-      # repository, and triggers automatic release once Sonatype's
-      # validation passes — all in one task.
-      # --stacktrace gives us the full exception chain on signing
-      # failures so we can distinguish armor-parse errors from
-      # passphrase-decryption errors.
+      # Vanniktech reads creds from ORG_GRADLE_PROJECT_* env vars.
+      # publishAndReleaseToMavenCentral signs, uploads, closes, and
+      # auto-releases in one task. --stacktrace surfaces signing errors.
       # Last line of defense before shipping: assemble the AAR and assert
       # it carries the UniFFI Kotlin bindings. The uniffi-rs#2520 strip bug
       # shipped multiple releases with an empty-API AAR (no PqcHttpClient/
@@ -546,44 +486,21 @@ jobs:
             exit 1
           fi
 
-      # The CocoaPods Trunk registry stores podspecs centrally so
-      # consumers can write `pod 'PqcCore', '~> 0.2.0'` without the
-      # long :podspec URL form. `pod trunk push` lints the podspec
-      # against the live :http source (which by now has been uploaded
-      # by attach-assets at the matching version tag), then registers
-      # the spec under the authenticated session.
+      # `pod trunk push` lints the podspec against the live :http asset
+      # (uploaded by attach-assets) and registers it.
       #
-      # ── IMPORTANT: this job REQUIRES the repo to be public. ──
-      # Trunk's server-side lint downloads the :http asset to validate
-      # the podspec; a private GitHub release returns 404 to
-      # unauthenticated GETs and the push fails. Flip the repo public
-      # before merging any release PR after this job lands.
-      #
-      # COCOAPODS_TRUNK_TOKEN: obtain once locally via
-      #   `pod trunk register <email> '<name>'`
-      # which mails a verification link; clicking it stores the token
-      # in ~/.netrc under `machine trunk.cocoapods.org`. Copy that
-      # password value into the COCOAPODS_TRUNK_TOKEN repo secret.
+      # IMPORTANT: requires the repo to be PUBLIC — Trunk's lint fetches the
+      # release asset unauthenticated (private → 404 → push fails).
+      # COCOAPODS_TRUNK_TOKEN: from `pod trunk register`, stored in ~/.netrc.
       - name: Publish podspec to CocoaPods Trunk
         env:
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
-          # --skip-import-validation skips the LOCAL xcodebuild compile
-          # of a sample iOS project against the pod. Trunk's server runs
-          # its own full lint on submission, so we don't lose
-          # validation — just don't do it twice. Saves ~5-7 min/release.
-          #
-          # We deliberately do NOT pass --synchronous. The flag only
-          # switches the client-side lint repo from the CDN-backed
-          # TrunkSource to the canonical github.com/CocoaPods/Specs.git;
-          # it doesn't add publish confirmation. Worse, in synchronous
-          # mode the Trunk server makes an extra GitHub commit-API call
-          # to record attribution AFTER the spec is already registered,
-          # and a frequent timeout there has bitten us twice in a row
-          # despite the spec being successfully published. See
-          # research notes referencing CocoaPods/CocoaPods#12286 and
-          # trunk.cocoapods.org pods_controller.rb verify_github_responses!
+          # --skip-import-validation skips the local xcodebuild lint; Trunk
+          # runs its own on submission. We deliberately omit --synchronous:
+          # it adds a GitHub commit-API call after the spec is already
+          # registered, whose timeout has falsely failed us (CocoaPods#12286).
           set +e
           pod trunk push PqcCore.podspec \
             --allow-warnings \

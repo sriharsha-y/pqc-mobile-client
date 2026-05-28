@@ -29,32 +29,18 @@ cargo ndk \
     build --release
 
 echo "==> Generating Kotlin bindings (via --library mode)"
-# We use --library not --udl so the bindgen sees BOTH UDL declarations
-# AND proc-macro-exported (#[uniffi::export]) methods. The PqcHttpClient
-# `request` method specifically lives in a proc-macro impl block in
-# src/client.rs (annotated `async_runtime = "tokio"` so the FFI bridge
-# drives reqwest/hyper on a real tokio runtime); --udl-only mode would
-# miss it and the resulting Kotlin binding wouldn't expose `request`.
+# --library (not --udl) so bindgen sees the proc-macro-exported `request`
+# method too, not just UDL declarations. It reads a host-built dylib;
+# --features cli enables the uniffi-bindgen binary. The cross-compile above
+# is feature-free so clap/goblin/uniffi_bindgen don't bloat the mobile .so.
 #
-# --library mode needs a built dylib of the crate; build a host one.
-# --features cli enables the uniffi-bindgen binary (gated by
-# required-features in Cargo.toml). The cross-compile build above is
-# intentionally feature-free so clap / goblin / uniffi_bindgen don't
-# get linked into the .so / .a artifacts shipped to mobile.
-#
-# CRITICAL — the host dylib MUST NOT be stripped (mozilla/uniffi-rs#2520):
-# our [profile.release] sets `strip = true` for mobile artifact size, but
-# `uniffi-bindgen --library` discovers the interface by reading the
-# UNIFFI_META_* symbols out of the dylib's regular symbol table (.symtab).
-# On Linux, `strip` removes those from .symtab (leaving them only in
-# .dynsym, which bindgen does NOT read), so bindgen SILENTLY generates
-# zero bindings (exit 0, empty out-dir) and the resulting AAR ships with
-# no Kotlin API. macOS `strip` keeps the symbols, so this only bites Linux
-# CI — which is exactly why it shipped undetected for several releases.
-# Override strip=false for THIS host build only; the mobile cargo-ndk .so
-# above were already built (stripped) before this point and are unaffected.
-# The export must also cover the `cargo run` bindgen invocation below, or
-# it would rebuild a stripped host dylib and re-trigger the bug.
+# CRITICAL — host dylib must NOT be stripped (mozilla/uniffi-rs#2520).
+# `uniffi-bindgen --library` reads UNIFFI_META_* symbols from .symtab, but
+# our `strip = true` (release) removes them on Linux, so bindgen silently
+# emits zero bindings and the AAR ships no Kotlin API (macOS strip keeps
+# them, hiding this). Disable strip for the host build only; the mobile
+# cargo-ndk .so above are already built (stripped) and unaffected. Must
+# also cover the `cargo run` below, else it rebuilds a stripped dylib.
 export CARGO_PROFILE_RELEASE_STRIP=false
 cargo build --release --features cli
 HOST_DYLIB="target/release/libpqc_client.dylib"
@@ -74,11 +60,8 @@ cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --out-dir generated/kotlin \
     --library "$HOST_DYLIB"
 
-# Fail-fast guard against a silent regression of the strip bug above (or
-# any other cause of empty --library output). uniffi-bindgen exits 0 even
-# when it finds no UNIFFI_META symbols and writes nothing — a zero-binding
-# generated/kotlin compiles into an AAR with no Kotlin API and was shipped
-# to Maven Central undetected. Refuse to continue if no .kt was produced.
+# Fail-fast if bindgen wrote nothing (it exits 0 on empty output) — a
+# zero-binding generated/kotlin yields an AAR with no Kotlin API.
 if [ -z "$(find generated/kotlin -name '*.kt' -print -quit)" ]; then
     echo "::error::uniffi-bindgen produced ZERO Kotlin bindings in generated/kotlin/."
     echo "::error::Almost certainly the uniffi-rs#2520 strip bug — the host dylib lost its"
@@ -88,18 +71,11 @@ if [ -z "$(find generated/kotlin -name '*.kt' -print -quit)" ]; then
 fi
 
 echo "==> Extracting rustls-platform-verifier Kotlin glue into android/libs/"
-# rustls-platform-verifier ships its Android-side classes (the
-# org.rustls.platformverifier.* helpers that the Rust verifier JNIs
-# into) as a Maven AAR vendored inside the rustls-platform-verifier-
-# android crate. Consumers of OUR published AAR cannot reach that
-# private Maven layout, so we extract the upstream classes.jar and
-# stage it under android/libs/ — AGP will then bundle it into our
-# AAR's libs/ directory, making our Maven Central publication
-# self-contained (no extra repository declarations on the consumer).
-#
-# Locating the crate: ask cargo metadata for the resolved path of
-# `rustls-platform-verifier-android` and join with the documented
-# maven/ subpath shipped by the crate.
+# rustls-platform-verifier ships its Android classes only as a Maven AAR
+# vendored inside the -android crate, which consumers of our AAR can't
+# reach. Extract its classes.jar into android/libs/ so AGP bundles it into
+# our AAR (self-contained, no extra repos for consumers). Locate the crate
+# via cargo metadata.
 PV_INFO=$(cargo metadata --format-version 1 \
   | python3 -c '
 import json, sys

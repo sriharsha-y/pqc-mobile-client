@@ -1,13 +1,8 @@
 name: android
 
-# Manual-only. The Android cross-compile pipeline is expensive enough
-# (~6 ubuntu-minutes including cargo-ndk install) that we don't run it
-# on every PR — `check.yml` (which includes cargo audit + cargo deny)
-# covers fmt / clippy / unit + smoke tests on every PR, and release.yml
-# builds Android artifacts when a release is cut.
-#
-# Click "Run workflow" on the Actions tab before merging any PR that
-# touches the Rust core, build scripts, or NDK-relevant config.
+# Manual-only (~6 ubuntu-min); check.yml covers PRs and release.yml builds
+# Android artifacts on release. Run before merging a PR that touches the
+# Rust core, build scripts, or NDK config.
 on:
   workflow_dispatch:
 
@@ -57,20 +52,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Assemble the actual AAR via the wrapper so we can assert what
-      # ends up inside it. Without this step, a regression that drops
-      # the fat-AAR `api(fileTree("libs"))` wiring would only surface
-      # post-Maven-Central-publish as a downstream NoClassDefFoundError.
+      # Assemble the AAR so we can assert its contents — a dropped fat-AAR
+      # wiring would otherwise only surface post-publish.
       - name: Assemble AAR
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
-      # Fat-AAR contract assertion: the published AAR MUST embed
-      # rustls-platform-verifier's classes.jar under libs/ — without it
-      # consumers crash at first TLS handshake with
-      #   NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier
-      # See android/build.gradle.kts (api(fileTree("libs"))) +
-      # scripts/build-android.sh (jar extraction).
+      # The AAR MUST embed rustls-platform-verifier's classes.jar under
+      # libs/, else consumers crash at first handshake with
+      # NoClassDefFoundError: CertificateVerifier.
       - name: Assert fat-AAR bundles rustls-platform-verifier
         run: |
           AAR=android/build/outputs/aar/pqc-mobile-client-release.aar

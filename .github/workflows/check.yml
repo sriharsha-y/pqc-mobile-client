@@ -1,15 +1,9 @@
 name: check
 
-# Runs on PRs targeting main, on push to main, and manually.
-#
-# The PR run already validates the merge result (this repo merges via merge
-# commits), so the push:main run is largely redundant. We keep it anyway so
-# the README `check` badge reflects a real main-branch status — a status
-# badge can only track a branch the workflow actually runs on — and as a
-# safety net for anything that lands on main outside the PR flow.
-#
-# workflow_dispatch gives the Actions tab a manual button in case CF's PQ
-# endpoint blips and you want to re-verify without pushing.
+# Runs on PRs to main, push to main, and manually. The push:main run is
+# mostly redundant with the PR run but keeps the README `check` badge
+# tracking a real branch. workflow_dispatch allows a manual re-run if CF's
+# PQ endpoint blips.
 on:
   pull_request:
     branches: [main]
@@ -27,9 +21,7 @@ env:
 
 jobs:
   check:
-    # macOS minutes count 10× against the GitHub free quota, and ios.yml
-    # already exercises the macOS + aws-lc-sys + iOS-target toolchain.
-    # Linux is enough here.
+    # Linux suffices (macOS minutes cost 10×; ios.yml covers the macOS path).
     name: check
     runs-on: ubuntu-latest
 
@@ -53,18 +45,12 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Tests
-        # Includes the smoke test against pq.cloudflareresearch.com. If CF's
-        # PQ endpoint is down, re-run via workflow_dispatch; we want loud
-        # signal when negotiation breaks rather than silently green.
-        # Tests confirm the negotiated KEX via the server's /cdn-cgi/trace
-        # report, so they hold no shared client state and run in parallel.
+        # Includes the network smoke test (pq.cloudflareresearch.com); re-run
+        # via workflow_dispatch if CF's PQ endpoint blips.
         run: cargo test --release --locked -- --nocapture
 
-  # Security + supply-chain checks: cargo-audit scans the locked dep tree
-  # against the RustSec advisory database; cargo-deny enforces the license
-  # / banned-crate / source-registry policy in deny.toml.
-  # Both tools install as pre-built binaries (taiki-e/install-action) —
-  # much faster than `cargo install` from source.
+  # Supply-chain: cargo-audit (RustSec advisories) + cargo-deny (license/
+  # bans/sources policy in deny.toml). Installed as prebuilt binaries.
   audit:
     name: audit
     runs-on: ubuntu-latest

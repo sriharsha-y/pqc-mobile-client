@@ -1,12 +1,8 @@
 name: ios
 
-# Manual-only. macOS minutes count 10× against the GitHub free quota,
-# so we don't run this on every PR — `check.yml` covers fmt / clippy /
-# unit + smoke tests + cargo audit + cargo deny on every PR, and
-# release.yml builds the iOS XCFramework when a release is cut.
-#
-# Click "Run workflow" on the Actions tab before merging any PR that
-# touches the Rust core, build scripts, or Xcode-relevant config.
+# Manual-only (macOS minutes cost 10×); check.yml covers PRs and release.yml
+# builds the XCFramework on release. Run before merging a PR that touches the
+# Rust core, build scripts, or Xcode config.
 on:
   workflow_dispatch:
 
