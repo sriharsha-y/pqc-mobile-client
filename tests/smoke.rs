@@ -3,7 +3,9 @@
 //! which is per-connection and authoritative, so tests run in parallel.
 //! Run: `cargo test --release --test smoke -- --nocapture`
 
-use pqc_client::{HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy};
+use pqc_client::{
+    HttpMethod, HttpRequest, HttpResponse, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy,
+};
 use std::collections::HashMap;
 
 /// Extract the `kex=` value from a Cloudflare `/cdn-cgi/trace` body.
@@ -40,17 +42,46 @@ fn get(url: &str) -> HttpRequest {
     }
 }
 
+/// Send a request, retrying a few times to ride out transient flakiness in
+/// the external test endpoints. These tests gate CI (check.yml runs on
+/// every PR and push:main), and public echo/research endpoints — httpbin
+/// especially — intermittently time out or return 5xx under load, which
+/// would otherwise red main for reasons unrelated to this crate.
+///
+/// Retries on transport errors and on 5xx/429 with linear backoff;
+/// returns the first response with a < 500, non-429 status. Use ONLY for
+/// success-path tests — error-path tests (pin / trust failures) assert on
+/// the returned Err and must NOT retry.
+async fn request_resilient(client: &PqcHttpClient, req: HttpRequest) -> HttpResponse {
+    const ATTEMPTS: u32 = 4;
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match client.request(req.clone()).await {
+            Ok(resp) if resp.status < 500 && resp.status != 429 => return resp,
+            Ok(resp) => last = format!("HTTP {}", resp.status),
+            Err(e) => last = format!("{e:?}"),
+        }
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+        }
+    }
+    panic!(
+        "request to {} failed after {ATTEMPTS} attempts (last: {last})",
+        req.url
+    );
+}
+
 #[tokio::test]
 async fn pq_handshake_cloudflare() {
     let client = PqcHttpClient::new(default_test_config())
         .expect("client construction should succeed with empty pin list");
     // /cdn-cgi/trace returns the key exchange the edge negotiated, in
     // the body — server-authoritative, no client-side global involved.
-    let resp = client
-        .request(get("https://pq.cloudflareresearch.com/cdn-cgi/trace"))
-        .await
-        .expect("request should succeed");
-    assert!(resp.status < 500, "unexpected status: {}", resp.status);
+    let resp = request_resilient(
+        &client,
+        get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
+    )
+    .await;
     let body = String::from_utf8_lossy(&resp.body);
     let kex = parse_kex(&body).expect("trace body should contain a kex= line");
     println!(
@@ -76,11 +107,11 @@ async fn classical_handshake_when_pq_disabled() {
     let mut cfg = default_test_config();
     cfg.enable_post_quantum = false;
     let client = PqcHttpClient::new(cfg).expect("client should construct");
-    let resp = client
-        .request(get("https://pq.cloudflareresearch.com/cdn-cgi/trace"))
-        .await
-        .expect("request should succeed");
-    assert!(resp.status < 500, "unexpected status: {}", resp.status);
+    let resp = request_resilient(
+        &client,
+        get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
+    )
+    .await;
     let body = String::from_utf8_lossy(&resp.body);
     let kex = parse_kex(&body).expect("trace body should contain a kex= line");
     println!("status={} kex={}", resp.status, kex);
@@ -126,7 +157,8 @@ async fn trust_failure_surfaces_typed_error() {
 }
 
 /// POST round-trip: method, headers, and body survive to the server.
-/// httpbin.org/post echoes the payload back. If it's ever gone, swap to
+/// httpbin.org/post echoes the payload back; it's flaky under load, so this
+/// goes through `request_resilient`. If it's ever gone, swap to
 /// postman-echo.com or a local rustls fixture.
 #[tokio::test]
 async fn post_body_round_trips() {
@@ -147,7 +179,7 @@ async fn post_body_round_trips() {
         timeout_ms: None,
     };
 
-    let resp = client.request(req).await.expect("POST should succeed");
+    let resp = request_resilient(&client, req).await;
     assert_eq!(resp.status, 200, "POST should return 200");
 
     // httpbin echoes the body bytes back under either `data` or `json`.
