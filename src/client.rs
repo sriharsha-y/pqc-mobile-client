@@ -342,10 +342,20 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         // trust this peer.
         R::InvalidCertificate(_) | R::InvalidCertRevocationList(_) => PqcError::TrustVerification,
 
-        // Our own PinningVerifier surfaces failures via
-        // rustls::Error::Other(OtherError(...))). Walk the inner source
-        // to recover the marker. If we can't, fall through to Tls (the
-        // pin failure is at least handshake-time).
+        // Our own PinningVerifier surfaces failures as
+        // rustls::Error::General("certificate pinning failure: ...")
+        // (see pinning.rs). A future rustls/reqwest stack could also
+        // wrap it as Other(OtherError(...)). Check BOTH variants for the
+        // marker so the PinningFailure signal survives regardless of how
+        // the error is carried up the source chain; if the marker is
+        // absent the failure is still handshake-time, so fall back to Tls.
+        R::General(msg) => {
+            if msg.to_lowercase().contains("pinning failure") {
+                PqcError::PinningFailure
+            } else {
+                PqcError::Tls
+            }
+        }
         R::Other(other) => {
             let msg = other.to_string().to_lowercase();
             if msg.contains("pinning failure") {
@@ -377,8 +387,7 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         | R::HandshakeNotComplete
         | R::FailedToGetCurrentTime
         | R::FailedToGetRandomBytes
-        | R::InconsistentKeys(_)
-        | R::General(_) => PqcError::Tls,
+        | R::InconsistentKeys(_) => PqcError::Tls,
 
         // `Error` is #[non_exhaustive]. Unknown future variants land
         // here. Conservative default: a known-handshake-stage failure
@@ -401,7 +410,8 @@ mod tests {
     fn pinning_error_message_substring_stable() {
         // The string our PinningVerifier emits today.
         let msg =
-            "certificate pinning failure: leaf SPKI does not match any configured pin".to_string();
+            "certificate pinning failure: no certificate in the chain matched any configured pin"
+                .to_string();
         assert!(msg.to_lowercase().contains("pinning failure"));
     }
 
@@ -449,11 +459,39 @@ mod tests {
     }
 
     #[test]
+    fn rustls_general_with_pinning_marker_classified_as_pinning() {
+        use super::classify_rustls_error;
+        // This is what `pinning.rs` ACTUALLY emits in production:
+        // rustls::Error::General(String), not Other. Regression guard for
+        // the General arm of classify_rustls_error — without it a pin
+        // mismatch silently downgrades to Tls via the typed path.
+        let err = rustls::Error::General(
+            "certificate pinning failure: no certificate in the chain matched any configured pin"
+                .to_string(),
+        );
+        assert!(matches!(
+            classify_rustls_error(&err),
+            crate::error::PqcError::PinningFailure
+        ));
+    }
+
+    #[test]
+    fn rustls_general_without_marker_classified_as_tls() {
+        use super::classify_rustls_error;
+        let err = rustls::Error::General("some unrelated handshake failure".to_string());
+        assert!(matches!(
+            classify_rustls_error(&err),
+            crate::error::PqcError::Tls
+        ));
+    }
+
+    #[test]
     fn rustls_other_with_pinning_marker_classified_as_pinning() {
         use super::classify_rustls_error;
-        // Mirror what `pinning.rs` actually emits.
+        // Defensive: a future stack could wrap our marker as Other(...).
         let inner: Box<dyn std::error::Error + Send + Sync + 'static> =
-            "certificate pinning failure: leaf SPKI does not match any configured pin".into();
+            "certificate pinning failure: no certificate in the chain matched any configured pin"
+                .into();
         let err = rustls::Error::Other(rustls::OtherError(std::sync::Arc::from(inner)));
         assert!(matches!(
             classify_rustls_error(&err),
