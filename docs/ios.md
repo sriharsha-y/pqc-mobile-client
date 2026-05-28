@@ -38,7 +38,7 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
 
 ```ruby
-pod 'PqcCore', '~> 0.5.1' # x-release-please-version
+pod 'PqcCore', '~> 0.5.2' # x-release-please-version
 ```
 
 `pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
@@ -46,7 +46,7 @@ pod 'PqcCore', '~> 0.5.1' # x-release-please-version
 Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
-pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.5.1/PqcCore.podspec' # x-release-please-version
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.5.2/PqcCore.podspec' # x-release-please-version
 ```
 
 Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
@@ -57,7 +57,7 @@ In your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.5.1") // x-release-please-version
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.5.2") // x-release-please-version
 ],
 targets: [
     .target(
