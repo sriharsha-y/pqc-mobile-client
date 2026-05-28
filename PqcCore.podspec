@@ -23,13 +23,25 @@ Pod::Spec.new do |s|
   s.platform         = :ios, '13.0'
   s.swift_version    = '5.9'
 
+  # Source paths are RELATIVE TO THE POD ROOT. In two integration modes:
+  #
+  #   1. Published (release zip via :http source above) — CocoaPods
+  #      downloads PqcCore-X.Y.Z.zip, which the release workflow stages
+  #      with `pqc.swift` and `PqcCore.xcframework` at the zip root.
+  #      These bare names resolve directly inside the unpacked Pod.
+  #
+  #   2. Local development (example RnSample app uses :path => '../../../'
+  #      pointing the Pod root at the repo root) — `scripts/build-ios.sh`
+  #      creates symlinks at the repo root that point into `generated/`:
+  #          pqc.swift            -> generated/swift/pqc.swift
+  #          PqcCore.xcframework  -> generated/PqcCore.xcframework
+  #      So these same bare names resolve via symlink in dev too. Both
+  #      symlinks are in .gitignore — they're build artefacts.
+  #
+  # Defensive `preserve_paths` keeps CocoaPods from stripping XCFramework
+  # slices on :http sources (a 1.10+ edge case for some zip layouts).
   s.source_files      = 'pqc.swift'
   s.vendored_frameworks = 'PqcCore.xcframework'
-  # Defensive: tell CocoaPods to preserve the xcframework directory
-  # verbatim when synthesising the Pods/ tree. Modern CocoaPods (1.10+)
-  # handles vendored_frameworks correctly without this for :git sources,
-  # but :http sources occasionally hit edge cases where slices get
-  # stripped during Pod target install. Cheap insurance.
   s.preserve_paths    = 'PqcCore.xcframework'
 
   # The vendored static archive references Security.framework symbols

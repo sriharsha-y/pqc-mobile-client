@@ -32,6 +32,12 @@ android {
         // Resolved relative to the gradle rootProject (android/).
         jniLibs.srcDir(rootProject.file("../target/jniLibs"))
         java.srcDir(rootProject.file("../generated/kotlin"))
+        // Hand-written Kotlin glue under android/src/main/kotlin/ — adds
+        // uniffi.pqc.android.PqcAndroidInit (the JNI bridge that hands
+        // the Application Context to rustls-platform-verifier). Sits
+        // alongside the generated bindings so consumers receive a single
+        // AAR with everything wired up.
+        java.srcDir("src/main/kotlin")
         manifest.srcFile("AndroidManifest.xml")
     }
 
@@ -63,6 +69,42 @@ dependencies {
 
     // Async surface — the generated Kotlin bindings expose `suspend` fns.
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+
+    // Bundle the rustls-platform-verifier Kotlin glue
+    // (org.rustls.platformverifier.*) directly into our published AAR.
+    // The upstream crate ships those classes as a vendored Maven AAR
+    // inside ~/.cargo/registry, not on any public Maven repo. Without
+    // bundling, consumers downloading our AAR from Maven Central would
+    // get an `org.rustls.platformverifier.CertificateVerifier` NoClassDefFoundError
+    // at handshake time. scripts/build-android.sh extracts the upstream
+    // AAR's classes.jar into android/libs/; declaring it as `api`
+    // (a) puts the symbols on our compile classpath and
+    // (b) tells AGP to embed the jar under the AAR's libs/ entry, so
+    // consumers transitively pick it up with zero extra configuration.
+    api(fileTree("libs") { include("*.jar") })
+}
+
+// Fail-fast guard: an empty android/libs/ would silently produce an AAR
+// missing the rustls-platform-verifier classes — reproducing the exact
+// NoClassDefFoundError the bundling is supposed to fix. android/libs/ is
+// .gitignore'd and only populated by scripts/build-android.sh, so a
+// maintainer running `./gradlew assembleRelease` (or publishToMavenLocal)
+// without first invoking the script needs a loud error, not a broken AAR.
+tasks.named("preBuild").configure {
+    doFirst {
+        val jars = fileTree("libs").matching { include("*.jar") }.files
+        require(jars.isNotEmpty()) {
+            """
+            android/libs/ contains no jars. The published AAR would be missing
+            the rustls-platform-verifier Kotlin glue and fail at handshake time
+            with NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier.
+
+            Run scripts/build-android.sh from the repo root first — it extracts
+            the vendored classes.jar out of the rustls-platform-verifier-android
+            crate and writes it to android/libs/.
+            """.trimIndent()
+        }
+    }
 }
 
 mavenPublishing {

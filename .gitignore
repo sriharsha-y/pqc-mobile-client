@@ -5,6 +5,11 @@ target/
 # UniFFI generated artifacts (regenerate from source)
 generated/
 
+# Swift Package Manager local resolve / build cache. Created whenever
+# Xcode or `swift build` touches Package.swift (artifacts/, checkouts/,
+# repositories/, index-build/, workspace-state.json). Machine-local.
+.build/
+
 # IDE
 .idea/
 .vscode/
@@ -21,18 +26,30 @@ android/.kotlin/
 android/local.properties
 local.properties
 
+# Auto-extracted upstream jars (rustls-platform-verifier Kotlin glue,
+# pulled out of the vendored Maven AAR by scripts/build-android.sh).
+# Regenerated on every build; not source.
+android/libs/
+
 # iOS
-ios/build/
 *.xcuserstate
 xcuserdata/
+
+# Repo-root symlinks created by scripts/build-ios.sh so the local
+# PqcCore.podspec :path consumption finds the bare names the published
+# podspec uses. Pure build artefacts; the real files live under generated/.
+/PqcCore.xcframework
+/pqc.swift
 
 # Logs / scratch
 *.log
 .scratch/
 
-# Claude Code local files (per-user, not committed)
+# Claude Code per-user, machine-local state. The project-level CLAUDE.md
+# at the repo root IS tracked — it's the load-bearing project guide for
+# Claude Code (and referenced in the system prompt as "checked into the
+# codebase"). Only ignore the user-scoped .claude/ directory here.
 .claude/
-CLAUDE.md
 
 # Node
 node_modules/

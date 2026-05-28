@@ -6,19 +6,64 @@ namespace pqc {};
 // ----- Configuration -----
 
 dictionary PqcConfig {
-    // SHA-256 hashes of Subject Public Key Info, base64-encoded.
+    // Base64 SHA-256 of a certificate's Subject Public Key Info (standard
+    // or URL-safe alphabet). A pin matches ANY cert in the server chain
+    // (leaf or intermediate); pin your issuing intermediate CA for
+    // rotation resilience, keep >= 2 pins, and never pin a public root.
     // Empty list disables pinning.
     sequence<string> pinned_cert_sha256;
 
-    // Enable X25519MLKEM768 hybrid post-quantum key exchange.
-    boolean enable_post_quantum;
+    // Advertise X25519MLKEM768 hybrid post-quantum key exchange.
+    // Defaults to true: the ClientHello carries BOTH the hybrid group
+    // and classical groups, so PQC-capable servers negotiate the hybrid
+    // and others gracefully fall back to classical. This is preference,
+    // not enforcement — the client never refuses a classical-only peer.
+    // Set false only to disable PQC (A/B comparison, debugging a
+    // PQ-specific server bug).
+    boolean enable_post_quantum = true;
 
-    // Enable HTTP/3 (QUIC) when supported by the server.
-    // Defaults to false; turn on once observability is in place.
-    boolean enable_http3;
-
-    // Default request timeout in milliseconds.
+    // Total per-request budget in milliseconds (handshake + headers +
+    // body). null = no cap (discouraged on mobile).
     u64? default_timeout_ms;
+
+    // TCP-connect / TLS-handshake budget. Separated from the total
+    // budget so connect can fail fast on cell handover. null = 10s.
+    u64? connect_timeout_ms;
+
+    // Hard ceiling on a response body's decompressed size. Trips
+    // InvalidResponse rather than OOM-ing on a decompression bomb
+    // (gzip+brotli enabled). null = 16 MiB.
+    u64? max_body_bytes;
+
+    // Off by default. When false, NO cookie jar — round-trip
+    // Set-Cookie / Cookie explicitly via headers. Banking typically
+    // wants this off (session-leak vector across endpoints).
+    boolean enable_cookies;
+
+    // Verbatim User-Agent header. null = reqwest default
+    // ("reqwest/0.12.x") which bank WAFs / Akamai Bot Manager often
+    // reject; set to your app's identifier.
+    string? user_agent;
+
+    // Redirect handling. Variants force struct-style in UDL even
+    // when no payload — that's a UDL syntactic constraint, not a
+    // design choice.
+    RedirectPolicy redirect_policy;
+};
+
+[Enum]
+interface RedirectPolicy {
+    // Refuse all redirects.
+    NoRedirects();
+
+    // Follow only within scheme+host+port. Cross-origin = refused.
+    // Recommended default for a security-sensitive HTTPS client:
+    // cross-origin redirects re-handshake to a different host whose
+    // pin / PQ guarantees are independent of the original.
+    SameOriginOnly();
+
+    // Follow up to `max` redirects regardless of origin. Use with care.
+    Limited(u8 max);
 };
 
 // ----- Request / response shapes -----
@@ -48,16 +93,16 @@ dictionary HttpResponse {
     u16 status;
     record<string, sequence<string>> headers;
     bytes body;
-    // The TLS named group recorded by the MOST RECENT handshake in this
-    // process (e.g. "X25519MLKEM768", "X25519", "unknown" if no handshake
-    // has happened yet). NOT per-request: HTTP/2 connection reuse and
-    // concurrent requests across multiple clients can attribute one
-    // connection's group to another request. Suitable for process-level
-    // telemetry ("is PQC engaged at all on this device?"), not for
-    // per-request attribution. For per-request truth, use server-side
-    // TLS observability (Akamai DataStream 2 etc.).
-    string negotiated_named_group;
     // Negotiated ALPN protocol (e.g. "h2", "http/1.1"). Per-request.
+    //
+    // NOTE: the negotiated TLS key-exchange GROUP is intentionally NOT
+    // surfaced here. It is a property of the TLS connection, not the
+    // request, and the only way to observe it from inside reqwest is a
+    // process-global side-channel that races under concurrent requests.
+    // To confirm whether PQC (X25519MLKEM768) was negotiated, use a
+    // server-authoritative source instead: Cloudflare's /cdn-cgi/trace
+    // (parse the `kex=` line) or server-side TLS observability such as
+    // AWS CloudTrail `tlsDetails.keyExchange` / Cloudflare DataStream.
     string negotiated_protocol;
 };
 
@@ -68,7 +113,6 @@ enum PqcError {
     "Network",
     "Tls",
     "Timeout",
-    "Cancelled",
     "InvalidRequest",
     "InvalidResponse",
     "PinningFailure",
@@ -85,6 +129,12 @@ interface PqcHttpClient {
     [Throws=PqcError]
     constructor(PqcConfig config);
 
-    [Async, Throws=PqcError]
-    HttpResponse request(HttpRequest req);
+    // `request` is defined via the proc-macro
+    // #[uniffi::export(async_runtime = "tokio")] block in src/client.rs.
+    // It must NOT be declared here as well, or the scaffolding emits
+    // duplicate FFI symbols. The proc-macro form is required so UniFFI
+    // drives the async future on a real tokio runtime — without that,
+    // reqwest/hyper panic at the first I/O call with
+    //   "there is no reactor running, must be called from the context
+    //    of a Tokio 1.x runtime"
 };

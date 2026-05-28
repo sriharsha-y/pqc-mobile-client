@@ -70,6 +70,17 @@ uniffi = { version = "0.29", features = ["tokio"] }
 [build-dependencies]
 uniffi = { version = "0.29", features = ["build"] }
 
+# Android-only: rustls-platform-verifier needs a JNI handshake from the
+# app's Application.onCreate to capture the Android Context so it can
+# reach KeyStore / NetworkSecurityConfig classes at handshake time.
+# Without this, the first request throws
+#   uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized
+# We expose a tiny JNI shim (src/android_init.rs) that consumers call
+# from MainApplication.onCreate. iOS has no equivalent — Apple's
+# Security framework is process-wide and discovered via dlopen.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.11"

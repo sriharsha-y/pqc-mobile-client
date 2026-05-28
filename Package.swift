@@ -39,6 +39,12 @@ let package = Package(
         // release (extracted from the fat zip). pqc.swift contains
         // `import pqcFFI` which matches both the xcframework modulemap
         // and the binaryTarget name above.
+        //
+        // INVARIANT: `Sources/PqcCore/pqc.swift` is ABI-locked to the
+        // `binaryTarget` URL above. The publish-swiftpm job updates
+        // both atomically per release; between releases this file
+        // intentionally lags `src/pqc.udl` on `main`. Do not hand-
+        // regenerate. See the header comment in pqc.swift.
         .target(
             name: "PqcCore",
             dependencies: ["pqcFFI"],

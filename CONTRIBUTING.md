@@ -45,10 +45,6 @@ chore: bump rustls-post-quantum 0.2 → 0.3
 - Use the body to explain **why**, not what (the diff shows what).
 - For breaking changes, include a `BREAKING CHANGE:` footer with migration notes.
 
-### Commit attribution
-
-Commits should appear authored by the human who made the change. **No** AI/model attribution (no `Co-Authored-By: Claude ...`, no "Generated with ..." trailers).
-
 ## Release flow
 
 1. Land conventional commits on `main` (directly or via PR).
@@ -67,7 +63,7 @@ Commits should appear authored by the human who made the change. **No** AI/model
 # `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
 # The `--features cli` gate is critical: it keeps clap / goblin /
 # uniffi_bindgen out of the iOS / Android cross-compiled archives.
-cargo test --release               # unit + smoke tests
+cargo test --release   # unit + smoke tests (KEX confirmed via server /cdn-cgi/trace; runs in parallel)
 ./scripts/build-android.sh         # cross-compile + Kotlin bindings
 ./scripts/build-ios.sh             # XCFramework + Swift bindings
 cargo fmt && cargo clippy --all-targets -- -D warnings

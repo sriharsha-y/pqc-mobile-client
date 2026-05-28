@@ -25,6 +25,5 @@ pub struct HttpResponse {
     pub status: u16,
     pub headers: HashMap<String, Vec<String>>,
     pub body: Vec<u8>,
-    pub negotiated_named_group: String,
     pub negotiated_protocol: String,
 }

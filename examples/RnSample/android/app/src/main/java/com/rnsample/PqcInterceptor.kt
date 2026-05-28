@@ -24,8 +24,17 @@ import uniffi.pqc.PqcHttpClient
  * Other interceptors registered BEFORE this one (auth, logging,
  * tracing) still run as normal. OkHttp's cache / connection pool /
  * TLS config are bypassed because the Rust core owns the socket.
+ *
+ * Takes TWO clients so the sample's UI can toggle post-quantum on/off:
+ * `enable_post_quantum` is fixed at client construction, so we keep a
+ * PQC client and a classical-only client and pick per request based on
+ * the opt-in [PQC_MODE_HEADER] header. A production app needs only ONE
+ * client (PQC on) — this duality is purely to demonstrate both paths.
  */
-class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
+class PqcInterceptor(
+    private val pqcClient: PqcHttpClient,
+    private val classicalClient: PqcHttpClient,
+) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val req = chain.request()
@@ -36,6 +45,16 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
             buf.readByteArray()
         }
 
+        // Route on the opt-in mode header, then strip it so it never
+        // leaves the device. "off" → classical-only client.
+        val classicalOnly = req.header(PQC_MODE_HEADER)?.equals("off", ignoreCase = true) == true
+        val client = if (classicalOnly) classicalClient else pqcClient
+
+        val headers = req.headers.toMultimap().toMutableMap().apply {
+            // Case-insensitive removal: toMultimap() lowercases names.
+            remove(PQC_MODE_HEADER.lowercase())
+        }
+
         val pqcResp = runBlocking {
             client.request(
                 HttpRequest(
@@ -44,7 +63,7 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
                     // toMultimap() preserves duplicate header values
                     // (Kotlin's Iterable.toMap() would drop all but the
                     // last entry for any repeated header name).
-                    headers = req.headers.toMultimap(),
+                    headers = headers,
                     body = bodyBytes,
                     timeoutMs = null,
                 )
@@ -66,12 +85,16 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
         for ((name, values) in pqcResp.headers) {
             for (v in values) headerBuilder.add(name, v)
         }
-        // Stamp the negotiated KEX as a synthetic header so JS / native code
-        // can verify the handshake without reaching back into the Rust client.
-        headerBuilder.add("X-Pqc-Negotiated-Group", pqcResp.negotiatedNamedGroup)
         responseBuilder.headers(headerBuilder.build())
 
         return responseBuilder.build()
+    }
+
+    companion object {
+        /** Opt-in request header the RN sample sets to select the
+         * classical-only client ("off"). Stripped before the request
+         * leaves the device. */
+        const val PQC_MODE_HEADER = "X-Pqc-Mode"
     }
 
     private fun String.toPqcMethod(): HttpMethod = when (uppercase()) {

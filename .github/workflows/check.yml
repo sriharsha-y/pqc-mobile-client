@@ -25,7 +25,7 @@ jobs:
     # macOS minutes count 10× against the GitHub free quota, and ios.yml
     # already exercises the macOS + aws-lc-sys + iOS-target toolchain.
     # Linux is enough here.
-    name: check (ubuntu)
+    name: check
     runs-on: ubuntu-latest
 
     steps:
@@ -51,6 +51,8 @@ jobs:
         # Includes the smoke test against pq.cloudflareresearch.com. If CF's
         # PQ endpoint is down, re-run via workflow_dispatch; we want loud
         # signal when negotiation breaks rather than silently green.
+        # Tests confirm the negotiated KEX via the server's /cdn-cgi/trace
+        # report, so they hold no shared client state and run in parallel.
         run: cargo test --release --locked -- --nocapture
 
   # Security + supply-chain checks: cargo-audit scans the locked dep tree

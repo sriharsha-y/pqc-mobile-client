@@ -38,7 +38,7 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
 
 ```ruby
-pod 'PqcCore', '~> 0.2.0'
+pod 'PqcCore', '~> 0.3.0'
 ```
 
 `pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
@@ -46,7 +46,7 @@ pod 'PqcCore', '~> 0.2.0'
 Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
-pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.2.0/PqcCore.podspec'
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.3.0/PqcCore.podspec'
 ```
 
 Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
@@ -57,7 +57,7 @@ In your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.2.0")
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.3.0")
 ],
 targets: [
     .target(
@@ -71,7 +71,7 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
 
-Behind the scenes: SPM resolves `from: "0.2.0"` to the `v0.2.0` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.2.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.2.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
+Behind the scenes: SPM resolves `from: "0.3.0"` to the `v0.3.0` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.3.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.3.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
 
 `Package.swift` at the repo root is auto-maintained by the release workflow's `publish-swiftpm` job, which rewrites it with the latest version + URL + checksum on every release and re-points the release tag to the resulting commit.
 
@@ -90,13 +90,22 @@ final class PqcURLProtocol: URLProtocol {
         // ... full hostname list to route through PQC
     ]
 
-    static let client: PqcHttpClient = {
-        PqcHttpClient(config: PqcConfig(
-            pinnedCertSha256: CertPins.spkiSha256,
-            enablePostQuantum: true,
-            enableHttp3: false,
-            defaultTimeoutMs: 15_000
-        ))
+    static let client: PqcHttpClient? = {
+        // The PqcHttpClient constructor throws on malformed config
+        // (e.g. bad base64 in pinnedCertSha256). Wrap in try? and
+        // gracefully degrade rather than crashing the app.
+        try? PqcHttpClient(
+            config: PqcConfig(
+                pinnedCertSha256: CertPins.spkiSha256,
+                enablePostQuantum: true,
+                defaultTimeoutMs: 15_000,
+                connectTimeoutMs: nil,           // 10s default
+                maxBodyBytes: nil,               // 16 MiB default
+                enableCookies: false,            // banking: no auto cookie jar
+                userAgent: "MyApp/1.0",          // identify to bank WAF / Akamai
+                redirectPolicy: .sameOriginOnly  // refuse cross-origin 3xx
+            )
+        )
     }()
 
     private var task: Task<Void, Never>?
@@ -122,7 +131,11 @@ final class PqcURLProtocol: URLProtocol {
                     body: req.httpBody,
                     timeoutMs: nil
                 )
-                let pqcResp = try await Self.client.request(req: pqcReq)
+                guard let pqcClient = Self.client else {
+                    throw NSError(domain: "PqcURLProtocol", code: -3,
+                                  userInfo: [NSLocalizedDescriptionKey: "PqcHttpClient unavailable"])
+                }
+                let pqcResp = try await pqcClient.request(req: pqcReq)
                 let nsResp = HTTPURLResponse(
                     url: req.url!,
                     statusCode: Int(pqcResp.status),
@@ -183,6 +196,33 @@ let session = URLSession(configuration: cfg)
 
 Existing API code (Alamofire, Moya, raw `URLSession.dataTask`) using this session continues to work unchanged.
 
+### Cookies & multi-value response headers
+
+`HTTPURLResponse` is backed by a `[String: String]` dictionary, so it **cannot carry more than one value for a header name**. The common shortcut of joining multiple `Set-Cookie` headers with `", "` corrupts them, because a cookie's `Expires` attribute itself contains a comma (`Expires=Wed, 21 Oct 2026 ...`) — any later comma-split mis-parses the boundary and drops or mangles cookies.
+
+The Rust core preserves each `Set-Cookie` as its own value, so a synthesizing `URLProtocol` must handle cookies explicitly rather than fold them into the response dict. Parse each value **on its own** (a single-entry dict per cookie avoids the comma ambiguity) and hand it to the cookie store the URL Loading System / RN networking reads from:
+
+```swift
+let cookieStorage = HTTPCookieStorage.shared
+for (name, values) in pqcResp.headers where name.lowercased() == "set-cookie" {
+    for raw in values {
+        let parsed = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": raw], for: url)
+        for cookie in parsed { cookieStorage.setCookie(cookie) }
+    }
+}
+
+// Build the response header dict from everything EXCEPT Set-Cookie:
+var headerFields = pqcResp.headers
+    .filter { $0.key.lowercased() != "set-cookie" }
+    .mapValues { $0.joined(separator: ", ") }
+```
+
+Comma-joining the **remaining** headers is fine — RFC 9110 §5.3 permits combining most field values with commas; `Set-Cookie` is the notable exception.
+
+**Banking posture:** the snippet above persists session cookies in `HTTPCookieStorage.shared`, so they auto-attach to later requests (normal iOS behavior). If you want the Rust client's stricter "no implicit cookie state" stance (`PqcConfig.enableCookies = false`), **skip the storage step** and instead surface the raw `Set-Cookie` values to your app layer to decide per request. Either way, never comma-join `Set-Cookie`.
+
+See `examples/RnSample/ios/RnSample/PqcURLProtocol.swift` for the full working implementation.
+
 ## 4. Native iOS — Alamofire / Moya / async-http-client
 
 Alamofire and Moya wrap `URLSession`, so they inherit the URLProtocol hook from Section 3 if the underlying session is the one with `PqcURLProtocol` registered. Construct Alamofire's `Session` with a `URLSessionConfiguration` that includes the protocol class:
@@ -202,12 +242,18 @@ let af = Session(configuration: cfg)
 For new code paths or non-URLSession-based clients, call `PqcHttpClient` directly. The UniFFI-generated Swift class has Swift-native `async`/`throws`.
 
 ```swift
-let pqc = PqcHttpClient(config: PqcConfig(
-    pinnedCertSha256: [],
-    enablePostQuantum: true,
-    enableHttp3: false,
-    defaultTimeoutMs: 10_000
-))
+let pqc = try PqcHttpClient(
+    config: PqcConfig(
+        pinnedCertSha256: [],
+        enablePostQuantum: true,
+        defaultTimeoutMs: 10_000,
+        connectTimeoutMs: nil,           // 10s default
+        maxBodyBytes: nil,               // 16 MiB default
+        enableCookies: false,
+        userAgent: "MyApp/1.0",
+        redirectPolicy: .sameOriginOnly
+    )
+)
 
 func fetchBalance() async throws -> Data {
     let resp = try await pqc.request(req: HttpRequest(
@@ -267,39 +313,51 @@ Bundling Rust crypto promotes the app from "uses-OS-encryption-only" (exempt) to
 
 ## 9. Verification
 
-Debug-build sanity check:
+Debug-build sanity check. `HttpResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global — see the `HttpResponse` doc in `src/pqc.udl`). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
 
 ```swift
 Task {
-    let resp = try await PqcURLProtocol.client.request(req: HttpRequest(
+    let client = try PqcHttpClient(config: PqcConfig(/* … */))
+    let resp = try await client.request(req: HttpRequest(
         method: .get,
-        url: "https://pq.cloudflareresearch.com/",
+        url: "https://pq.cloudflareresearch.com/cdn-cgi/trace",
         headers: [:] as [String: [String]], body: nil, timeoutMs: 5000
     ))
-    print("negotiated group:", resp.negotiatedNamedGroup)
+    let body = String(decoding: Data(resp.body), as: UTF8.self)
+    let kex = body.split(separator: "\n")
+        .first { $0.hasPrefix("kex=") }?.dropFirst(4)
+    print("kex:", kex ?? "unknown", "alpn:", resp.negotiatedProtocol)
+    // kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
 }
 ```
 
 For production verification use Wireshark with `rvictl` USB tethering — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
 
-For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named group per request, broken down by client OS and app version.
+For fleet-level telemetry, query Akamai DataStream 2 (or your edge's TLS observability) for the negotiated named group per request, broken down by client OS and app version.
 
 ## 10. SPKI cert pinning — how to compute hashes
 
-`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI). Empty array disables pinning.
+`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of a certificate's **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty array disables pinning.
 
-Compute from a live server:
+A pin matches if **any certificate in the server's chain — leaf or intermediate — has a matching SPKI hash** (the leaf must still parse). This mirrors OkHttp's `CertificatePinner`, Apple's `NSPinnedDomains`, and Android's `NetworkSecurityConfig`.
+
+Compute a SPKI hash. The chain (leaf first, then intermediates) is shown by `-showcerts`:
 
 ```sh
+# Leaf SPKI:
 openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
   | openssl x509 -pubkey -noout \
   | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -binary \
   | base64
+
+# Intermediate SPKI: list the full chain, then run the same pipe on the
+# intermediate cert block (the 2nd certificate):
+openssl s_client -showcerts -servername api.example.com -connect api.example.com:443 < /dev/null
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Document a rotation playbook for cert renewal.
+**Recommended: pin your issuing intermediate CA.** Its key has a multi-year lifespan and is far more specific than a public root, so the leaf can rotate freely (CA-forced reissue, ACME renewal) without an app update. Pinning the leaf alone is the most fragile option — a single reissue without a matching pin already shipped will brick the app.
 
-**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
+**Always configure at least two pins** (e.g. the current intermediate + a backup intermediate or a pre-deployed next leaf), and document a rotation playbook. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.
