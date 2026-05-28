@@ -1,41 +1,124 @@
-# pqc-mobile-client
+<p align="center">
+  <img src="docs/assets/banner.png" alt="pqc-mobile-client — Post-Quantum TLS HTTPS client for iOS, Android, and React Native" width="100%">
+</p>
+
+# PQC Mobile Client
 
 [![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
 [![android](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml)
 [![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
 [![release](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/release.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/releases)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.sriharsha-y/pqc-mobile-client?label=Maven%20Central&color=blue)](https://central.sonatype.com/artifact/io.github.sriharsha-y/pqc-mobile-client)
+[![CocoaPods](https://img.shields.io/cocoapods/v/PqcCore?label=CocoaPods&color=blue)](https://cocoapods.org/pods/PqcCore)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Post-Quantum TLS HTTPS client for mobile apps — **iOS 13.0+** and **Android API 24+**. Single Rust core built on `rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`, exposed to Kotlin and Swift via UniFFI.
+Post-Quantum TLS HTTPS client for mobile — **iOS 13+** and **Android API 24+**. A single Rust core (`rustls` + `rustls-post-quantum` + `aws-lc-rs` + `reqwest`) exposed to **Kotlin and Swift** via UniFFI, so native iOS, native Android, and React Native apps can negotiate the **`X25519MLKEM768`** hybrid (IANA `0x11EC`) against PQC-enabled servers on OS versions that don't have native PQC TLS yet.
 
-Designed for any mobile app — **native iOS (Swift/Obj-C), native Android (Kotlin/Java), or React Native** — that needs to negotiate `X25519MLKEM768` against PQC-enabled servers (Akamai, Cloudflare, AWS) on OS versions that don't have native PQC TLS yet.
+## Why
 
-## Why this exists
+Akamai, Cloudflare, and AWS edges already negotiate hybrid PQC TLS (`X25519MLKEM768`). iOS 26+ and Chrome do too — but most shipped mobile OSes don't:
 
-Akamai's edge has hybrid PQC TLS (`X25519MLKEM768`, IANA codepoint `0x11EC`) enabled. iOS 26+ and Chrome already negotiate it by default, but:
+- **iOS 13–18** — no native PQC TLS; `URLSession`'s TLS engine is closed and doesn't expose group selection.
+- **Android API 24+** — system Conscrypt doesn't advertise `X25519MLKEM768` on any shipped release, with no committed default-on date.
+- **Cronet** — ships PQC only via the Play-Services-gated artifact (no GMS → no PQC); the `cronet-embedded` artifact is frozen pre-PQC.
 
-- **iOS 13–18:** no native PQC TLS. `URLSession`'s TLS engine is closed; ATS doesn't expose group selection.
-- **Android API 24+:** system Conscrypt does not advertise `X25519MLKEM768` by default on any shipped Android release (incl. Android 17). Google has not committed to a default-on date.
-- **Cronet** ships PQC via Chrome's BoringSSL, but the only Maven-published artifact that includes PQC requires Google Play Services (no GMS → no PQC). The `cronet-embedded` Maven artifact is frozen at Chromium 113 (pre-PQC).
+This crate is a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability.
 
-This crate provides a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability.
+## Install
 
-## Who consumes this
+**Android — Maven Central**
 
-| Consumer | Pattern | Doc |
-|---|---|---|
-| Native Android app (Kotlin/Java) using OkHttp / Retrofit / Ktor | Custom `Interceptor` that delegates to `PqcHttpClient` | [`docs/android.md`](docs/android.md) Section 3 |
-| Native Android app using `HttpURLConnection` or no framework | Call `PqcHttpClient` directly from Kotlin/Java | [`docs/android.md`](docs/android.md) Section 6 |
-| React Native Android app | Same `Interceptor` installed via `OkHttpClientProvider.setOkHttpClientFactory` | [`docs/android.md`](docs/android.md) Section 5 |
-| Native iOS app using `URLSession` | Register `PqcURLProtocol` on the session config | [`docs/ios.md`](docs/ios.md) Section 3 |
-| Native iOS app using a custom HTTP client (AsyncHTTPClient, etc.) | Call `PqcHttpClient` directly from Swift/Obj-C | [`docs/ios.md`](docs/ios.md) Section 5 |
-| React Native iOS app | `PqcURLProtocol` registered via `RCTSetCustomNSURLSessionConfigurationProvider` | [`docs/ios.md`](docs/ios.md) Section 6 |
+```kotlin
+implementation("io.github.sriharsha-y:pqc-mobile-client:0.5.1") // x-release-please-version
+```
 
-The Rust core, Kotlin bindings, and Swift bindings are **identical** across all six consumers. Only the integration glue at the call site differs.
+**iOS — CocoaPods**
 
-## Architecture
+```ruby
+pod 'PqcCore', '~> 0.5.1' # x-release-please-version
+```
+
+**iOS — Swift Package Manager**
+
+```swift
+.package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.5.1") // x-release-please-version
+```
+
+The Android AAR is self-contained — it bundles the native `.so` files, the generated Kotlin bindings, and the `rustls-platform-verifier` glue, so no extra repositories or manual wiring are needed. Full setup (including the one-time `PqcAndroidInit.init` call) is in the [Android](docs/android.md) and [iOS](docs/ios.md) guides.
+
+## Usage
+
+Most apps wire this into their existing HTTP stack — an **OkHttp `Interceptor`** on Android or a **`URLProtocol`** on iOS — so the rest of the app keeps using its normal networking API. You can also call it directly:
+
+**Kotlin** (Android)
+
+```kotlin
+import io.github.sriharsha_y.pqc.*
+
+// Once, in Application.onCreate, before constructing any client:
+PqcAndroidInit.init(this)
+
+// Constructor throws PqcException on bad config (e.g. a malformed pin):
+val client = PqcHttpClient(PqcConfig(
+    pinnedCertSha256 = emptyList(),   // SPKI pins; empty = platform trust only
+    enablePostQuantum = true,
+    defaultTimeoutMs = 15_000UL,
+    connectTimeoutMs = null,          // 10s default
+    maxBodyBytes = null,              // 16 MiB default
+    enableCookies = false,
+    userAgent = "MyApp/1.0",
+    redirectPolicy = RedirectPolicy.SameOriginOnly,
+))
+
+val resp = runBlocking {
+    client.request(HttpRequest(
+        method = HttpMethod.GET,
+        url = "https://example.com",
+        headers = emptyMap(),
+        body = null,
+        timeoutMs = null,
+    ))
+}
+println("status=${resp.status} alpn=${resp.negotiatedProtocol}")
+```
+
+**Swift** (iOS)
+
+```swift
+import PqcCore
+
+let client = try PqcHttpClient(config: PqcConfig(
+    pinnedCertSha256: [],
+    enablePostQuantum: true,
+    defaultTimeoutMs: 15_000,
+    connectTimeoutMs: nil,
+    maxBodyBytes: nil,
+    enableCookies: false,
+    userAgent: "MyApp/1.0",
+    redirectPolicy: .sameOriginOnly))
+
+let resp = try await client.request(req: HttpRequest(
+    method: .get, url: "https://example.com",
+    headers: [:], body: nil, timeoutMs: nil))
+print("status=\(resp.status) alpn=\(resp.negotiatedProtocol)")
+```
+
+## Documentation
+
+| Topic | Link |
+|---|---|
+| Android integration (OkHttp / Retrofit / Ktor / React Native) | [`docs/android.md`](docs/android.md) |
+| iOS integration (`URLSession` / `URLProtocol` / React Native) | [`docs/ios.md`](docs/ios.md) |
+| Runnable React Native sample app | [`examples/RnSample`](examples/RnSample) |
+| Contributing & release flow | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Security policy | [`SECURITY.md`](SECURITY.md) |
+
+## How it works
+
+The same Rust core ships to every consumer; only the integration glue at the call site differs.
 
 ```
-   Consumer app (any of the six above)
+   Consumer app (native iOS / native Android / React Native)
                  │
         ┌────────┴────────┐
         ▼                 ▼
@@ -45,137 +128,80 @@ The Rust core, Kotlin bindings, and Swift bindings are **identical** across all 
    libpqc_client.so    PqcCore.xcframework
         └────────┬────────┘
                  ▼
-   ┌─────────────────────────────────────┐
-   │   pqc_client (this crate)             │
-   │   reqwest ─ hyper ─ rustls          │
-   │   rustls-post-quantum (X25519MLKEM768)
-   │   aws-lc-rs (FIPS 140-3)            │
-   │   rustls-platform-verifier          │
-   │   tokio                             │
-   └─────────────────────────────────────┘
+   ┌─────────────────────────────────────────┐
+   │  pqc_client (this crate)                  │
+   │  reqwest ─ hyper ─ rustls                 │
+   │  rustls-post-quantum (X25519MLKEM768)     │
+   │  aws-lc-rs (FIPS 140-3)                   │
+   │  rustls-platform-verifier                 │
+   │  tokio                                     │
+   └─────────────────────────────────────────┘
 ```
 
-## Layout
+| Consumer | Integration pattern | Guide |
+|---|---|---|
+| Native Android (OkHttp / Retrofit / Ktor) | Custom `Interceptor` delegating to `PqcHttpClient` | [`docs/android.md`](docs/android.md) §3 |
+| Native Android (`HttpURLConnection` / no framework) | Call `PqcHttpClient` directly | [`docs/android.md`](docs/android.md) §6 |
+| React Native Android | Same `Interceptor` via `OkHttpClientProvider` | [`docs/android.md`](docs/android.md) §5 |
+| Native iOS (`URLSession`) | Register `PqcURLProtocol` on the session config | [`docs/ios.md`](docs/ios.md) §3 |
+| Native iOS (custom HTTP client) | Call `PqcHttpClient` directly | [`docs/ios.md`](docs/ios.md) §5 |
+| React Native iOS | `PqcURLProtocol` via `RCTSetCustomNSURLSessionConfigurationProvider` | [`docs/ios.md`](docs/ios.md) §6 |
 
-```
-pqc-mobile-client/
-├── Cargo.toml              Rust crate manifest
-├── rust-toolchain.toml     Pinned Rust toolchain + cross-compile targets
-├── build.rs                UniFFI scaffolding generation
-├── src/
-│   ├── lib.rs              UniFFI entry point
-│   ├── pqc.udl             UniFFI interface (generates Kotlin + Swift bindings)
-│   ├── client.rs           PqcHttpClient implementation (wraps reqwest)
-│   ├── config.rs           PqcConfig + RedirectPolicy
-│   ├── tls.rs              rustls + PQC + platform-verifier wiring
-│   ├── pinning.rs          SPKI SHA-256 cert pinning (matches any cert in chain)
-│   ├── android_init.rs     JNI bridge — hands Application Context to rustls-platform-verifier
-│   ├── error.rs            PqcError enum
-│   └── types.rs            HttpRequest / HttpResponse / HttpMethod
-├── android/                Gradle library module (publishes the AAR to Maven Central)
-│   ├── build.gradle.kts    AGP + Maven publish + fat-AAR bundling
-│   ├── src/main/kotlin/    PqcAndroidInit.kt (JNI bridge consumer-side)
-│   └── gradlew             Pinned Gradle 8.7 wrapper
-├── tests/
-│   └── smoke.rs            Network smoke test against Cloudflare PQ endpoint (kex via /cdn-cgi/trace)
-├── scripts/
-│   ├── setup.sh            One-time developer setup
-│   ├── build-android.sh    Cross-compile all Android ABIs + Kotlin bindings + extract rustls-pv jar
-│   └── build-ios.sh        Build XCFramework + Swift bindings + create repo-root symlinks
-├── docs/android.md         Android consumption guide (native + React Native)
-├── docs/ios.md             iOS consumption guide (native + React Native)
-├── PqcCore.podspec         CocoaPod manifest — published to CocoaPods Trunk
-├── Package.swift           SwiftPM manifest (regenerated each release by publish-swiftpm)
-├── Sources/PqcCore/        SPM source root — pqc.swift (ABI-locked to last release)
-└── examples/RnSample/      Runnable React Native sample app (see its README)
-```
+## Features
 
-## Quick start
+| Capability | Status |
+|---|---|
+| Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
+| Classical fallback (X25519, P-256) | ✅ Automatic |
+| HTTP/1.1, HTTP/2 | ✅ via reqwest + hyper |
+| System trust store (iOS Keychain / Android KeyStore) | ✅ via `rustls-platform-verifier` |
+| Cert pinning (SPKI SHA-256, any cert in chain) | ✅ Layered on platform verifier; empty list disables |
+| Cookies | ✅ Opt-in via `enableCookies`; off by default |
+| gzip / brotli | ✅ Body capped via `maxBodyBytes` (16 MiB default) to defuse decompression bombs |
+| Redirects | ✅ `SameOriginOnly` default; also `NoRedirects` / `Limited(max)` |
+| Timeouts (connect / total) | ✅ Separated so connect fails fast on cell handover |
+| Connection pooling | ✅ |
+| All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
+| ALPN reported on `HttpResponse` | ✅ `negotiatedProtocol` per request (confirm the KEX **group** server-side via `/cdn-cgi/trace` `kex=`) |
+| Android GMS + non-GMS, iOS 13–18, iOS 26+ | ✅ (on iOS 26+ defer to native `URLSession` via `#available`) |
+| HTTP/3 / QUIC | ❌ Not supported |
+
+## Not covered
+
+- **WebViews** (`WKWebView`, system WebView) — use the system network stack, not interceptable.
+- **iOS background `URLSession`** — the OS daemon owns the socket.
+- **RN image loaders / 3rd-party native SDKs** (Fresco, SDWebImage, Firebase, Sentry, …) — bundle their own HTTP clients.
+- **Streaming bodies larger than a few MB** — possible but needs extra FFI plumbing; not in scope.
+
+## Building from source
+
+For contributors working on the crate itself — consumers should use the package managers above. Requires Rust (plus the Android NDK / Xcode for the mobile builds).
 
 ```bash
-make setup      # one-time: rust targets, cargo-ndk
-make test       # sanity-test against pq.cloudflareresearch.com (smoke suite
-                # confirms the negotiated KEX via the server's /cdn-cgi/trace)
-make android    # cross-compile all Android ABIs + Kotlin bindings
-make ios        # build XCFramework + Swift bindings
+make setup      # one-time: rustup targets + cargo-ndk
+make check      # fmt + clippy + tests (mirrors CI)
+make android    # cross-compile all ABIs + Kotlin bindings
+make ios        # build the XCFramework + Swift bindings
 make help       # list all targets
 ```
 
 ## Releases
 
-Releases are driven by [release-please](https://github.com/googleapis/release-please) from **conventional commits** — see [CONTRIBUTING.md](CONTRIBUTING.md) for the commit message format.
-
-The flow:
-
-1. Land conventional commits on `main`:
-   - `feat: …` bumps minor
-   - `fix: …` bumps patch
-   - `feat!: …` bumps major
-   - `chore:` / `ci:` / `docs:` / `refactor:` do not trigger a release
-2. The `release` workflow opens (and continuously updates) a PR titled `chore(main): release X.Y.Z` containing:
-   - the version bump in `Cargo.toml`
-   - the new `CHANGELOG.md` entries grouped by type (Features / Bug Fixes / etc.)
-3. Review and merge that PR when ready to cut a release.
-4. release-please then:
-   - tags the merge commit as `vX.Y.Z`
-   - creates a [GitHub Release](https://github.com/sriharsha-y/pqc-mobile-client/releases) at the tag with the CHANGELOG entries as the body
-5. The same workflow's downstream jobs build Android + iOS artifacts and attach them as release assets:
-   - `pqc-mobile-client-<version>-android.tar.gz` (`.so` files + Kotlin bindings)
-   - `PqcCore-<version>.zip` (XCFramework + Swift binding + LICENSE — consumed by `PqcCore.podspec` over `:http`)
-
-No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained automatically.
-
-## What this covers
-
-| Capability | Status |
-|---|---|
-| HTTP/1.1, HTTP/2 (via reqwest + hyper) | ✅ |
-| HTTP/3 / QUIC | ❌ Not supported (no config field; would require adding `h3-quinn` + a new HTTP/3 client path) |
-| Hybrid PQC TLS (`X25519MLKEM768`) | ✅ Default |
-| Classical fallback (X25519, P-256) | ✅ Automatic |
-| System trust store (iOS Keychain / Android KeyStore) | ✅ Via `rustls-platform-verifier` |
-| Cert pinning (SPKI SHA-256) | ✅ Layered on top of platform verifier; empty pin list disables |
-| Cookies | ✅ Opt-in via `enableCookies`; off by default (session-leak vector for banking) |
-| gzip / brotli decompression | ✅ Body size capped via `maxBodyBytes` (default 16 MiB) to defuse decompression bombs |
-| Redirects | ✅ `RedirectPolicy::SameOriginOnly` by default; also `NoRedirects` / `Limited(max)` |
-| Connection pooling | ✅ |
-| Timeouts (connect / total) | ✅ `connectTimeoutMs` separated from `defaultTimeoutMs` so connect can fail fast on cell handover |
-| Cancellation | ✅ Via UniFFI async + tokio |
-| All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
-| ALPN reporting on `HttpResponse` | ✅ `negotiatedProtocol` (per-request "h2"/"http/1.1"). The negotiated KEX **group** is intentionally not surfaced — it's a per-connection property the client can only read via a racy global; confirm PQC via the server's `/cdn-cgi/trace` `kex=` instead (see `src/pqc.udl`) |
-| Android GMS + non-GMS devices | ✅ |
-| iOS 13 – 18 | ✅ |
-| iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |
-
-## What this does NOT cover
-
-- **WebViews** (`WKWebView` on iOS, system WebView on Android) — use system network stack, not interceptable.
-- **iOS background URLSession** (resumable uploads while app is suspended) — OS daemon owns the socket.
-- **RN `<Image>` / Fresco / SDWebImage / Glide** — own HTTP loaders. Acceptable for non-sensitive image CDN traffic.
-- **RN iOS WebSocket (`SRWebSocket`)** — CFStream-based, not URLSession.
-- **3rd-party native SDKs** (Firebase, Sentry, Razorpay, AppsFlyer, etc.) — bundle their own HTTP clients.
-- **Streaming bodies > a few MB** — possible but needs ~300 LOC of FFI plumbing; not in MVP.
+Automated by [release-please](https://github.com/googleapis/release-please) from conventional commits on `main`: merging the generated release PR tags `vX.Y.Z`, cuts the GitHub Release, and publishes to Maven Central, CocoaPods Trunk, and SwiftPM. No manual tagging. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Dependencies
 
-| Crate | Version | Purpose |
-|---|---|---|
-| `reqwest` | 0.12 | HTTP client (redirects, cookies, gzip, brotli, pooling, HTTP/2) |
-| `rustls` | 0.23 | Pure-Rust TLS 1.3 stack |
-| `rustls-post-quantum` | 0.2 | Adds `X25519MLKEM768` to default group list |
-| `rustls-platform-verifier` | 0.5 | Defers cert validation to OS trust store |
-| `aws-lc-rs` | 1.13 | FIPS 140-3 validated crypto provider (also used for SPKI SHA-256) |
-| `x509-parser` | 0.16 | Extract SPKI bytes from server cert for pinning |
-| `base64` | 0.22 | Decode user-supplied pin hashes |
-| `tokio` | 1 | Async runtime |
-| `uniffi` | 0.29 | Generates Kotlin + Swift bindings from `src/pqc.udl` |
-
-## Status
-
-**Baseline verified.** Crate compiles, all unit tests pass (11), and the smoke test against `pq.cloudflareresearch.com` returns `200` with `X25519MLKEM768` negotiated *and verified* (the smoke test now asserts on the actual negotiated group, not a hardcoded constant). Verified on Rust stable `1.95`, macOS host. Integration recipes documented for native and React Native on both platforms; cross-compile scripts ready but not yet exercised in CI.
-
-Outstanding items: none from the original plan. See [`examples/RnSample/README.md`](examples/RnSample/README.md) for the end-to-end React Native sample, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for the conventional-commits release flow.
+| Crate | Purpose |
+|---|---|
+| `reqwest` | HTTP client (redirects, cookies, gzip/brotli, pooling, HTTP/2) |
+| `rustls` | Pure-Rust TLS 1.3 stack |
+| `rustls-post-quantum` | Adds `X25519MLKEM768` to the offered group list |
+| `rustls-platform-verifier` | Defers cert validation to the OS trust store |
+| `aws-lc-rs` | FIPS 140-3 validated crypto (also SPKI SHA-256 for pinning) |
+| `x509-parser` | Extract SPKI bytes from the server cert for pinning |
+| `tokio` | Async runtime |
+| `uniffi` | Generates the Kotlin + Swift bindings |
 
 ## License
 
-Apache-2.0 (matches dependencies).
+Apache-2.0 — see [LICENSE](LICENSE). Chosen to match the dependency tree and for its explicit patent grant, which is relevant to post-quantum cryptography.

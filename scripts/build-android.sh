@@ -29,10 +29,10 @@ cargo ndk \
     build --release
 
 echo "==> Generating Kotlin bindings (via --library mode)"
-# --library (not --udl) so bindgen sees the proc-macro-exported `request`
-# method too, not just UDL declarations. It reads a host-built dylib;
-# --features cli enables the uniffi-bindgen binary. The cross-compile above
-# is feature-free so clap/goblin/uniffi_bindgen don't bloat the mobile .so.
+# --library reads the UniFFI metadata (all proc-macro — no .udl) from a
+# host-built dylib; --features cli enables the uniffi-bindgen binary. The
+# cross-compile above is feature-free so clap/goblin/uniffi_bindgen don't
+# bloat the mobile .so.
 #
 # CRITICAL — host dylib must NOT be stripped (mozilla/uniffi-rs#2520).
 # `uniffi-bindgen --library` reads UNIFFI_META_* symbols from .symtab, but

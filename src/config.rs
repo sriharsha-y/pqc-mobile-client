@@ -1,7 +1,7 @@
 /// Configuration handed to `PqcHttpClient::new`. Defaults are tuned for
 /// mobile and safe to set from Swift/Kotlin without reading the docs.
 /// All `*_ms` fields are milliseconds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct PqcConfig {
     /// Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
     /// accept. Matches if ANY cert in the chain — leaf or intermediate —
@@ -14,6 +14,7 @@ pub struct PqcConfig {
     /// (default true). The ClientHello also carries classical groups, so a
     /// peer that rejects the hybrid falls back to classical — this is a
     /// preference, not enforcement. Set false only for A/B comparison.
+    #[uniffi(default = true)]
     pub enable_post_quantum: bool,
 
     // ----- Timeouts -----
@@ -55,9 +56,9 @@ pub struct PqcConfig {
 
 /// What the client does on a 3xx. The reqwest default (10 unbounded
 /// redirects) is too permissive for a security-sensitive client. Variants
-/// are struct-style (the `{}`) because UDL `[Enum] interface` requires it.
+/// are struct-style (the `{}`) to preserve the generated binding shape.
 /// `NoRedirects` (not `None`) avoids colliding with `Option::None` in matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum RedirectPolicy {
     NoRedirects {},
     SameOriginOnly {},
