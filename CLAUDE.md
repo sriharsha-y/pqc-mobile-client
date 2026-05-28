@@ -38,7 +38,7 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 ## Source layout
 
 - `src/lib.rs` — module wiring + `uniffi::include_scaffolding!("pqc")`.
-- `src/android_init.rs` — JNI bridge (`Java_uniffi_pqc_android_PqcAndroidInit_nativeInit`) that hands the Android `Application` context to `rustls-platform-verifier`. iOS has no equivalent (Apple's `Security` framework is process-wide).
+- `src/android_init.rs` — JNI bridge (`Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`; the `_1` is JNI escaping for the `_` in the `sriharsha_y` package segment) that hands the Android `Application` context to `rustls-platform-verifier`. iOS has no equivalent (Apple's `Security` framework is process-wide).
 - `src/pqc.udl` — UniFFI interface; **this is the source of truth for the Kotlin/Swift API surface**. Changes here regenerate bindings.
 - `src/client.rs` — `PqcHttpClient`, the reqwest wrapper.
 - `src/tls.rs` — rustls + `rustls-post-quantum` + `rustls-platform-verifier` wiring; this is where the PQC group list is installed.

@@ -8,6 +8,14 @@
 
 The Rust core, the `.so` files, and the generated Kotlin bindings are the same regardless of consumer.
 
+> **Package note (upgraders):** the Kotlin bindings are published under
+> `io.github.sriharsha_y.pqc` (matching the Maven group / AAR namespace).
+> Earlier releases used UniFFI's default `uniffi.pqc`. If you are upgrading
+> from such a release, update your imports (`uniffi.pqc.*` →
+> `io.github.sriharsha_y.pqc.*`) and any proguard keep rule
+> (`-keep class uniffi.pqc.** { *; }` → `io.github.sriharsha_y.pqc.**`).
+> iOS/Swift consumers are unaffected (the binding is the `PqcCore` module).
+
 ## 1. Build outputs
 
 > **Note on regenerating bindings manually.** The build script invokes
@@ -27,7 +35,7 @@ target/jniLibs/
 └── x86_64/libpqc_client.so          (emulator)
 
 generated/kotlin/
-└── uniffi/pqc/
+└── io/github/sriharsha_y/pqc/
     └── pqc.kt                     (UniFFI-generated Kotlin bindings)
 ```
 
@@ -39,7 +47,7 @@ The library publishes to Maven Central on every release under the coordinates `i
 
 ```kotlin
 dependencies {
-    implementation("io.github.sriharsha-y:pqc-mobile-client:0.3.0")
+    implementation("io.github.sriharsha-y:pqc-mobile-client:0.4.0") // x-release-please-version
 }
 ```
 
@@ -52,7 +60,7 @@ The published AAR is **self-contained**: it bundles the `rustls-platform-verifie
 For consumers behind corporate proxies that block Maven Central, or for early integration before Maven Central publication is ready, download `pqc-mobile-client-X.Y.Z-android.tar.gz` from the release page and unpack:
 
 - `jniLibs/*` → `app/src/main/jniLibs/`
-- `kotlin/uniffi/pqc/pqc.kt` → `app/src/main/java/uniffi/pqc/pqc.kt`
+- `kotlin/io/github/sriharsha_y/pqc/pqc.kt` → `app/src/main/java/io/github/sriharsha_y/pqc/pqc.kt`
 - `libs/rustls-platform-verifier-*.jar` → `app/libs/`  (vendored Kotlin glue; without it the first TLS handshake throws `NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier`)
 
 Add the JNA + coroutines deps to the consumer's `build.gradle` manually, plus `implementation(fileTree("libs") { include("*.jar") })` so AGP picks up the platform-verifier jar. Works but won't survive an Expo `prebuild`.
@@ -78,7 +86,7 @@ import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
 import kotlinx.coroutines.runBlocking
-import uniffi.pqc.*
+import io.github.sriharsha_y.pqc.*
 
 class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -150,7 +158,7 @@ The RN networking module reads its `OkHttpClient` from `OkHttpClientProvider`. T
 import com.facebook.react.modules.network.OkHttpClientProvider
 import com.facebook.react.modules.network.OkHttpClientFactory
 import com.facebook.react.modules.network.ReactCookieJarContainer
-import uniffi.pqc.*
+import io.github.sriharsha_y.pqc.*
 import java.util.concurrent.TimeUnit
 
 class MainApplication : Application(), ReactApplication {
@@ -193,7 +201,7 @@ The `PqcInterceptor` class is identical to the native case (Section 3).
 For new code paths that don't have an existing HTTP client to swap, use `PqcHttpClient` directly:
 
 ```kotlin
-import uniffi.pqc.*
+import io.github.sriharsha_y.pqc.*
 import kotlinx.coroutines.runBlocking
 
 val pqc = PqcHttpClient(PqcConfig(
@@ -231,7 +239,7 @@ UniFFI uses JNI; keep the generated bindings and JNA's native methods:
 
 ```proguard
 # proguard-rules.pro
--keep class uniffi.pqc.** { *; }
+-keep class io.github.sriharsha_y.pqc.** { *; }
 -keep class com.sun.jna.** { *; }
 -keepclasseswithmembers class * { native <methods>; }
 ```

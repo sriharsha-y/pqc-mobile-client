@@ -11,7 +11,7 @@ What's in this directory:
 - `build.gradle.kts` — AGP library module config + Maven Central publishing (vanniktech) + fat-AAR bundling of `rustls-platform-verifier`.
 - `AndroidManifest.xml` — empty stub (AGP requires it for AAR assembly).
 - `gradlew`, `gradle/wrapper/` — Pinned Gradle 8.7 wrapper (matches CI).
-- `src/main/kotlin/uniffi/pqc/android/PqcAndroidInit.kt` — hand-written JNI bridge that hands the `Application` context to `rustls-platform-verifier` at process start.
+- `src/main/kotlin/io/github/sriharsha_y/pqc/android/PqcAndroidInit.kt` — hand-written JNI bridge that hands the `Application` context to `rustls-platform-verifier` at process start.
 - `libs/` — auto-extracted from the `rustls-platform-verifier-android` Cargo crate by `../scripts/build-android.sh`. Gitignored; do not edit.
 - The native `.so` files and UniFFI Kotlin bindings are NOT in this directory — `build.gradle.kts` reads them from `../target/jniLibs/` and `../generated/kotlin/` via `sourceSets["main"]` overrides.
 

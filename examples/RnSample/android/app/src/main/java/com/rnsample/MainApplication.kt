@@ -16,10 +16,10 @@ import com.facebook.react.modules.network.ReactCookieJarContainer
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 import okhttp3.OkHttpClient
-import uniffi.pqc.PqcConfig
-import uniffi.pqc.PqcHttpClient
-import uniffi.pqc.RedirectPolicy
-import uniffi.pqc.android.PqcAndroidInit
+import io.github.sriharsha_y.pqc.PqcConfig
+import io.github.sriharsha_y.pqc.PqcHttpClient
+import io.github.sriharsha_y.pqc.RedirectPolicy
+import io.github.sriharsha_y.pqc.android.PqcAndroidInit
 import java.util.concurrent.TimeUnit
 
 class MainApplication : Application(), ReactApplication {
@@ -62,7 +62,7 @@ class MainApplication : Application(), ReactApplication {
     // constructing PqcHttpClient — the constructor builds the TLS
     // config, which calls the verifier, which requires this init.
     // Without it the first request throws
-    //   uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized
+    //   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
     // Shared config differing only in enablePostQuantum. A production

@@ -38,7 +38,7 @@ Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
 The pod is published to the CocoaPods Trunk registry on every release. In the consumer's `Podfile`:
 
 ```ruby
-pod 'PqcCore', '~> 0.3.0'
+pod 'PqcCore', '~> 0.4.0' # x-release-please-version
 ```
 
 `pod install` resolves through Trunk, downloads `PqcCore-X.Y.Z.zip` (XCFramework + Swift bindings) from the matching GitHub Release, and wires it in. No local build of this repo required.
@@ -46,7 +46,7 @@ pod 'PqcCore', '~> 0.3.0'
 Alternative (no Trunk dependency) — pin directly to the raw podspec URL at a release tag:
 
 ```ruby
-pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.3.0/PqcCore.podspec'
+pod 'PqcCore', :podspec => 'https://raw.githubusercontent.com/sriharsha-y/pqc-mobile-client/v0.4.0/PqcCore.podspec' # x-release-please-version
 ```
 
 Useful when the consumer's CocoaPods setup can't reach Trunk (corporate firewalls, custom mirrors), or to pin to a specific tag that hasn't been Trunk-pushed yet.
@@ -57,7 +57,7 @@ In your app's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.3.0")
+    .package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.4.0") // x-release-please-version
 ],
 targets: [
     .target(
@@ -71,7 +71,7 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
 
-Behind the scenes: SPM resolves `from: "0.3.0"` to the `v0.3.0` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-0.3.0.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-0.3.0.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
+Behind the scenes: SPM resolves the version you pin to the matching `vX.Y.Z` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches a slim release asset (`PqcCore-X.Y.Z.xcframework.zip`) and SPM verifies its SHA256 checksum at download time. CocoaPods consumes a fat zip (`PqcCore-X.Y.Z.zip`) over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
 
 `Package.swift` at the repo root is auto-maintained by the release workflow's `publish-swiftpm` job, which rewrites it with the latest version + URL + checksum on every release and re-points the release tag to the resulting commit.
 

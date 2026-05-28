@@ -1,14 +1,19 @@
 name: check
 
-# Runs only on PRs targeting main. The merge commit GitHub creates for a PR
-# is the same tree main will have post-merge, so re-running on push:main
-# would just re-test the same SHA. release.yml is the only workflow that
-# needs to fire on push:main (release-please scans commits there).
+# Runs on PRs targeting main, on push to main, and manually.
 #
-# Add a `workflow_dispatch` here too so the Actions tab has a manual button
-# in case CF's PQ endpoint blips and you want to re-verify without pushing.
+# The PR run already validates the merge result (this repo merges via merge
+# commits), so the push:main run is largely redundant. We keep it anyway so
+# the README `check` badge reflects a real main-branch status — a status
+# badge can only track a branch the workflow actually runs on — and as a
+# safety net for anything that lands on main outside the PR flow.
+#
+# workflow_dispatch gives the Actions tab a manual button in case CF's PQ
+# endpoint blips and you want to re-verify without pushing.
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
   workflow_dispatch:
 

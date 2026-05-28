@@ -5,8 +5,8 @@
 //! constructed.
 //!
 //! Without this call, the first request throws
-//!   uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized
-//! at `uniffi.pqc.PqcKt.uniffiCheckCallStatus(pqc.kt)`.
+//!   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
+//! at `io.github.sriharsha_y.pqc.PqcKt.uniffiCheckCallStatus(pqc.kt)`.
 //!
 //! Why JNI (not UniFFI): UniFFI can't pass a live `JNIEnv` / `JObject`
 //! through its FFI boundary — those are JVM-managed handles tied to the
@@ -20,19 +20,21 @@ use jni::objects::{JClass, JObject};
 use jni::JNIEnv;
 
 /// JNI symbol name must mirror the Kotlin declaration exactly:
-///   `package uniffi.pqc.android; object PqcAndroidInit {
+///   `package io.github.sriharsha_y.pqc.android; object PqcAndroidInit {
 ///        @JvmStatic private external fun nativeInit(ctx: Context)
 ///    }`
-/// → `Java_uniffi_pqc_android_PqcAndroidInit_nativeInit`. Renaming the
-/// Kotlin side to `init` would clash with the public `init(ctx)` helper
-/// (the idempotency guard), so we keep `nativeInit` as the FFI entry
-/// point and `init` as the user-facing wrapper.
+/// → `Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`.
+/// JNI mangling escapes the `_` in the `sriharsha_y` package segment as
+/// `_1` (a literal underscore in a Java name becomes `_1` in the symbol).
+/// Renaming the Kotlin side to `init` would clash with the public
+/// `init(ctx)` helper (the idempotency guard), so we keep `nativeInit` as
+/// the FFI entry point and `init` as the user-facing wrapper.
 ///
 /// Returning `void` so a misbehaving init surfaces as a Java exception
 /// (init_hosted already throws on its own failures) rather than a
 /// silent `false`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_uniffi_pqc_android_PqcAndroidInit_nativeInit<'local>(
+pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     context: JObject<'local>,

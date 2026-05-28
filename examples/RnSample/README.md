@@ -47,7 +47,7 @@ The Metro bundler starts in a separate terminal automatically. The app shows a c
 - `android/app/build.gradle` adds `net.java.dev.jna:jna` and `kotlinx-coroutines-core` deps; points `jniLibs.srcDir` + `java.srcDir` at the repo's build outputs (`../../../../target/jniLibs` and `../../../../generated/kotlin`); and pulls the rustls-platform-verifier Kotlin glue via `fileTree("../../../../android/libs")` (extracted by `scripts/build-android.sh`). An `afterEvaluate` guard fails the build with a friendly error if those jars are missing — e.g. if you run `./gradlew` on a fresh checkout without `wire-pqc.sh`.
 - `android/app/src/main/java/com/rnsample/MainApplication.kt` installs the factory in `onCreate()` **before** `super.onCreate()` — late install silently no-ops per [react-native#34789](https://github.com/facebook/react-native/issues/34789).
 - `android/app/src/main/java/com/rnsample/PqcInterceptor.kt` adapts OkHttp's `Interceptor` contract to `PqcHttpClient.request()`. Must be the **last** interceptor; later ones never fire because the Rust core terminates the chain.
-- `android/app/proguard-rules.pro` keeps `uniffi.pqc.**`, JNA, and JNI methods so R8 doesn't strip them.
+- `android/app/proguard-rules.pro` keeps `io.github.sriharsha_y.pqc.**`, JNA, and JNI methods so R8 doesn't strip them.
 
 ### iOS — `URLProtocol` interception
 
