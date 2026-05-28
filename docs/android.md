@@ -47,7 +47,7 @@ The library publishes to Maven Central on every release under the coordinates `i
 
 ```kotlin
 dependencies {
-    implementation("io.github.sriharsha-y:pqc-mobile-client:0.5.1") // x-release-please-version
+    implementation("io.github.sriharsha-y:pqc-mobile-client:0.5.2") // x-release-please-version
 }
 ```
 

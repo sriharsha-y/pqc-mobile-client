@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.1...v0.5.2) (2026-05-28)
+
+
+### Bug Fixes
+
+* **android:** R8 consumer ProGuard rules + smoke-test flake retries ([b454689](https://github.com/sriharsha-y/pqc-mobile-client/commit/b454689e2050981fd8bf6ce334a8411f3cea8640))
+* **android:** ship R8/ProGuard consumer rules in the AAR ([46ec51a](https://github.com/sriharsha-y/pqc-mobile-client/commit/46ec51a10e4597ae9ab4170acbee0cccb425371d))
+
 ## [0.5.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.0...v0.5.1) (2026-05-28)
 
 
