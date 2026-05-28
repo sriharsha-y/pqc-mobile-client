@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.0...v0.5.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **android:** build host bindgen lib unstripped so the AAR ships UniFFI bindings ([764729b](https://github.com/sriharsha-y/pqc-mobile-client/commit/764729b2bc31049803e9bd18abd00306ec823f00))
+* **android:** empty-bindings AAR + unify build commands under make ([772ee16](https://github.com/sriharsha-y/pqc-mobile-client/commit/772ee167325c46bf19487f1c6010f059e3a3a5f7))
+
 ## [0.5.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.4.0...v0.5.0) (2026-05-28)
 
 
