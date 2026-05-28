@@ -17,19 +17,15 @@ import io.github.sriharsha_y.pqc.PqcHttpClient
  * [PqcHttpClient] so the handshake uses rustls + rustls-post-quantum
  * (X25519MLKEM768) instead of the JDK / Conscrypt TLS stack.
  *
- * Must be added as the **last** interceptor on the OkHttpClient — it
- * does not chain.proceed() and instead manufactures the Response from
- * the Rust call.
+ * Must be the **last** interceptor: it does not call chain.proceed() and
+ * synthesizes the Response from the Rust call. Earlier interceptors (auth,
+ * logging) still run; OkHttp's cache / pool / TLS are bypassed because the
+ * Rust core owns the socket.
  *
- * Other interceptors registered BEFORE this one (auth, logging,
- * tracing) still run as normal. OkHttp's cache / connection pool /
- * TLS config are bypassed because the Rust core owns the socket.
- *
- * Takes TWO clients so the sample's UI can toggle post-quantum on/off:
- * `enable_post_quantum` is fixed at client construction, so we keep a
- * PQC client and a classical-only client and pick per request based on
- * the opt-in [PQC_MODE_HEADER] header. A production app needs only ONE
- * client (PQC on) — this duality is purely to demonstrate both paths.
+ * Takes TWO clients because `enable_post_quantum` is fixed at construction:
+ * a PQC client and a classical-only one, picked per request via the opt-in
+ * [PQC_MODE_HEADER]. Production needs only the PQC client — this duality
+ * exists purely to demonstrate both paths.
  */
 class PqcInterceptor(
     private val pqcClient: PqcHttpClient,
@@ -109,12 +105,10 @@ class PqcInterceptor(
     }
 
     /**
-     * Map the Rust core's `negotiated_protocol` string (the ALPN
-     * protocol id — "h2", "http/1.1", etc.) to OkHttp's [Protocol]
-     * enum. Defaults to HTTP/1.1 on unknown values rather than
-     * fabricating HTTP/2 — wrong telemetry is worse than conservative
-     * telemetry. OkHttp lacks an HTTP/3 enum, so h3 is reported as
-     * HTTP/2 (the closest OkHttp can express).
+     * Map the Rust core's `negotiated_protocol` (ALPN id) to OkHttp's
+     * [Protocol]. Defaults to HTTP/1.1 on unknown values rather than
+     * fabricating HTTP/2 — wrong telemetry is worse than conservative.
+     * OkHttp has no HTTP/3 enum, so h3 maps to the closest, HTTP/2.
      */
     private fun parseProtocol(raw: String): Protocol = when (raw) {
         "http/0.9", "http/1.0" -> Protocol.HTTP_1_0
@@ -125,13 +119,10 @@ class PqcInterceptor(
     }
 
     /**
-     * Best-effort reason phrase for the synthesized response. OkHttp's
-     * Response.Builder.message() accepts any string, but logging
-     * interceptors and downstream parsers (HttpLoggingInterceptor in
-     * particular) print a malformed-looking status line when it's empty.
-     * Standard RFC 9110 phrases for the codes a banking API actually
-     * returns; unusual codes get the empty-string fallback rather than
-     * pretending we know what 451-Unavailable-For-Legal-Reasons says.
+     * Best-effort reason phrase for the synthesized response. An empty
+     * message makes HttpLoggingInterceptor print a malformed-looking status
+     * line, so we supply RFC 9110 phrases for the common codes; unusual
+     * codes fall back to empty rather than guessing.
      */
     private fun statusReasonPhrase(status: Int): String = when (status) {
         200 -> "OK"

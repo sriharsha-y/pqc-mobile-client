@@ -6,9 +6,8 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
-// release-please-config.json's extra-files rewrites this version literal
-// on each release (via the x-release-please-version marker). Keep the
-// format `version = "X.Y.Z"` so the generic updater regex matches.
+// release-please rewrites this on each release; keep the
+// `version = "X.Y.Z"` format so its updater regex matches.
 version = "0.5.0" // x-release-please-version
 group = "io.github.sriharsha-y"
 
@@ -19,77 +18,63 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        // Lowest Android API where rustls-platform-verifier's revocation
-        // checking is fully supported. The AAR's own minSdk is 22 but we
-        // hold the floor at 24 — see the top-level README for rationale.
+        // The AAR's own minSdk is 22, but we hold at 24 — the floor where
+        // rustls-platform-verifier revocation checking is fully supported.
+        // See the top-level README for rationale.
         minSdk = 24
     }
 
     sourceSets["main"].apply {
-        // Inputs produced by scripts/build-android.sh:
-        //   target/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libpqc_client.so
-        //   generated/kotlin/io/github/sriharsha_y/pqc/pqc.kt
-        // Resolved relative to the gradle rootProject (android/).
+        // Inputs produced by scripts/build-android.sh, resolved relative to
+        // the gradle rootProject (android/).
         jniLibs.srcDir(rootProject.file("../target/jniLibs"))
         java.srcDir(rootProject.file("../generated/kotlin"))
-        // Hand-written Kotlin glue under android/src/main/kotlin/ — adds
-        // io.github.sriharsha_y.pqc.android.PqcAndroidInit (the JNI bridge that hands
-        // the Application Context to rustls-platform-verifier). Sits
-        // alongside the generated bindings so consumers receive a single
-        // AAR with everything wired up.
+        // Hand-written glue (PqcAndroidInit) sits alongside the generated
+        // bindings so consumers get a single, fully-wired AAR.
         java.srcDir("src/main/kotlin")
         manifest.srcFile("AndroidManifest.xml")
     }
 
     buildFeatures {
-        // No BuildConfig / Resources / etc — this is a binary-binding lib.
+        // Binary-binding lib — no BuildConfig / Resources.
         buildConfig = false
     }
 
-    // NOTE: do NOT declare `publishing { singleVariant("release") { ... } }`
-    // here. Vanniktech's maven-publish plugin (configured below with
-    // publishToMavenCentral(...) + AndroidSingleVariantLibrary, which is
-    // the default for android-library projects) internally calls
-    // singleVariant("release") { withSourcesJar(); withJavadocJar() }
-    // itself. Declaring it manually as well triggers a Gradle error:
-    //   "Using singleVariant publishing DSL multiple times to publish
-    //    variant 'release' to component 'release' is not allowed."
+    // Do NOT declare `publishing { singleVariant("release") { ... } }` here.
+    // Vanniktech's maven-publish plugin (configured below) already calls
+    // singleVariant("release") internally; declaring it again triggers:
+    //   "Using singleVariant publishing DSL multiple times ... is not allowed."
 }
 
 kotlin {
-    // Matches the JDK installed in CI (setup-java@v4 → temurin 17).
+    // Matches the JDK installed in CI (temurin 17).
     jvmToolchain(17)
 }
 
 dependencies {
-    // JNA powers the UniFFI Kotlin bindings' JNI bridge. `@aar` is required
-    // because JNA ships an AAR variant on Maven Central; without it Gradle
-    // would resolve the jar form which is incompatible with Android.
+    // JNA powers the UniFFI bindings' JNI bridge. `@aar` is required because
+    // the jar form JNA also publishes is incompatible with Android.
     api("net.java.dev.jna:jna:5.14.0@aar")
 
-    // Async surface — the generated Kotlin bindings expose `suspend` fns.
+    // Generated Kotlin bindings expose `suspend` fns.
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
 
     // Bundle the rustls-platform-verifier Kotlin glue
-    // (org.rustls.platformverifier.*) directly into our published AAR.
-    // The upstream crate ships those classes as a vendored Maven AAR
-    // inside ~/.cargo/registry, not on any public Maven repo. Without
-    // bundling, consumers downloading our AAR from Maven Central would
-    // get an `org.rustls.platformverifier.CertificateVerifier` NoClassDefFoundError
-    // at handshake time. scripts/build-android.sh extracts the upstream
-    // AAR's classes.jar into android/libs/; declaring it as `api`
-    // (a) puts the symbols on our compile classpath and
-    // (b) tells AGP to embed the jar under the AAR's libs/ entry, so
-    // consumers transitively pick it up with zero extra configuration.
+    // (org.rustls.platformverifier.*) into our published AAR. Upstream ships
+    // those classes only as a Cargo-vendored AAR, not on any Maven repo, so
+    // without bundling, Maven Central consumers hit an
+    // `org.rustls.platformverifier.CertificateVerifier` NoClassDefFoundError
+    // at handshake time. scripts/build-android.sh extracts the classes.jar
+    // into android/libs/; `api` both compiles against it and embeds it under
+    // the AAR's libs/ so consumers pick it up transitively.
     api(fileTree("libs") { include("*.jar") })
 }
 
-// Fail-fast guard: an empty android/libs/ would silently produce an AAR
-// missing the rustls-platform-verifier classes — reproducing the exact
-// NoClassDefFoundError the bundling is supposed to fix. android/libs/ is
-// .gitignore'd and only populated by scripts/build-android.sh, so a
-// maintainer running `./gradlew assembleRelease` (or publishToMavenLocal)
-// without first invoking the script needs a loud error, not a broken AAR.
+// Fail-fast guard: an empty android/libs/ silently produces an AAR missing
+// the rustls-platform-verifier classes, reproducing the very
+// NoClassDefFoundError bundling is meant to prevent. android/libs/ is
+// .gitignore'd and only populated by scripts/build-android.sh, so building
+// without first running the script needs a loud error, not a broken AAR.
 tasks.named("preBuild").configure {
     doFirst {
         val jars = fileTree("libs").matching { include("*.jar") }.files
