@@ -55,7 +55,7 @@ Releases are fully automated by [release-please](https://github.com/googleapis/r
 
 - `feat:` → minor bump, `fix:` → patch, `feat!:`/`fix!:` → major, others (`docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `build:`, `perf:`) → no release.
 - The release workflow opens/updates a PR titled `chore(main): release X.Y.Z`. Merging it tags `vX.Y.Z`, cuts the GitHub Release, and attaches `pqc-mobile-client-<version>-android.tar.gz` + `PqcCore-<version>.zip` (the latter is the CocoaPods/SPM-shaped iOS asset).
-- **Commits must not carry AI/model attribution** (no `Co-Authored-By: Claude …`, no "Generated with …" trailers). See `CONTRIBUTING.md`.
+- **Commits must not carry AI/model attribution** (no `Co-Authored-By: Claude …`, no "Generated with …" trailers).
 
 ## CI
 

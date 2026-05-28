@@ -45,10 +45,6 @@ chore: bump rustls-post-quantum 0.2 → 0.3
 - Use the body to explain **why**, not what (the diff shows what).
 - For breaking changes, include a `BREAKING CHANGE:` footer with migration notes.
 
-### Commit attribution
-
-Commits should appear authored by the human who made the change. **No** AI/model attribution (no `Co-Authored-By: Claude ...`, no "Generated with ..." trailers).
-
 ## Release flow
 
 1. Land conventional commits on `main` (directly or via PR).
