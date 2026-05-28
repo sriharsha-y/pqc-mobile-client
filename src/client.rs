@@ -43,15 +43,21 @@ impl PqcHttpClient {
             .cookie_store(config.enable_cookies)
             .gzip(true)
             .brotli(true)
-            // 0 = no idle pool. Mobile clients lose idle sockets on
-            // cell↔wifi handover (interface goes away, the kernel
-            // keeps the FD but the route is gone); the next request
-            // would stall until tcp_keepalive fires (default 2h).
-            // Forcing a fresh handshake per request avoids the stall
-            // at the cost of one extra RTT per call. The PQ TLS 1.3
-            // handshake is one round-trip anyway, so the cost is
-            // bounded.
-            .pool_max_idle_per_host(0)
+            // Keep idle connections so a burst of requests reuses one
+            // connection (HTTP/2 multiplexing) instead of paying a full
+            // PQ TLS 1.3 handshake per call. This matches OkHttp /
+            // URLSession / reqwest defaults; disabling reuse entirely is
+            // an over-correction that taxes every request on stable
+            // networks.
+            //
+            // The mobile concern is cell↔wifi handover leaving a dead
+            // idle socket the kernel still holds. We bound that two ways:
+            // (1) a 60s idle timeout evicts sockets idle across a typical
+            // handover gap, and (2) tcp_keepalive probes detect a dead
+            // peer far faster than the OS default. hyper also refuses to
+            // hand out a connection it knows is broken, so a stale socket
+            // surfaces as a fresh-connect, not a hang.
+            .pool_idle_timeout(Duration::from_secs(60))
             // Keep-alive on the TCP socket itself: detects dead
             // peers faster than the default OS heartbeat. 30s
             // matches RFC 1122 §4.2.3.6 guidance for interactive
