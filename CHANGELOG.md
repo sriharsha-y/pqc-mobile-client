@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.4.0...v0.5.0) (2026-05-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **android:** Android/Kotlin consumers must update imports from `uniffi.pqc.*` to `io.github.sriharsha_y.pqc.*` (and the proguard keep rule). iOS/Swift consumers are unaffected.
+
+### Code Refactoring
+
+* **android:** rename Kotlin binding package to io.github.sriharsha_y.pqc ([f341bdb](https://github.com/sriharsha-y/pqc-mobile-client/commit/f341bdb6c15d6ec32ac51a3513b58ceecf3bdb1c))
+
 ## [0.4.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.3.0...v0.4.0) (2026-05-28)
 
 
