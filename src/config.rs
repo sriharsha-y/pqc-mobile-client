@@ -2,22 +2,30 @@
 /// to be reasonable to set from Swift/Kotlin without consulting the
 /// docs — defaults are tuned for the banking-on-mobile target.
 ///
-/// All `*_ms` fields are milliseconds. `None` means "use a sensible
-/// builder default", NOT "infinite" — there are no infinite timeouts
-/// in this client by design.
+/// All `*_ms` fields are milliseconds. `connect_timeout_ms` defaults to
+/// a bounded value when `None` (10s), so connect can never hang
+/// indefinitely. `default_timeout_ms` is the exception: `None` there
+/// means NO total cap (only the connect phase stays bounded) — see that
+/// field's doc. Set it explicitly on mobile to bound the whole request.
 #[derive(Debug, Clone)]
 pub struct PqcConfig {
-    /// SHA-256 of the DER-encoded SPKI for each leaf certificate that
-    /// the client is willing to accept, base64-encoded (standard or
-    /// URL-safe alphabet). Empty list disables pinning. See
-    /// `src/pinning.rs` for the matching semantics.
+    /// Base64-encoded SHA-256 of a DER-encoded SPKI (standard or URL-safe
+    /// alphabet) for certificates the client will accept. A pin matches
+    /// if ANY certificate in the server's chain — leaf or intermediate —
+    /// has a matching SPKI hash (the leaf must still parse). Empty list
+    /// disables pinning. Pin your issuing **intermediate CA** for rotation
+    /// resilience (or the leaf plus a backup), always configure **>= 2
+    /// pins**, and NEVER pin a public root. See `src/pinning.rs`.
     pub pinned_cert_sha256: Vec<String>,
 
     /// Advertise X25519MLKEM768 (IANA 0x11EC) as the most-preferred
-    /// key-exchange group. Servers that don't accept it fall back to
-    /// classical (X25519 / secp256r1 / secp384r1) — the client still
-    /// works, the handshake just isn't post-quantum. Toggle off only
-    /// for A/B comparison or to debug a PQ-specific server bug.
+    /// key-exchange group. Defaults to true in the UDL. The ClientHello
+    /// carries BOTH the hybrid group and classical groups, so servers
+    /// that don't accept the hybrid fall back to classical (X25519 /
+    /// secp256r1 / secp384r1) — the client still works, the handshake
+    /// just isn't post-quantum. This is preference, NOT enforcement: the
+    /// client never refuses a classical-only peer. Set false only for
+    /// A/B comparison or to debug a PQ-specific server bug.
     pub enable_post_quantum: bool,
 
     // ----- Timeouts -----

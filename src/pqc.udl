@@ -6,12 +6,21 @@ namespace pqc {};
 // ----- Configuration -----
 
 dictionary PqcConfig {
-    // SHA-256 hashes of Subject Public Key Info (standard or URL-safe
-    // base64). Empty list disables pinning.
+    // Base64 SHA-256 of a certificate's Subject Public Key Info (standard
+    // or URL-safe alphabet). A pin matches ANY cert in the server chain
+    // (leaf or intermediate); pin your issuing intermediate CA for
+    // rotation resilience, keep >= 2 pins, and never pin a public root.
+    // Empty list disables pinning.
     sequence<string> pinned_cert_sha256;
 
     // Advertise X25519MLKEM768 hybrid post-quantum key exchange.
-    boolean enable_post_quantum;
+    // Defaults to true: the ClientHello carries BOTH the hybrid group
+    // and classical groups, so PQC-capable servers negotiate the hybrid
+    // and others gracefully fall back to classical. This is preference,
+    // not enforcement — the client never refuses a classical-only peer.
+    // Set false only to disable PQC (A/B comparison, debugging a
+    // PQ-specific server bug).
+    boolean enable_post_quantum = true;
 
     // Total per-request budget in milliseconds (handshake + headers +
     // body). null = no cap (discouraged on mobile).
