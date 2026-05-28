@@ -12,10 +12,10 @@ The crate compiles to `cdylib` + `staticlib` + `lib`. There is also a host-only 
 
 ```bash
 ./scripts/setup.sh                              # one-time: rustup targets + cargo-ndk
-cargo test --release -- --nocapture --test-threads=1            # unit + network smoke test (hits pq.cloudflareresearch.com)
-cargo test --release --test smoke -- --nocapture --test-threads=1 <test_name>   # single test
-# --test-threads=1 is required for the smoke suite: kx_tracker is process-global
-# (see src/pqc.udl), so parallel tests cross-contaminate each other's reads.
+cargo test --release -- --nocapture            # unit + network smoke test (hits pq.cloudflareresearch.com)
+cargo test --release --test smoke -- --nocapture <test_name>   # single test
+# Smoke tests confirm the negotiated KEX via the server's /cdn-cgi/trace
+# report (the `kex=` line), so they hold no shared client state and run in parallel.
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ./scripts/build-android.sh                      # cross-compile all ABIs → target/jniLibs/, Kotlin bindings → generated/kotlin/
 ./scripts/build-ios.sh                          # XCFramework → generated/PqcCore.xcframework, Swift bindings → generated/swift/
@@ -42,7 +42,6 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 - `src/pqc.udl` — UniFFI interface; **this is the source of truth for the Kotlin/Swift API surface**. Changes here regenerate bindings.
 - `src/client.rs` — `PqcHttpClient`, the reqwest wrapper.
 - `src/tls.rs` — rustls + `rustls-post-quantum` + `rustls-platform-verifier` wiring; this is where the PQC group list is installed.
-- `src/kx_tracker.rs` — instrumented `CryptoProvider` that records the negotiated TLS group so it can be surfaced on `HttpResponse`.
 - `src/pinning.rs` — SPKI SHA-256 cert pinning layered on top of platform verifier.
 - `src/config.rs`, `src/types.rs`, `src/error.rs` — `PqcConfig`, `HttpRequest`/`HttpResponse`/`HttpMethod`, `PqcError`.
 - `tests/smoke.rs` — asserts a real handshake against `pq.cloudflareresearch.com` reports `X25519MLKEM768` as the negotiated group (not a hardcoded constant — it reads the tracker output).

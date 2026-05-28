@@ -68,8 +68,7 @@ pqc-mobile-client/
 │   ├── client.rs           PqcHttpClient implementation (wraps reqwest)
 │   ├── config.rs           PqcConfig + RedirectPolicy
 │   ├── tls.rs              rustls + PQC + platform-verifier wiring
-│   ├── pinning.rs          SPKI SHA-256 leaf-strict cert pinning
-│   ├── kx_tracker.rs       Instrumented CryptoProvider — records negotiated TLS group
+│   ├── pinning.rs          SPKI SHA-256 cert pinning (matches any cert in chain)
 │   ├── android_init.rs     JNI bridge — hands Application Context to rustls-platform-verifier
 │   ├── error.rs            PqcError enum
 │   └── types.rs            HttpRequest / HttpResponse / HttpMethod
@@ -78,7 +77,7 @@ pqc-mobile-client/
 │   ├── src/main/kotlin/    PqcAndroidInit.kt (JNI bridge consumer-side)
 │   └── gradlew             Pinned Gradle 8.7 wrapper
 ├── tests/
-│   └── smoke.rs            Network smoke test against Cloudflare PQ endpoint (requires --test-threads=1)
+│   └── smoke.rs            Network smoke test against Cloudflare PQ endpoint (kex via /cdn-cgi/trace)
 ├── scripts/
 │   ├── setup.sh            One-time developer setup
 │   ├── build-android.sh    Cross-compile all Android ABIs + Kotlin bindings + extract rustls-pv jar
@@ -95,10 +94,9 @@ pqc-mobile-client/
 
 ```bash
 ./scripts/setup.sh                 # one-time: rust targets, cargo-ndk
-cargo test -- --nocapture --test-threads=1   # sanity-test against pq.cloudflareresearch.com
-# --test-threads=1 is required: the smoke suite reads from a process-global
-# kx_tracker (see src/pqc.udl HttpResponse doc) — parallel tests would cross-
-# contaminate each other's reads.
+cargo test -- --nocapture   # sanity-test against pq.cloudflareresearch.com
+# The smoke suite confirms the negotiated KEX via the server's
+# /cdn-cgi/trace report, so it holds no shared client state and runs in parallel.
 ./scripts/build-android.sh         # cross-compile all Android ABIs + Kotlin bindings
 ./scripts/build-ios.sh             # build XCFramework + Swift bindings
 ```
@@ -144,7 +142,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | Timeouts (connect / total) | ✅ `connectTimeoutMs` separated from `defaultTimeoutMs` so connect can fail fast on cell handover |
 | Cancellation | ✅ Via UniFFI async + tokio |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
-| Negotiated TLS group + ALPN reporting on `HttpResponse` | ✅ `negotiatedNamedGroup` (process-global, see UDL caveat) and `negotiatedProtocol` (per-request ALPN) via instrumented `CryptoProvider` (`src/kx_tracker.rs`) |
+| ALPN reporting on `HttpResponse` | ✅ `negotiatedProtocol` (per-request "h2"/"http/1.1"). The negotiated KEX **group** is intentionally not surfaced — it's a per-connection property the client can only read via a racy global; confirm PQC via the server's `/cdn-cgi/trace` `kex=` instead (see `src/pqc.udl`) |
 | Android GMS + non-GMS devices | ✅ |
 | iOS 13 – 18 | ✅ |
 | iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |

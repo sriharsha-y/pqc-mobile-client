@@ -8,8 +8,6 @@ pub enum PqcError {
     Tls,
     #[error("request timed out")]
     Timeout,
-    #[error("request cancelled")]
-    Cancelled,
     #[error("invalid request")]
     InvalidRequest,
     #[error("invalid response")]

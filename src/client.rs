@@ -6,7 +6,6 @@ use reqwest::redirect::Policy;
 
 use crate::config::{PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
-use crate::kx_tracker::last_negotiated_group_str;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
 
@@ -244,16 +243,10 @@ impl PqcHttpClient {
             }
         }
 
-        // The KEX group rustls selected on the most-recent handshake.
-        // See kx_tracker module for the recording mechanism and the
-        // documented concurrency caveat.
-        let negotiated_named_group = last_negotiated_group_str();
-
         Ok(HttpResponse {
             status,
             headers,
             body,
-            negotiated_named_group,
             negotiated_protocol,
         })
     }

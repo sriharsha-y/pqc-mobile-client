@@ -84,16 +84,16 @@ dictionary HttpResponse {
     u16 status;
     record<string, sequence<string>> headers;
     bytes body;
-    // The TLS named group recorded by the MOST RECENT handshake in this
-    // process (e.g. "X25519MLKEM768", "X25519", "unknown" if no handshake
-    // has happened yet). NOT per-request: HTTP/2 connection reuse and
-    // concurrent requests across multiple clients can attribute one
-    // connection's group to another request. Suitable for process-level
-    // telemetry ("is PQC engaged at all on this device?"), not for
-    // per-request attribution. For per-request truth, use server-side
-    // TLS observability (Akamai DataStream 2 etc.).
-    string negotiated_named_group;
     // Negotiated ALPN protocol (e.g. "h2", "http/1.1"). Per-request.
+    //
+    // NOTE: the negotiated TLS key-exchange GROUP is intentionally NOT
+    // surfaced here. It is a property of the TLS connection, not the
+    // request, and the only way to observe it from inside reqwest is a
+    // process-global side-channel that races under concurrent requests.
+    // To confirm whether PQC (X25519MLKEM768) was negotiated, use a
+    // server-authoritative source instead: Cloudflare's /cdn-cgi/trace
+    // (parse the `kex=` line) or server-side TLS observability such as
+    // AWS CloudTrail `tlsDetails.keyExchange` / Cloudflare DataStream.
     string negotiated_protocol;
 };
 
@@ -104,7 +104,6 @@ enum PqcError {
     "Network",
     "Tls",
     "Timeout",
-    "Cancelled",
     "InvalidRequest",
     "InvalidResponse",
     "PinningFailure",

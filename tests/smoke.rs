@@ -1,20 +1,25 @@
 //! Smoke test against Cloudflare's PQ research endpoint.
 //!
-//! Run with: `cargo test --release --test smoke -- --nocapture --test-threads=1`
+//! Run with: `cargo test --release --test smoke -- --nocapture`
 //!
-//! `--test-threads=1` is REQUIRED, not stylistic: the kx_tracker
-//! (`src/kx_tracker.rs`) is intentionally process-global — see the
-//! `negotiated_named_group` doc on `HttpResponse` in `src/pqc.udl`.
-//! When parallel tests interleave a PQ handshake with a classical one,
-//! the tracker reads cross-contaminate and `classical_fallback_github`
-//! flaps with `assertion left != right: "X25519MLKEM768" / "X25519MLKEM768"`.
-//! Running them serially makes each test see only its own most-recent
-//! handshake.
+//! Whether the PQ hybrid was actually negotiated is confirmed via the
+//! SERVER's report — Cloudflare's `/cdn-cgi/trace` returns a `kex=` line
+//! with the key exchange the edge negotiated for that connection. This
+//! is authoritative and per-connection, so the tests no longer depend on
+//! any client-side global state and can run in parallel.
 //!
 //! NOTE: requires network access. Skip in offline CI with `--skip network`.
 
 use pqc_client::{HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy};
 use std::collections::HashMap;
+
+/// Extract the `kex=` value from a Cloudflare `/cdn-cgi/trace` body.
+fn parse_kex(trace_body: &str) -> Option<String> {
+    trace_body
+        .lines()
+        .find_map(|line| line.strip_prefix("kex="))
+        .map(|s| s.trim().to_string())
+}
 
 /// Default config for these tests. Matches the documented production
 /// defaults so a behavior drift between test config and the example
@@ -46,18 +51,22 @@ fn get(url: &str) -> HttpRequest {
 async fn pq_handshake_cloudflare() {
     let client = PqcHttpClient::new(default_test_config())
         .expect("client construction should succeed with empty pin list");
+    // /cdn-cgi/trace returns the key exchange the edge negotiated, in
+    // the body — server-authoritative, no client-side global involved.
     let resp = client
-        .request(get("https://pq.cloudflareresearch.com/"))
+        .request(get("https://pq.cloudflareresearch.com/cdn-cgi/trace"))
         .await
         .expect("request should succeed");
     assert!(resp.status < 500, "unexpected status: {}", resp.status);
+    let body = String::from_utf8_lossy(&resp.body);
+    let kex = parse_kex(&body).expect("trace body should contain a kex= line");
     println!(
-        "status={} group={} alpn={}",
-        resp.status, resp.negotiated_named_group, resp.negotiated_protocol
+        "status={} kex={} alpn={}",
+        resp.status, kex, resp.negotiated_protocol
     );
     assert_eq!(
-        resp.negotiated_named_group, "X25519MLKEM768",
-        "Cloudflare PQ endpoint should negotiate X25519MLKEM768"
+        kex, "X25519MLKEM768",
+        "Cloudflare should negotiate X25519MLKEM768 when the client offers it"
     );
     // Regression for M1: ALPN must be set so reqwest negotiates h2 with
     // any HTTP/2-capable server. Without `tls.alpn_protocols`, the
@@ -69,33 +78,27 @@ async fn pq_handshake_cloudflare() {
     );
 }
 
-/// Classical fallback: against a non-PQC server we still want a
-/// successful handshake, but `negotiated_named_group` should report
-/// the classical choice (`X25519` for any TLS 1.3 client that offers
-/// both groups). github.com's edge does not advertise X25519MLKEM768
-/// as of 2026-05; if that changes, swap to a stable classical target.
+/// Classical handshake: with PQC disabled on the CLIENT, it offers only
+/// classical groups, so the edge negotiates X25519 regardless of whether
+/// it supports PQC. This is deterministic and server-independent — we no
+/// longer depend on finding a server that happens to lack PQC support.
+/// Confirmed via the same server-authoritative `/cdn-cgi/trace` `kex=`.
 #[tokio::test]
-async fn classical_fallback_github() {
-    let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
+async fn classical_handshake_when_pq_disabled() {
+    let mut cfg = default_test_config();
+    cfg.enable_post_quantum = false;
+    let client = PqcHttpClient::new(cfg).expect("client should construct");
     let resp = client
-        .request(get("https://github.com/"))
+        .request(get("https://pq.cloudflareresearch.com/cdn-cgi/trace"))
         .await
         .expect("request should succeed");
     assert!(resp.status < 500, "unexpected status: {}", resp.status);
-    println!(
-        "status={} group={}",
-        resp.status, resp.negotiated_named_group
-    );
-    assert_ne!(
-        resp.negotiated_named_group, "X25519MLKEM768",
-        "github.com should NOT negotiate PQ as of 2026-05"
-    );
-    // Specifically expect X25519 — that's the only group both we and
-    // github.com will agree on (we offer X25519MLKEM768 first which
-    // github HRRs out of, then X25519).
+    let body = String::from_utf8_lossy(&resp.body);
+    let kex = parse_kex(&body).expect("trace body should contain a kex= line");
+    println!("status={} kex={}", resp.status, kex);
     assert_eq!(
-        resp.negotiated_named_group, "X25519",
-        "classical fallback should land on X25519"
+        kex, "X25519",
+        "with PQC disabled the client should negotiate classical X25519"
     );
 }
 
@@ -187,8 +190,7 @@ async fn post_body_round_trips() {
 
 /// Concurrent requests on a SINGLE PqcHttpClient: catches regressions
 /// where the client (or its underlying reqwest::Client / hyper pool)
-/// is not Send/Sync-safe across tokio tasks, or where the kx_tracker's
-/// global state races and corrupts the negotiated_named_group reading.
+/// is not Send/Sync-safe across tokio tasks.
 ///
 /// Why this matters at the FFI: the UniFFI-exposed `request` method
 /// is `async`, and consumers on iOS/Android routinely fan out parallel
@@ -222,15 +224,10 @@ async fn concurrent_requests_share_one_client() {
             .expect("task should not panic")
             .expect("request should succeed");
         assert!(resp.status < 500, "unexpected status: {}", resp.status);
-        // We deliberately do NOT assert per-request that
-        // negotiated_named_group == "X25519MLKEM768" here. The tracker
-        // is process-global (see pqc.udl notes on HttpResponse) — every
-        // response in this batch is reading the SAME global, so a
-        // per-response assertion would only ever confirm that the last
-        // handshake to land was PQ, not that each individual handshake
-        // was. The valuable signal at this layer is liveness: 8 tasks
-        // sharing one Arc<PqcHttpClient> all reach completion without
-        // panicking or deadlocking.
+        // Liveness is the signal here: 8 tasks sharing one
+        // Arc<PqcHttpClient> all reach completion without panicking or
+        // deadlocking. (Per-request KEX confirmation belongs to the
+        // server-side `/cdn-cgi/trace` check, not a client global.)
         ok += 1;
     }
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");
