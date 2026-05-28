@@ -1,6 +1,6 @@
 # pqc-mobile-client
 
-[![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
+[![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
 [![android](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml)
 [![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
 [![release](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/release.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/releases)
