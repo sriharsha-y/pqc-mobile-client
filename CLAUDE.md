@@ -56,7 +56,7 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 - `src/tls.rs` — rustls + `rustls-post-quantum` + `rustls-platform-verifier` wiring; this is where the PQC group list is installed.
 - `src/pinning.rs` — SPKI SHA-256 cert pinning layered on top of platform verifier.
 - `src/config.rs`, `src/types.rs`, `src/error.rs` — `PqcConfig`, `HttpRequest`/`HttpResponse`/`HttpMethod`, `PqcError`.
-- `tests/smoke.rs` — asserts a real handshake against `pq.cloudflareresearch.com` reports `X25519MLKEM768` as the negotiated group (not a hardcoded constant — it reads the tracker output).
+- `tests/smoke.rs` — asserts a real handshake against `pq.cloudflareresearch.com` negotiates `X25519MLKEM768`, read from the server's `/cdn-cgi/trace` `kex=` report (server-authoritative; no client-side tracker).
 - `examples/RnSample/` — runnable React Native sample exercising both the Android OkHttp interceptor path and the iOS `PqcURLProtocol` path.
 - `docs/android.md`, `docs/ios.md` — consumer integration guides.
 - `PqcCore.podspec` — local CocoaPod that vendors the iOS XCFramework for RN consumption.

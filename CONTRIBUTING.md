@@ -57,14 +57,17 @@ chore: bump rustls-post-quantum 0.2 → 0.3
 
 ## Local development
 
+Common tasks are unified under `make` (run `make help` for the full list):
+
 ```bash
-./scripts/setup.sh                 # rustup targets, cargo-ndk
-# uniffi-bindgen is built from the in-tree `[[bin]]` target via
-# `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
-# The `--features cli` gate is critical: it keeps clap / goblin /
-# uniffi_bindgen out of the iOS / Android cross-compiled archives.
-cargo test --release   # unit + smoke tests (KEX confirmed via server /cdn-cgi/trace; runs in parallel)
-./scripts/build-android.sh         # cross-compile + Kotlin bindings
-./scripts/build-ios.sh             # XCFramework + Swift bindings
-cargo fmt && cargo clippy --all-targets -- -D warnings
+make setup        # one-time: rustup targets + cargo-ndk
+make check        # fmt + clippy + unit/smoke tests (mirrors the CI check job)
+make android      # cross-compile all ABIs + Kotlin bindings
+make ios          # XCFramework + Swift bindings
+make help         # list all targets
 ```
+
+`uniffi-bindgen` is built from the in-tree `[[bin]]` target and invoked by the
+build scripts via `cargo run --features cli --bin uniffi-bindgen -- generate ...`.
+The `--features cli` gate is critical — it keeps clap / goblin / uniffi_bindgen
+out of the iOS / Android cross-compiled archives.
