@@ -1,95 +1,62 @@
-/// Configuration handed to `PqcHttpClient::new`. Every field is meant
-/// to be reasonable to set from Swift/Kotlin without consulting the
-/// docs — defaults are tuned for the banking-on-mobile target.
-///
-/// All `*_ms` fields are milliseconds. `connect_timeout_ms` defaults to
-/// a bounded value when `None` (10s), so connect can never hang
-/// indefinitely. `default_timeout_ms` is the exception: `None` there
-/// means NO total cap (only the connect phase stays bounded) — see that
-/// field's doc. Set it explicitly on mobile to bound the whole request.
+/// Configuration handed to `PqcHttpClient::new`. Defaults are tuned for
+/// mobile and safe to set from Swift/Kotlin without reading the docs.
+/// All `*_ms` fields are milliseconds.
 #[derive(Debug, Clone)]
 pub struct PqcConfig {
-    /// Base64-encoded SHA-256 of a DER-encoded SPKI (standard or URL-safe
-    /// alphabet) for certificates the client will accept. A pin matches
-    /// if ANY certificate in the server's chain — leaf or intermediate —
-    /// has a matching SPKI hash (the leaf must still parse). Empty list
-    /// disables pinning. Pin your issuing **intermediate CA** for rotation
-    /// resilience (or the leaf plus a backup), always configure **>= 2
-    /// pins**, and NEVER pin a public root. See `src/pinning.rs`.
+    /// Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
+    /// accept. Matches if ANY cert in the chain — leaf or intermediate —
+    /// has a matching SPKI hash (the leaf must still parse); empty disables
+    /// pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
+    /// public root. See `src/pinning.rs`.
     pub pinned_cert_sha256: Vec<String>,
 
-    /// Advertise X25519MLKEM768 (IANA 0x11EC) as the most-preferred
-    /// key-exchange group. Defaults to true in the UDL. The ClientHello
-    /// carries BOTH the hybrid group and classical groups, so servers
-    /// that don't accept the hybrid fall back to classical (X25519 /
-    /// secp256r1 / secp384r1) — the client still works, the handshake
-    /// just isn't post-quantum. This is preference, NOT enforcement: the
-    /// client never refuses a classical-only peer. Set false only for
-    /// A/B comparison or to debug a PQ-specific server bug.
+    /// Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
+    /// (default true). The ClientHello also carries classical groups, so a
+    /// peer that rejects the hybrid falls back to classical — this is a
+    /// preference, not enforcement. Set false only for A/B comparison.
     pub enable_post_quantum: bool,
 
     // ----- Timeouts -----
-    /// Total request budget (handshake + headers + body). On expiry
-    /// the request is aborted with `PqcError::Timeout`. `None` means
-    /// no total cap — discouraged for mobile.
+    /// Total request budget (handshake + headers + body); on expiry the
+    /// request aborts with `PqcError::Timeout`. `None` means no total cap —
+    /// discouraged for mobile.
     pub default_timeout_ms: Option<u64>,
 
-    /// TCP-connect / TLS-handshake budget. Separated from
-    /// `default_timeout_ms` because on cellular handover the
-    /// connect phase can hang for the entire total budget; capping
-    /// it independently lets the client fail fast and retry without
-    /// burning the full timeout window. `None` defaults to 10s.
+    /// TCP-connect / TLS-handshake budget, capped separately from
+    /// `default_timeout_ms` so a stalled connect (e.g. cellular handover)
+    /// fails fast instead of burning the whole request budget. `None` = 10s.
     pub connect_timeout_ms: Option<u64>,
 
     // ----- Body protection -----
-    /// Hard ceiling on a response body's size, in bytes (post-
-    /// decompression). Bodies exceeding this trip
-    /// `PqcError::InvalidResponse` rather than allocating GBs.
-    ///
-    /// gzip + brotli are enabled by default on the underlying reqwest
-    /// builder; without this cap a 1 KiB encoded stream can expand to
-    /// GBs and OOM-kill the host app (decompression-bomb class,
-    /// CWE-409). `None` defaults to 16 MiB which is generous for any
-    /// banking JSON payload.
+    /// Hard ceiling on a response body (post-decompression); exceeding it
+    /// trips `PqcError::InvalidResponse`. Guards against decompression bombs
+    /// (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
+    /// expand to GBs and OOM the app. `None` defaults to 16 MiB.
     pub max_body_bytes: Option<u64>,
 
     // ----- Cookies -----
-    /// Off by default. When false, the client carries no cookie jar
-    /// at all — callers must round-trip `Set-Cookie` / `Cookie`
-    /// header values explicitly via `HttpRequest.headers` and
-    /// `HttpResponse.headers`. Banking clients typically want this:
-    /// auto-attaching cookies across endpoints is a session-leak
-    /// vector. Enable only when you have a reason.
+    /// Off by default: no cookie jar, so callers round-trip
+    /// `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
+    /// endpoints is a session-leak vector — enable only when needed.
     pub enable_cookies: bool,
 
     // ----- User-Agent -----
-    /// Sent verbatim as the `User-Agent` request header. `None` lets
-    /// reqwest send its default (`reqwest/0.12.x`), which Akamai Bot
-    /// Manager and many bank WAFs reject — banking partners commonly
-    /// enforce a UA allowlist. Set this to your app's identifier.
+    /// Sent verbatim as `User-Agent`. `None` uses reqwest's default, which
+    /// many WAFs (Akamai Bot Manager, bank UA allowlists) reject — set your
+    /// app's identifier.
     pub user_agent: Option<String>,
 
     // ----- Redirects -----
-    /// How to handle HTTP 3xx responses. See `RedirectPolicy`
-    /// variants for semantics. Default is
-    /// `RedirectPolicy::SameOriginOnly` — cross-origin redirects are
-    /// refused so a redirect to an un-pinned host can never silently
-    /// downgrade the TLS guarantees we just negotiated.
+    /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
+    /// are refused so a redirect can't silently downgrade to an un-pinned
+    /// host.
     pub redirect_policy: RedirectPolicy,
 }
 
-/// What the client does on a 3xx response. Banking flows often want
-/// "no redirects at all" or "only within the same origin"; the
-/// reqwest default of up-to-10 unbounded redirects is too permissive
-/// for a security-sensitive HTTPS client.
-///
-/// Variants are struct-style (even unit ones) because UDL `[Enum]
-/// interface` enforces that shape, and PqcConfig — which references
-/// this — is declared in UDL. The shape is purely a UDL syntactic
-/// constraint, not a design choice.
-///
-/// `NoRedirects` rather than `None` to avoid Rust naming collision
-/// with `Option::None` in match arms.
+/// What the client does on a 3xx. The reqwest default (10 unbounded
+/// redirects) is too permissive for a security-sensitive client. Variants
+/// are struct-style (the `{}`) because UDL `[Enum] interface` requires it.
+/// `NoRedirects` (not `None`) avoids colliding with `Option::None` in matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirectPolicy {
     NoRedirects {},

@@ -10,15 +10,27 @@ The crate compiles to `cdylib` + `staticlib` + `lib`. There is also a host-only 
 
 ## Common commands
 
+Common tasks are unified under `make` — a thin dispatcher over `scripts/` +
+cargo (run `make help` to list targets). Targets call the exact commands CI
+runs, so `make check` reproduces the CI `check` job locally. The scripts under
+`scripts/` remain the source of truth and stay runnable directly.
+
 ```bash
-./scripts/setup.sh                              # one-time: rustup targets + cargo-ndk
-cargo test --release -- --nocapture            # unit + network smoke test (hits pq.cloudflareresearch.com)
-cargo test --release --test smoke -- --nocapture <test_name>   # single test
-# Smoke tests confirm the negotiated KEX via the server's /cdn-cgi/trace
-# report (the `kex=` line), so they hold no shared client state and run in parallel.
-cargo fmt && cargo clippy --all-targets -- -D warnings
-./scripts/build-android.sh                      # cross-compile all ABIs → target/jniLibs/, Kotlin bindings → generated/kotlin/
-./scripts/build-ios.sh                          # XCFramework → generated/PqcCore.xcframework, Swift bindings → generated/swift/
+make setup        # one-time: rustup targets + cargo-ndk
+make check        # fmt --check + clippy + test (mirrors the CI 'check' job)
+make test         # unit + network smoke test (hits pq.cloudflareresearch.com)
+make android      # cross-compile all ABIs → target/jniLibs/, Kotlin bindings → generated/kotlin/
+make ios          # XCFramework → generated/PqcCore.xcframework, Swift bindings → generated/swift/
+make build        # android + ios
+make audit        # cargo-audit + cargo-deny (supply-chain)
+make help         # list all targets
+```
+
+```bash
+# Single smoke test (no make target). Smoke tests confirm the negotiated KEX
+# via the server's /cdn-cgi/trace report (the `kex=` line), so they hold no
+# shared client state and run in parallel.
+cargo test --release --test smoke -- --nocapture <test_name>
 ```
 
 `scripts/build-android.sh` requires `ANDROID_NDK_HOME`. `scripts/build-ios.sh` honors `IPHONEOS_DEPLOYMENT_TARGET` / `IPHONESIMULATOR_DEPLOYMENT_TARGET` (both default to 13.0, matching `PqcCore.podspec`'s `s.platform = :ios, '13.0'` and `.github/workflows/release.yml`'s pinned env — keep these three in sync when bumping the floor).

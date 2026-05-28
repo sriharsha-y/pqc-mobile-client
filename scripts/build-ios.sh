@@ -15,10 +15,8 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Match the consumer app's minimum deployment target. Both cc-rs (used by
-# aws-lc-sys to build C objects) and rustc's linker read these vars; if
-# they disagree, the linker errors with "object file built for newer iOS
-# version than being linked" and __chkstk_darwin and friends go undefined.
+# Both cc-rs (aws-lc-sys) and rustc's linker read these; a mismatch fails
+# linking with "object file built for newer iOS version than being linked".
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-13.0}"
 # Simulator builds use this independent target var.
 export IPHONESIMULATOR_DEPLOYMENT_TARGET="${IPHONESIMULATOR_DEPLOYMENT_TARGET:-13.0}"
@@ -42,14 +40,9 @@ lipo -create \
     -output target/ios-sim/libpqc_client.a
 
 echo "==> Generating Swift bindings (via --library mode)"
-# We use --library not --udl so the bindgen sees BOTH UDL declarations
-# AND proc-macro-exported (#[uniffi::export]) methods. The PqcHttpClient
-# `request` method specifically lives in a proc-macro impl block in
-# src/client.rs (annotated `async_runtime = "tokio"` so the FFI bridge
-# drives reqwest/hyper on a real tokio runtime); --udl-only mode would
-# miss it and the resulting Swift binding wouldn't expose `request`.
-#
-# --library mode needs a built dylib of the crate; build a host one.
+# --library (not --udl) so bindgen sees the proc-macro-exported `request`
+# method too. It reads a host-built dylib (--features cli enables the
+# uniffi-bindgen binary).
 cargo build --release --features cli
 HOST_DYLIB="target/release/libpqc_client.dylib"
 if [ ! -f "$HOST_DYLIB" ]; then
@@ -64,10 +57,17 @@ cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --out-dir generated/swift \
     --library "$HOST_DYLIB"
 
-# UniFFI emits {pqc.swift, pqcFFI.h, pqcFFI.modulemap}.
-# The XCFramework needs the .h + a `module.modulemap` inside its Headers/
-# directory of each slice. We rename pqcFFI.modulemap to module.modulemap
-# so Xcode/SourceKit find a Swift module called "pqcFFI" backed by the C header.
+# Fail-fast if bindgen silently wrote nothing (it exits 0 on an empty
+# interface). No strip override is needed here, unlike build-android.sh:
+# this path is macOS-only and macOS strip keeps the UNIFFI_META symbols
+# bindgen reads (mozilla/uniffi-rs#2520 only bites Linux).
+if [ ! -s generated/swift/pqc.swift ]; then
+    echo "::error::uniffi-bindgen produced no Swift binding (generated/swift/pqc.swift missing or empty)."
+    exit 1
+fi
+
+# The XCFramework's Headers/ needs the .h plus a `module.modulemap`, so
+# rename UniFFI's pqcFFI.modulemap to the name Xcode expects.
 HEADERS_DIR="generated/headers"
 rm -rf "$HEADERS_DIR"
 mkdir -p "$HEADERS_DIR"
@@ -83,13 +83,9 @@ xcodebuild -create-xcframework \
         -headers "$HEADERS_DIR" \
     -output generated/PqcCore.xcframework
 
-# Repo-root symlinks for local Pod consumption. PqcCore.podspec's
-# `s.source_files` / `s.vendored_frameworks` reference bare `pqc.swift`
-# and `PqcCore.xcframework` because that's the layout inside the release
-# zip the published Pod fetches. For the example app's `:path => '../../../'`
-# Pod entry, the Pod root IS the repo root — these symlinks make the bare
-# names resolve to the just-built `generated/` artefacts. Both symlinks
-# are ignored in .gitignore.
+# PqcCore.podspec references bare `pqc.swift` / `PqcCore.xcframework` (the
+# release-zip layout). For the sample's `:path => '../../../'` Pod, the Pod
+# root is the repo root, so symlink the bare names to generated/ (gitignored).
 ln -sfn generated/swift/pqc.swift pqc.swift
 ln -sfn generated/PqcCore.xcframework PqcCore.xcframework
 

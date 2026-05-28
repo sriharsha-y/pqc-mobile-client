@@ -5,11 +5,10 @@ import android.content.Context
 /**
  * One-time Android-side initialization for `pqc_client`.
  *
- * `rustls-platform-verifier` (the cert-chain verifier under our TLS
- * stack) holds a JVM reference to the Application `Context` so it can
- * reach `KeyStore`, `NetworkSecurityConfig`, and revocation lookups
- * at handshake time. The Rust side cannot fish that out on its own
- * without going through JNI, so this object hands it over.
+ * `rustls-platform-verifier` holds a JVM reference to the Application
+ * `Context` to reach `KeyStore`, `NetworkSecurityConfig`, and revocation
+ * lookups at handshake time. Rust can only obtain it through JNI, so this
+ * object hands it over.
  *
  * **Call exactly once, from `Application.onCreate`, BEFORE constructing
  * any [io.github.sriharsha_y.pqc.PqcHttpClient]**:
@@ -19,7 +18,6 @@ import android.content.Context
  *   override fun onCreate() {
  *     super.onCreate()
  *     io.github.sriharsha_y.pqc.android.PqcAndroidInit.init(this)
- *     // ... PqcHttpClient may now be constructed
  *   }
  * }
  * ```
@@ -27,37 +25,30 @@ import android.content.Context
  * Skipping this throws on the first request:
  *   `io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized`
  *
- * Idempotent at the Kotlin level — a redundant call short-circuits
- * before crossing into Rust.
- *
- * iOS has no equivalent: Apple's Security framework is process-wide
- * and discovered via `dlopen`, so iOS consumers do nothing extra.
+ * Idempotent — a redundant call short-circuits before crossing into Rust.
+ * iOS has no equivalent: Apple's Security framework is process-wide.
  */
 object PqcAndroidInit {
     @Volatile private var initialized = false
 
     init {
-        // The native shim lives in libpqc_client (built by
-        // scripts/build-android.sh). UniFFI's own bindings call
-        // System.loadLibrary on first use of any FFI function, but
-        // since we may be called BEFORE any UniFFI surface is
-        // touched (and intentionally so), force-load it here.
+        // We may be called BEFORE any UniFFI surface is touched (which is
+        // when UniFFI would otherwise loadLibrary), so force-load it here.
         System.loadLibrary("pqc_client")
     }
 
     /**
-     * Hand the Android Context to rustls-platform-verifier.
-     * Pass the Application context, NOT an Activity context — the
-     * verifier holds the reference for the lifetime of the process.
+     * Hand the Android Context to rustls-platform-verifier. Pass the
+     * Application context, NOT an Activity — the verifier holds the
+     * reference for the lifetime of the process.
      */
     @JvmStatic
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
             if (initialized) return
-            // Always pass the Application context. If a caller hands
-            // us an Activity by mistake, applicationContext yields
-            // the right long-lived reference.
+            // applicationContext yields the long-lived reference even if a
+            // caller hands us an Activity by mistake.
             nativeInit(context.applicationContext)
             initialized = true
         }

@@ -107,15 +107,13 @@ android {
     }
 }
 
-// pqc-mobile-client integration: pull native .so files and UniFFI-generated
-// Kotlin straight from the repo-root build outputs. Run `./scripts/build-android.sh`
-// at the repo root first (or `examples/RnSample/scripts/wire-pqc.sh`) so these
-// paths actually exist.
+// pqc-mobile-client integration: pull native .so + UniFFI-generated Kotlin
+// from the repo-root build outputs. Run scripts/build-android.sh first (or
+// examples/RnSample/scripts/wire-pqc.sh) so these paths exist.
 android.sourceSets["main"].jniLibs.srcDir(file("../../../../target/jniLibs"))
 android.sourceSets["main"].java.srcDir(file("../../../../generated/kotlin"))
-// Hand-written glue that ships with the published AAR — when consuming
-// via Maven Central these come bundled, but local development consumes
-// the raw bindings so we have to add the source set explicitly.
+// Hand-written glue: bundled in the Maven Central AAR, but source-path mode
+// here consumes the raw bindings, so add the source set explicitly.
 android.sourceSets["main"].java.srcDir(file("../../../../android/src/main/kotlin"))
 
 dependencies {
@@ -128,35 +126,26 @@ dependencies {
         implementation jscFlavor
     }
 
-    // pqc-mobile-client (Rust core via UniFFI): JNA provides the JNI layer
-    // the generated Kotlin bindings rely on; coroutines power the async
-    // request API.
+    // JNA provides the JNI layer the generated bindings rely on; coroutines
+    // power the async request API.
     implementation("net.java.dev.jna:jna:5.14.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
 
     // rustls-platform-verifier's Android JVM support classes
-    // (org.rustls.platformverifier.CertificateVerifier). The Rust crate's
-    // JNI shim calls back into these for X509 chain validation; without
-    // them the first handshake throws NoClassDefFoundError.
-    //
-    // Source of truth: the parent repo's android/libs/ directory, populated
-    // by scripts/build-android.sh by extracting the jar out of the
-    // Cargo-vendored rustls-platform-verifier-android crate. The published
-    // Maven Central AAR bundles this jar internally (api(fileTree("libs"))
-    // in android/build.gradle.kts), but THIS SAMPLE consumes the library via
-    // source paths (target/jniLibs + generated/kotlin) — source-path mode
-    // skips AAR packaging entirely, so the bundled jar never reaches us.
-    // Pull straight from the parent's android/libs/ instead of hand-vendoring
-    // a private copy in app/libs/. Version-agnostic so a bump in the upstream
-    // rustls-platform-verifier crate flows through with no edits here.
+    // (org.rustls.platformverifier.CertificateVerifier); the JNI shim calls
+    // into these for X509 validation or the first handshake throws
+    // NoClassDefFoundError. The Maven AAR bundles them, but this sample
+    // consumes via source paths (which skip AAR packaging), so pull them
+    // from the parent's android/libs/ (populated by scripts/build-android.sh)
+    // rather than hand-vendoring. Version-agnostic so upstream bumps flow
+    // through with no edits.
     implementation(fileTree("../../../../android/libs") { include "*.jar" })
 }
 
-// Fail-fast guard mirroring android/build.gradle.kts's preBuild check.
-// fileTree resolving to an empty set is a silent Gradle failure — the build
-// completes, the app links, and the first TLS handshake at runtime crashes
-// with NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier.
-// Loud error at configure time beats a runtime crash on a real device.
+// Fail-fast guard mirroring android/build.gradle.kts's preBuild check. An
+// empty fileTree is a silent failure: the build completes but the first TLS
+// handshake crashes with NoClassDefFoundError: ...CertificateVerifier. A loud
+// error at configure time beats a runtime crash on a real device.
 afterEvaluate {
     def libsDir = file("../../../../android/libs")
     def jars = libsDir.exists() ? fileTree(libsDir) { include "*.jar" }.files : []

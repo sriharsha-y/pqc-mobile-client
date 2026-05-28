@@ -5,16 +5,10 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-# The sample app must target React Native's own minimum (RN 0.76 =>
-# iOS 15.1); its core pods (hermes-engine, fmt, glog) declare a 15.1
-# floor, so pinning the app below that breaks the Hermes build with a
-# "'hermes/hermes.h' file not found" error. Use RN's macro so this
-# tracks the installed RN version automatically.
-#
-# This is independent of PqcCore.podspec's `s.platform = :ios, '13.0'`:
-# that is the LIBRARY's floor (it supports iOS 13.0+), which a 15.1 app
-# consumes without conflict. Don't conflate the library floor with the
-# sample app's deployment target.
+# Track RN's own minimum via its macro: RN 0.76's core pods (hermes-engine,
+# fmt, glog) declare an iOS 15.1 floor, so pinning the app below that breaks
+# the Hermes build ("'hermes/hermes.h' file not found"). Independent of
+# PqcCore.podspec's 13.0 LIBRARY floor, which a 15.1 app consumes fine.
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
@@ -33,11 +27,10 @@ target 'RnSample' do
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
-  # pqc-mobile-client via the local podspec at the repo root. PqcCore.podspec
-  # references `pqc.swift` and `PqcCore.xcframework` (bare) so the release-zip
-  # consumer path Just Works; for this local :path mode, `scripts/build-ios.sh`
-  # creates matching symlinks at the repo root pointing into `generated/`.
-  # Run `./scripts/build-ios.sh` first or `pod install` will fail to find them.
+  # Local podspec at the repo root. It references `pqc.swift` and
+  # `PqcCore.xcframework` by bare name (for the release-zip path); in this
+  # :path mode `scripts/build-ios.sh` creates matching symlinks into
+  # `generated/`. Run it first or `pod install` won't find them.
   pod 'PqcCore', :path => '../../../'
 
   target 'RnSampleTests' do

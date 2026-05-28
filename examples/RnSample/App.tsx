@@ -1,34 +1,27 @@
 /**
  * PQC Mobile Client — RN integration sample.
  *
- * Demonstrates the post-quantum TLS handshake AND how to *verify* it
- * reliably. A single toggle controls whether the native Rust client
- * advertises X25519MLKEM768 (post-quantum) or classical-only groups,
- * then the app fetches Cloudflare's trace endpoint and reads the
- * SERVER's report of the key exchange it negotiated:
+ * A toggle controls whether the native Rust client advertises
+ * X25519MLKEM768 (post-quantum) or classical-only groups; the app then
+ * fetches Cloudflare's trace endpoint and reads the SERVER's report of
+ * the negotiated key exchange:
  *
  *   https://pq.cloudflareresearch.com/cdn-cgi/trace  →  "kex=..." line
  *
- * Why the server's `kex=` and not a client-side header? The negotiated
- * group is a property of the TLS *connection*, not the request, and our
- * Rust core can only observe it through a process-global side-channel
- * that races under concurrent requests. Cloudflare's `/cdn-cgi/trace`
- * reports what the edge actually negotiated for *this* connection, in
- * the response body — server-authoritative and correct even under
- * parallel requests. See docs/ios.md and docs/android.md.
+ * We read the server's `kex=` rather than a client header because the
+ * negotiated group is a property of the TLS *connection*, and the Rust
+ * core can only observe it via a process-global side-channel that races
+ * under concurrent requests. The edge's report is server-authoritative
+ * and correct even under parallel requests. See docs/ios.md, docs/android.md.
  *
- * Toggle ON  → client offers X25519MLKEM768 (+ classical) → kex=X25519MLKEM768
- * Toggle OFF → client offers classical only               → kex=X25519
+ * Toggle ON  → kex=X25519MLKEM768   Toggle OFF → kex=X25519
  *
- * The native side (PqcInterceptor on Android / PqcURLProtocol on iOS)
- * keeps two clients — PQC-on and PQC-off — and selects between them
- * based on the `X-Pqc-Mode` request header this screen sets.
+ * The native side (PqcInterceptor / PqcURLProtocol) keeps two clients and
+ * selects between them via the `X-Pqc-Mode` header this screen sets.
  *
- * iOS 26+ note: AppDelegate gates PqcURLProtocol off because Apple's
- * native URLSession already negotiates PQC. On that path the Rust client
- * is not in the request path and the toggle has no effect, so the UI
- * disables the toggle and shows an explanatory banner; `kex` reflects the
- * OS handshake.
+ * iOS 26+: AppDelegate gates PqcURLProtocol off (URLSession negotiates PQC
+ * natively), so the Rust client is out of the path and the toggle is inert;
+ * the UI disables it and shows a banner. `kex` reflects the OS handshake.
  */
 
 import React, {useCallback, useEffect, useState} from 'react';
@@ -44,12 +37,10 @@ import {
   View,
 } from 'react-native';
 
-// Any Cloudflare-served host exposes /cdn-cgi/trace; the research
-// endpoint is the documented one for PQC testing.
+// The documented Cloudflare endpoint for PQC testing.
 const TRACE_URL = 'https://pq.cloudflareresearch.com/cdn-cgi/trace';
 
-// Opt-in header the native layer routes on: "off" selects the
-// classical-only client; absent/anything-else selects the PQC client.
+// "off" selects the classical-only client; absent/else selects PQC.
 const PQC_MODE_HEADER = 'X-Pqc-Mode';
 
 type Result =
@@ -65,8 +56,8 @@ function parseKex(traceBody: string): string | null {
 }
 
 function isPostQuantum(kex: string | null): boolean {
-  // X25519MLKEM768 today; match the ML-KEM family defensively in case
-  // Cloudflare relabels (e.g. a future SecP256r1MLKEM768).
+  // Match the ML-KEM family defensively in case Cloudflare relabels
+  // (e.g. a future SecP256r1MLKEM768).
   return !!kex && kex.toUpperCase().includes('MLKEM');
 }
 
@@ -74,10 +65,9 @@ export default function App(): React.JSX.Element {
   const [pqcEnabled, setPqcEnabled] = useState(true);
   const [result, setResult] = useState<Result>({status: 'idle'});
 
-  // iOS 26+ negotiates X25519MLKEM768 natively in URLSession, so
-  // AppDelegate.mm does NOT register PqcURLProtocol there — fetch() goes
-  // through the system stack and the X-Pqc-Mode header is ignored. The
-  // toggle is therefore inert on iOS 26+, so we disable it and explain.
+  // iOS 26+ negotiates X25519MLKEM768 natively, so AppDelegate.mm does NOT
+  // register PqcURLProtocol there — fetch() uses the system stack and
+  // X-Pqc-Mode is ignored. The toggle is inert, so we disable it and explain.
   const iosNativePqc =
     Platform.OS === 'ios' &&
     Number.parseInt(String(Platform.Version), 10) >= 26;
@@ -87,8 +77,7 @@ export default function App(): React.JSX.Element {
     try {
       const resp = await fetch(TRACE_URL, {
         method: 'GET',
-        // When PQC is toggled OFF, tell the native layer to route through
-        // the classical-only client. When ON, send nothing special.
+        // OFF routes through the classical-only client; ON sends nothing special.
         headers: enablePqc ? {} : {[PQC_MODE_HEADER]: 'off'},
       });
       const raw = await resp.text();

@@ -44,10 +44,9 @@ class MainApplication : Application(), ReactApplication {
     get() = getDefaultReactHost(applicationContext, reactNativeHost)
 
   override fun onCreate() {
-    // Install the PQC-backed OkHttpClient BEFORE super.onCreate() and before any
-    // RN module touches the network. Per react-native#34789, setOkHttpClientFactory
-    // is read lazily on first network call and silently no-ops if NetworkingModule
-    // has already constructed its client.
+    // Install the PQC OkHttpClient BEFORE super.onCreate() / any network use.
+    // Per react-native#34789, setOkHttpClientFactory is read lazily and
+    // silently no-ops if NetworkingModule already built its client.
     installPqcOkHttpFactory()
 
     super.onCreate()
@@ -58,36 +57,31 @@ class MainApplication : Application(), ReactApplication {
   }
 
   private fun installPqcOkHttpFactory() {
-    // Hand the Application Context to rustls-platform-verifier BEFORE
-    // constructing PqcHttpClient — the constructor builds the TLS
-    // config, which calls the verifier, which requires this init.
-    // Without it the first request throws
+    // Must run BEFORE constructing PqcHttpClient: the constructor builds the
+    // TLS config, which calls the verifier, which requires this init.
+    // Otherwise the first request throws
     //   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
-    // Shared config differing only in enablePostQuantum. A production
-    // app needs only the PQC client; the sample keeps both so the UI can
-    // toggle PQC on/off (the flag is fixed at client construction).
+    // Shared config differing only in enablePostQuantum; the sample keeps
+    // both clients so the UI can toggle PQC (the flag is fixed at construction).
     fun config(enablePqc: Boolean) = PqcConfig(
-      // Empty list = pinning disabled. For a real banking app, populate with
+      // Empty = pinning disabled. A real banking app should populate with
       // base64(SHA-256(SPKI)) for the production cert + at least one backup.
       pinnedCertSha256 = emptyList(),
       enablePostQuantum = enablePqc,
       defaultTimeoutMs = 15_000UL,
-      // null lets the client pick its built-in defaults (10s connect,
-      // 16 MiB body cap). For a production banking app, set these
-      // explicitly per your SLO so they survive a defaults change.
+      // null = built-in defaults (10s connect, 16 MiB body cap). Set these
+      // explicitly in production so they survive a defaults change.
       connectTimeoutMs = null,
       maxBodyBytes = null,
-      // Banking clients should NOT auto-attach Set-Cookie across
-      // endpoints (session-leak vector). Round-trip cookies via
-      // headers explicitly when needed.
+      // Banking clients should NOT auto-attach Set-Cookie across endpoints
+      // (session-leak vector); round-trip cookies via headers when needed.
       enableCookies = false,
       // Identify the app to Akamai Bot Manager / bank WAFs.
       userAgent = "RnSample/0.3.1 (pqc-mobile-client)",
-      // Refuse cross-origin redirects so the pin / PQ guarantees of
-      // the original handshake can never be silently dropped by a
-      // 3xx to a different host.
+      // Refuse cross-origin redirects so the original handshake's pin / PQ
+      // guarantees can't be silently dropped by a 3xx to another host.
       redirectPolicy = RedirectPolicy.SameOriginOnly,
     )
 

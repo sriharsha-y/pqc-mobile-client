@@ -1,13 +1,8 @@
 name: android
 
-# Manual-only. The Android cross-compile pipeline is expensive enough
-# (~6 ubuntu-minutes including cargo-ndk install) that we don't run it
-# on every PR — `check.yml` (which includes cargo audit + cargo deny)
-# covers fmt / clippy / unit + smoke tests on every PR, and release.yml
-# builds Android artifacts when a release is cut.
-#
-# Click "Run workflow" on the Actions tab before merging any PR that
-# touches the Rust core, build scripts, or NDK-relevant config.
+# Manual-only (~6 ubuntu-min); check.yml covers PRs and release.yml builds
+# Android artifacts on release. Run before merging a PR that touches the
+# Rust core, build scripts, or NDK config.
 on:
   workflow_dispatch:
 
@@ -50,27 +45,22 @@ jobs:
         run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
 
       - name: Build native libraries + Kotlin bindings
-        run: ./scripts/build-android.sh
+        run: make android
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # Assemble the actual AAR via the wrapper so we can assert what
-      # ends up inside it. Without this step, a regression that drops
-      # the fat-AAR `api(fileTree("libs"))` wiring would only surface
-      # post-Maven-Central-publish as a downstream NoClassDefFoundError.
+      # Assemble the AAR so we can assert its contents — a dropped fat-AAR
+      # wiring would otherwise only surface post-publish.
       - name: Assemble AAR
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
-      # Fat-AAR contract assertion: the published AAR MUST embed
-      # rustls-platform-verifier's classes.jar under libs/ — without it
-      # consumers crash at first TLS handshake with
-      #   NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier
-      # See android/build.gradle.kts (api(fileTree("libs"))) +
-      # scripts/build-android.sh (jar extraction).
+      # The AAR MUST embed rustls-platform-verifier's classes.jar under
+      # libs/, else consumers crash at first handshake with
+      # NoClassDefFoundError: CertificateVerifier.
       - name: Assert fat-AAR bundles rustls-platform-verifier
         run: |
           AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
@@ -85,6 +75,25 @@ jobs:
             exit 1
           fi
           echo "OK: AAR contains the bundled rustls-platform-verifier jar."
+
+      # Bindings contract assertion: the AAR's classes.jar MUST contain
+      # the UniFFI-generated Kotlin API, not just the hand-written
+      # PqcAndroidInit glue (which lives in git and is always present).
+      # The uniffi-rs#2520 strip bug made `uniffi-bindgen --library` emit
+      # zero bindings on Linux silently, shipping an AAR with no
+      # PqcHttpClient/PqcConfig — unusable by consumers yet passing every
+      # other check. See scripts/build-android.sh's strip note + guard.
+      - name: Assert AAR contains the UniFFI Kotlin bindings
+        run: |
+          AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
+          unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
+          if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
+            echo "::error::$AAR classes.jar is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
+            echo "::error::uniffi-bindgen generated zero bindings — see the uniffi-rs#2520 strip note in scripts/build-android.sh."
+            unzip -l /tmp/aar-classes.jar
+            exit 1
+          fi
+          echo "OK: AAR classes.jar carries the UniFFI Kotlin bindings."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -12,11 +12,11 @@ echo "==> Showing pinned toolchain"
 rustup show
 
 echo "==> Installing Android targets"
+# Only the ABIs build-android.sh actually builds; i686 (32-bit x86) is omitted.
 rustup target add \
     aarch64-linux-android \
     armv7-linux-androideabi \
-    x86_64-linux-android \
-    i686-linux-android
+    x86_64-linux-android
 
 echo "==> Installing iOS targets"
 rustup target add \

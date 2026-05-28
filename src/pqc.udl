@@ -6,48 +6,37 @@ namespace pqc {};
 // ----- Configuration -----
 
 dictionary PqcConfig {
-    // Base64 SHA-256 of a certificate's Subject Public Key Info (standard
-    // or URL-safe alphabet). A pin matches ANY cert in the server chain
-    // (leaf or intermediate); pin your issuing intermediate CA for
-    // rotation resilience, keep >= 2 pins, and never pin a public root.
-    // Empty list disables pinning.
+    // Base64 SHA-256 of a cert's SPKI (standard or URL-safe). Matches any
+    // cert in the chain; pin the issuing intermediate, keep >= 2 pins,
+    // never pin a public root. Empty disables pinning.
     sequence<string> pinned_cert_sha256;
 
-    // Advertise X25519MLKEM768 hybrid post-quantum key exchange.
-    // Defaults to true: the ClientHello carries BOTH the hybrid group
-    // and classical groups, so PQC-capable servers negotiate the hybrid
-    // and others gracefully fall back to classical. This is preference,
-    // not enforcement — the client never refuses a classical-only peer.
-    // Set false only to disable PQC (A/B comparison, debugging a
-    // PQ-specific server bug).
+    // Advertise the X25519MLKEM768 hybrid (default true). ClientHello also
+    // carries classical groups, so non-PQC peers fall back gracefully —
+    // preference, not enforcement. Set false only for A/B comparison.
     boolean enable_post_quantum = true;
 
-    // Total per-request budget in milliseconds (handshake + headers +
-    // body). null = no cap (discouraged on mobile).
+    // Total per-request budget in ms (handshake + headers + body).
+    // null = no cap (discouraged on mobile).
     u64? default_timeout_ms;
 
-    // TCP-connect / TLS-handshake budget. Separated from the total
-    // budget so connect can fail fast on cell handover. null = 10s.
+    // TCP-connect / TLS-handshake budget, capped separately so connect can
+    // fail fast on cell handover. null = 10s.
     u64? connect_timeout_ms;
 
-    // Hard ceiling on a response body's decompressed size. Trips
-    // InvalidResponse rather than OOM-ing on a decompression bomb
-    // (gzip+brotli enabled). null = 16 MiB.
+    // Hard ceiling on a response body's decompressed size; trips
+    // InvalidResponse instead of OOM-ing on a decompression bomb. null = 16 MiB.
     u64? max_body_bytes;
 
-    // Off by default. When false, NO cookie jar — round-trip
-    // Set-Cookie / Cookie explicitly via headers. Banking typically
-    // wants this off (session-leak vector across endpoints).
+    // Off by default: no cookie jar, round-trip Set-Cookie / Cookie via
+    // headers. Auto-attaching cookies across endpoints is a session-leak vector.
     boolean enable_cookies;
 
-    // Verbatim User-Agent header. null = reqwest default
-    // ("reqwest/0.12.x") which bank WAFs / Akamai Bot Manager often
-    // reject; set to your app's identifier.
+    // Verbatim User-Agent. null = reqwest default, which bank WAFs / Akamai
+    // Bot Manager often reject; set to your app's identifier.
     string? user_agent;
 
-    // Redirect handling. Variants force struct-style in UDL even
-    // when no payload — that's a UDL syntactic constraint, not a
-    // design choice.
+    // Redirect handling.
     RedirectPolicy redirect_policy;
 };
 
@@ -56,10 +45,9 @@ interface RedirectPolicy {
     // Refuse all redirects.
     NoRedirects();
 
-    // Follow only within scheme+host+port. Cross-origin = refused.
-    // Recommended default for a security-sensitive HTTPS client:
-    // cross-origin redirects re-handshake to a different host whose
-    // pin / PQ guarantees are independent of the original.
+    // Follow only within scheme+host+port; cross-origin refused so a
+    // redirect can't re-handshake to a host with independent pin/PQ
+    // guarantees. Recommended default.
     SameOriginOnly();
 
     // Follow up to `max` redirects regardless of origin. Use with care.
@@ -81,9 +69,8 @@ enum HttpMethod {
 dictionary HttpRequest {
     HttpMethod method;
     string url;
-    // Multi-value to mirror the response side. RFC 7230 §3.2.2 allows
-    // most headers to repeat; Cookie (RFC 6265 §5.4) and Set-Cookie are
-    // notable cases where multi-value semantics differ from comma-joined.
+    // Multi-value: most headers may repeat (RFC 7230), and Cookie /
+    // Set-Cookie must not be comma-joined.
     record<string, sequence<string>> headers;
     bytes? body;
     u64? timeout_ms;
@@ -93,16 +80,10 @@ dictionary HttpResponse {
     u16 status;
     record<string, sequence<string>> headers;
     bytes body;
-    // Negotiated ALPN protocol (e.g. "h2", "http/1.1"). Per-request.
-    //
-    // NOTE: the negotiated TLS key-exchange GROUP is intentionally NOT
-    // surfaced here. It is a property of the TLS connection, not the
-    // request, and the only way to observe it from inside reqwest is a
-    // process-global side-channel that races under concurrent requests.
-    // To confirm whether PQC (X25519MLKEM768) was negotiated, use a
-    // server-authoritative source instead: Cloudflare's /cdn-cgi/trace
-    // (parse the `kex=` line) or server-side TLS observability such as
-    // AWS CloudTrail `tlsDetails.keyExchange` / Cloudflare DataStream.
+    // Negotiated ALPN (e.g. "h2"). The TLS key-exchange GROUP is
+    // deliberately NOT exposed: it's a connection property and reqwest
+    // only exposes it via a process-global that races under concurrency.
+    // Confirm PQC server-side instead (e.g. Cloudflare /cdn-cgi/trace `kex=`).
     string negotiated_protocol;
 };
 
@@ -122,19 +103,14 @@ enum PqcError {
 // ----- Client -----
 
 interface PqcHttpClient {
-    // Constructor can fail on malformed config (e.g. bad base64 in
-    // pinned_cert_sha256, or rustls failing to build the TLS config).
-    // The throw lets consumers handle bad config typed instead of via
-    // an opaque InternalException at the FFI boundary.
+    // Fails on malformed config (bad base64 pin, rustls build error) so
+    // consumers get a typed error, not an opaque FFI exception.
     [Throws=PqcError]
     constructor(PqcConfig config);
 
-    // `request` is defined via the proc-macro
-    // #[uniffi::export(async_runtime = "tokio")] block in src/client.rs.
-    // It must NOT be declared here as well, or the scaffolding emits
-    // duplicate FFI symbols. The proc-macro form is required so UniFFI
-    // drives the async future on a real tokio runtime — without that,
-    // reqwest/hyper panic at the first I/O call with
-    //   "there is no reactor running, must be called from the context
-    //    of a Tokio 1.x runtime"
+    // `request` is exported from src/client.rs via
+    // #[uniffi::export(async_runtime = "tokio")] — declaring it here too
+    // would emit duplicate FFI symbols. The proc-macro form is required so
+    // UniFFI drives the future on a real tokio runtime (else reqwest panics:
+    // "there is no reactor running").
 };

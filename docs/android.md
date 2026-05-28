@@ -26,7 +26,7 @@ The Rust core, the `.so` files, and the generated Kotlin bindings are the same r
 > archive. Running `cargo run --bin uniffi-bindgen ...` without the flag
 > errors with `target uniffi-bindgen requires the features: cli`.
 
-After `./scripts/build-android.sh` at the repo root:
+After `make android` at the repo root:
 
 ```
 target/jniLibs/

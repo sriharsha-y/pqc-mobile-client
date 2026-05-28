@@ -1,39 +1,32 @@
 import Foundation
-// PqcConfig / PqcHttpClient / HttpRequest / HttpResponse / HttpMethod
-// are exported by the PqcCore Pod (which vendors PqcCore.xcframework
-// and ships UniFFI-generated pqc.swift inside its module). pqc.swift
-// internally imports the `pqcFFI` C module declared by the
-// XCFramework's module.modulemap.
+// PqcConfig / PqcHttpClient / HttpRequest / HttpResponse / HttpMethod are
+// exported by the PqcCore Pod (which vendors the XCFramework and ships the
+// UniFFI-generated pqc.swift).
 import PqcCore
 
 /// URLProtocol that intercepts NSURLSession requests and routes them
 /// through the Rust `PqcHttpClient`. Register it via
-/// `URLSessionConfiguration.protocolClasses` on RN's session config
-/// (see AppDelegate.mm).
+/// `URLSessionConfiguration.protocolClasses` (see AppDelegate.mm).
 ///
-/// In production, restrict `pqcHosts` to the hostnames that genuinely need
-/// PQC TLS (banking APIs); leaving "*" wildcards means every fetch() in
-/// the app goes through the Rust core, which is overkill outside a sample.
+/// In production, restrict interception to hosts that genuinely need PQC
+/// TLS; intercepting every fetch() is overkill outside a sample.
 @objc(PqcURLProtocol)
 public final class PqcURLProtocol: URLProtocol {
 
-    /// For the sample we intercept every https URL. Replace with a Set<String>
-    /// of allowed hosts in a real app.
+    /// Sample intercepts every https URL; use a Set<String> of allowed
+    /// hosts in a real app.
     private static let interceptAll = true
 
-    // Opt-in request header the RN sample sets to select the
-    // classical-only client ("off"). Stripped before the request leaves
-    // the device.
+    // "off" selects the classical-only client. Stripped before the request
+    // leaves the device.
     static let pqcModeHeader = "X-Pqc-Mode"
 
-    // Shared config differing only in enablePostQuantum. A production app
-    // needs only the PQC client; the sample keeps both so the UI can
-    // toggle PQC on/off (the flag is fixed at client construction).
+    // Shared config differing only in enablePostQuantum; the sample keeps
+    // both clients so the UI can toggle PQC (the flag is fixed at construction).
     //
-    // NOTE: pinnedCertSha256 is [] in the sample. A real banking app
-    // MUST populate this with base64(SHA-256(SPKI)) for the production
-    // leaf cert (+ a pre-deployed next leaf for rotation). See
-    // pqc-mobile-client/docs/ios.md §10.
+    // NOTE: pinnedCertSha256 is [] here. A real banking app MUST populate it
+    // with base64(SHA-256(SPKI)) for the production leaf (+ a pre-deployed
+    // next leaf for rotation). See docs/ios.md §10.
     private static func makeClient(enablePqc: Bool) -> PqcHttpClient? {
         do {
             return try PqcHttpClient(
@@ -41,18 +34,16 @@ public final class PqcURLProtocol: URLProtocol {
                     pinnedCertSha256: [],
                     enablePostQuantum: enablePqc,
                     defaultTimeoutMs: 15_000,
-                    // nil → built-in defaults (10s connect, 16 MiB body
-                    // cap). Set explicitly in production to survive a
-                    // defaults change.
+                    // nil → built-in defaults (10s connect, 16 MiB body cap).
+                    // Set explicitly in production to survive a defaults change.
                     connectTimeoutMs: nil,
                     maxBodyBytes: nil,
                     // Banking clients should not auto-attach cookies.
                     enableCookies: false,
                     // Identify to bank WAFs / Akamai Bot Manager.
                     userAgent: "RnSample/0.3.1 (pqc-mobile-client)",
-                    // Cross-origin redirects would re-handshake to a
-                    // different host whose pin / PQ guarantees are
-                    // independent — refuse them.
+                    // Refuse cross-origin redirects — they re-handshake to a
+                    // host whose pin / PQ guarantees are independent.
                     redirectPolicy: .sameOriginOnly
                 )
             )
@@ -62,10 +53,8 @@ public final class PqcURLProtocol: URLProtocol {
         }
     }
 
-    // Named with a `pqc` prefix rather than `client` to avoid shadowing
-    // URLProtocol's inherited instance property `client: URLProtocolClient?`
-    // (the loading-system delegate we call back into via
-    // self.client?.urlProtocol(...) below).
+    // `pqc` prefix avoids shadowing URLProtocol's inherited `client`
+    // property (the delegate we call back into via self.client?.urlProtocol).
     private static let pqcClient: PqcHttpClient? = makeClient(enablePqc: true)
     private static let classicalClient: PqcHttpClient? = makeClient(enablePqc: false)
 
@@ -91,9 +80,7 @@ public final class PqcURLProtocol: URLProtocol {
                         userInfo: [NSLocalizedDescriptionKey: "missing URL"]
                     )
                 }
-                // Route on the opt-in mode header: "off" selects the
-                // classical-only client. Strip the header below so it
-                // never leaves the device.
+                // "off" selects the classical-only client; stripped below.
                 let allHeaders = req.allHTTPHeaderFields ?? [:]
                 let modeValue = allHeaders.first {
                     $0.key.caseInsensitiveCompare(Self.pqcModeHeader) == .orderedSame
@@ -109,12 +96,10 @@ public final class PqcURLProtocol: URLProtocol {
                         ]
                     )
                 }
-                // Resolve the HTTP method. An unrecognized verb must FAIL
-                // loudly, not silently become a GET — defaulting to GET
-                // would drop the body and turn an intended write into a
-                // read with no error surfaced (the Android interceptor
-                // throws on the same input). nil httpMethod defaults to
-                // GET, matching URLSession's own default.
+                // An unrecognized verb must FAIL loudly, not silently become
+                // a GET — that would drop the body and turn a write into a
+                // read with no error (the Android interceptor throws too).
+                // nil httpMethod defaults to GET, matching URLSession.
                 let method: HttpMethod
                 if let raw = req.httpMethod {
                     guard let parsed = Self.parseMethod(raw) else {
@@ -132,16 +117,14 @@ public final class PqcURLProtocol: URLProtocol {
                     method = .get
                 }
 
-                // URLSession delivers streamed / multipart / large upload
-                // bodies via httpBodyStream, leaving httpBody nil. Reading
-                // only httpBody would silently send an empty payload for
-                // those uploads. Drain the stream when present.
+                // Streamed / multipart / large uploads arrive via
+                // httpBodyStream with httpBody nil; reading only httpBody
+                // would send an empty payload, so drain the stream too.
                 let body = req.httpBody ?? Self.drainBodyStream(req.httpBodyStream)
 
-                // URLRequest.allHTTPHeaderFields is [String: String] — Apple
-                // already comma-joins duplicate headers upstream, so we wrap
-                // each value in a single-element array to satisfy the
-                // [String: [String]] shape on HttpRequest.headers.
+                // allHTTPHeaderFields is [String: String] (Apple already
+                // comma-joins duplicates), so wrap each value in a 1-element
+                // array for HttpRequest.headers' [String: [String]] shape.
                 let forwardedHeaders = allHeaders
                     .filter { $0.key.caseInsensitiveCompare(Self.pqcModeHeader) != .orderedSame }
                     .mapValues { [$0] }
@@ -155,33 +138,19 @@ public final class PqcURLProtocol: URLProtocol {
 
                 let pqcResp = try await pqcClient.request(req: pqcReq)
 
-                // --- Cookies: handle Set-Cookie BEFORE building the
-                // response, and keep them OUT of the response header dict.
+                // Handle Set-Cookie BEFORE building the response, and keep it
+                // OUT of the response header dict. HTTPURLResponse is backed by
+                // a [String: String], so it can't hold multiple Set-Cookie
+                // values, and joining them with ", " corrupts them — a cookie's
+                // `Expires` attribute itself contains a comma. So parse each
+                // value in its OWN single-entry dict (sidestepping the comma
+                // ambiguity) into the store RN networking reads from.
                 //
-                // iOS HTTPURLResponse is backed by a [String: String]
-                // dictionary, which physically cannot hold more than one
-                // value per header name. The usual workaround — joining
-                // multiple Set-Cookie values with ", " — corrupts them,
-                // because a cookie's `Expires` attribute itself contains a
-                // comma (e.g. "Expires=Wed, 21 Oct 2026 ..."), so anything
-                // re-splitting on commas mis-parses the boundary.
-                //
-                // The Rust core preserves each Set-Cookie value as its own
-                // entry, so handle them explicitly: parse each value on its
-                // OWN (a single-entry dict per cookie sidesteps the comma
-                // ambiguity entirely) and hand the parsed cookies to the
-                // store the URL Loading System / RN networking reads from.
-                // This is the correct iOS pattern for a synthesizing
-                // URLProtocol; the response header dict then carries
-                // everything EXCEPT Set-Cookie.
-                //
-                // SECURITY NOTE for banking integrators: this persists
-                // session cookies in HTTPCookieStorage.shared, i.e. they
-                // auto-attach to later requests. That mirrors normal iOS
-                // behavior, but if you want the Rust client's stricter
-                // "no implicit cookie state" posture (PqcConfig.enableCookies
-                // = false), skip this block and instead surface the raw
-                // Set-Cookie values to your app layer to decide per request.
+                // SECURITY NOTE: this persists session cookies in
+                // HTTPCookieStorage.shared (auto-attached to later requests),
+                // mirroring normal iOS. For the Rust client's stricter
+                // "no implicit cookie state" posture (enableCookies = false),
+                // skip this and surface raw Set-Cookie to your app layer.
                 let cookieStorage = HTTPCookieStorage.shared
                 for (name, values) in pqcResp.headers where name.lowercased() == "set-cookie" {
                     for raw in values {
@@ -193,18 +162,16 @@ public final class PqcURLProtocol: URLProtocol {
                     }
                 }
 
-                // Build the response header dict from every header EXCEPT
-                // Set-Cookie (handled above). Comma-joining the remaining
-                // headers is RFC 9110 §5.3-legal for combinable fields.
+                // Every header EXCEPT Set-Cookie (handled above). Comma-joining
+                // the rest is RFC 9110 §5.3-legal for combinable fields.
                 let headerFields = pqcResp.headers
                     .filter { $0.key.lowercased() != "set-cookie" }
                     .mapValues { values in values.joined(separator: ", ") }
 
-                // Map the Rust core's `negotiated_protocol` string (the
-                // ALPN protocol id — "h2", "http/1.1", etc.) into a value
-                // HTTPURLResponse will accept. Defaults to HTTP/1.1 on
+                // Map the Rust core's `negotiated_protocol` (ALPN id) to a
+                // value HTTPURLResponse accepts. Defaults to HTTP/1.1 on
                 // unknown values rather than fabricating HTTP/2 — wrong
-                // telemetry is worse than conservative telemetry.
+                // telemetry is worse than conservative.
                 let httpVersion: String = {
                     switch pqcResp.negotiatedProtocol {
                     case "http/0.9", "http/1.0": return "HTTP/1.0"
