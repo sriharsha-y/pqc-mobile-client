@@ -53,9 +53,22 @@ pub extern "system" fn Java_uniffi_pqc_android_PqcAndroidInit_nativeInit<'local>
         // crash is loud + diagnosable in logcat. Swallowing it would
         // just defer the same error to the first request, with a
         // much less informative call site.
-        let _ = env.throw_new(
-            "java/lang/RuntimeException",
-            format!("rustls-platform-verifier init failed: {e:?}"),
-        );
+        //
+        // If throw_new ITSELF fails we cannot signal the failure to the
+        // JVM the normal way, and returning would let the Kotlin wrapper
+        // mark itself initialized — turning a hard init failure into a
+        // silent broken state. Abort the VM instead so the failure can
+        // never be mistaken for success.
+        if env
+            .throw_new(
+                "java/lang/RuntimeException",
+                format!("rustls-platform-verifier init failed: {e:?}"),
+            )
+            .is_err()
+        {
+            env.fatal_error(format!(
+                "rustls-platform-verifier init failed and the failure could not be thrown: {e:?}"
+            ));
+        }
     }
 }
