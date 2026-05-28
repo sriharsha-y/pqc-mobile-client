@@ -189,18 +189,14 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           mkdir -p dist
 
-          # Two iOS zips:
-          # - PqcCore-X.Y.Z.zip: fat (xcframework + pqc.swift + LICENSE) for
-          #   PqcCore.podspec's :http source.
-          # - PqcCore-X.Y.Z.xcframework.zip: slim (xcframework only) for SPM's
-          #   binaryTarget — future-proofs against Apple enforcing single-item zips.
+          # One zip (xcframework + pqc.swift + LICENSE) serves both CocoaPods
+          # (PqcCore.podspec :http source) and SPM (binaryTarget finds the
+          # .xcframework at the root and ignores the siblings).
           ARCHIVE="PqcCore-${VERSION}.zip"
-          SPM_ARCHIVE="PqcCore-${VERSION}.xcframework.zip"
 
           # TZ=UTC + zip -X strip timestamps so the zip layer's SHA256 is
           # stable across rebuilds (xcframework internals still vary).
 
-          # Fat zip (CocoaPods)
           STAGE="dist/_stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -R generated/PqcCore.xcframework "$STAGE/"
@@ -209,15 +205,7 @@ jobs:
           (cd "$STAGE" && TZ=UTC zip -X -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
           rm -rf "$STAGE"
 
-          # Slim zip (SPM)
-          STAGE_SPM="dist/_stage_spm"
-          rm -rf "$STAGE_SPM" && mkdir -p "$STAGE_SPM"
-          cp -R generated/PqcCore.xcframework "$STAGE_SPM/"
-          (cd "$STAGE_SPM" && TZ=UTC zip -X -r "../${SPM_ARCHIVE}" PqcCore.xcframework)
-          rm -rf "$STAGE_SPM"
-
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
-          echo "SPM_ARCHIVE=${SPM_ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -225,7 +213,6 @@ jobs:
           name: pqc-ios
           path: |
             dist/${{ env.ARCHIVE }}
-            dist/${{ env.SPM_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
 
@@ -292,26 +279,18 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name }}"
           STAGE="$(mktemp -d)"
 
-          # Download both iOS zips:
-          #   - PqcCore-X.Y.Z.zip: fat zip, used to extract pqc.swift
-          #   - PqcCore-X.Y.Z.xcframework.zip: slim zip, what SPM's
-          #     binaryTarget URL points at and what we checksum
+          # Download the release zip: SPM's binaryTarget points at it and we
+          # checksum it, and we extract pqc.swift from it for Sources/PqcCore.
           gh release download "$TAG" \
             -p "PqcCore-${VERSION}.zip" \
-            -p "PqcCore-${VERSION}.xcframework.zip" \
             -D "$STAGE" \
             --repo "${{ github.repository }}"
 
-          # SPM verifies the binaryTarget archive against this checksum
-          # at resolve time. swift package compute-checksum is the
-          # canonical tool. We checksum the SLIM zip, since that is
-          # what SPM downloads.
-          CHECKSUM="$(swift package compute-checksum "$STAGE/PqcCore-${VERSION}.xcframework.zip")"
+          # SPM verifies the binaryTarget against this checksum at resolve time.
+          CHECKSUM="$(swift package compute-checksum "$STAGE/PqcCore-${VERSION}.zip")"
 
-          # Extract pqc.swift from the fat zip for placement under
-          # Sources/PqcCore. SPM cannot extract arbitrary files out of
-          # a binaryTarget archive, so the Swift binding has to live as
-          # a real source file at the package's source root.
+          # pqc.swift must live as a real source file (SPM can't extract files
+          # from a binaryTarget archive), so pull it out for Sources/PqcCore.
           unzip -j "$STAGE/PqcCore-${VERSION}.zip" pqc.swift -d "$STAGE/"
 
           # Render Package.swift from the template directly into the

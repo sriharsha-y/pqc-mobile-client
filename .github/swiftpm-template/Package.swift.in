@@ -17,16 +17,14 @@ let package = Package(
         .library(name: "PqcCore", targets: ["PqcCore"])
     ],
     targets: [
-        // PqcCore-X.Y.Z.xcframework.zip is a slim archive (just the
-        // .xcframework) per Apple's binary-framework SPM docs; CocoaPods
-        // uses a separate fat zip. Both come from the same release workflow.
+        // One release zip (PqcCore-X.Y.Z.zip) serves both SPM and CocoaPods;
+        // SPM finds the .xcframework at its root and ignores the siblings.
         //
         // The binaryTarget name MUST match the xcframework modulemap's module
-        // name ("pqcFFI"). If they diverge, consumers hit "no such module
-        // pqcFFI" — the modulemap name is what the Swift compiler sees.
+        // name ("pqcFFI"), else consumers hit "no such module pqcFFI".
         .binaryTarget(
             name: "pqcFFI",
-            url: "https://github.com/sriharsha-y/pqc-mobile-client/releases/download/v\(version)/PqcCore-\(version).xcframework.zip",
+            url: "https://github.com/sriharsha-y/pqc-mobile-client/releases/download/v\(version)/PqcCore-\(version).zip",
             checksum: "{{CHECKSUM}}"
         ),
         // UniFFI-generated Swift binding under Sources/PqcCore, refreshed by
