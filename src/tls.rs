@@ -22,7 +22,15 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
     let provider = Arc::new(if cfg.enable_post_quantum {
         rustls_post_quantum::provider()
     } else {
-        rustls::crypto::aws_lc_rs::default_provider()
+        // rustls's DEFAULT_KX_GROUPS includes X25519MLKEM768 regardless of
+        // the `prefer-post-quantum` feature (it only changes the hybrid's
+        // position), so default_provider() still offers the hybrid and a
+        // PQ-capable server negotiates it. To actually disable PQC, drop
+        // the MLKEM hybrid so the ClientHello carries classical groups only.
+        let mut base = rustls::crypto::aws_lc_rs::default_provider();
+        base.kx_groups
+            .retain(|g| g.name() != rustls::NamedGroup::X25519MLKEM768);
+        base
     });
 
     // Clone the Arc — `builder_with_provider` consumes the provider by
