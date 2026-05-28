@@ -86,6 +86,25 @@ jobs:
           fi
           echo "OK: AAR contains the bundled rustls-platform-verifier jar."
 
+      # Bindings contract assertion: the AAR's classes.jar MUST contain
+      # the UniFFI-generated Kotlin API, not just the hand-written
+      # PqcAndroidInit glue (which lives in git and is always present).
+      # The uniffi-rs#2520 strip bug made `uniffi-bindgen --library` emit
+      # zero bindings on Linux silently, shipping an AAR with no
+      # PqcHttpClient/PqcConfig — unusable by consumers yet passing every
+      # other check. See scripts/build-android.sh's strip note + guard.
+      - name: Assert AAR contains the UniFFI Kotlin bindings
+        run: |
+          AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
+          unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
+          if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
+            echo "::error::$AAR classes.jar is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
+            echo "::error::uniffi-bindgen generated zero bindings — see the uniffi-rs#2520 strip note in scripts/build-android.sh."
+            unzip -l /tmp/aar-classes.jar
+            exit 1
+          fi
+          echo "OK: AAR classes.jar carries the UniFFI Kotlin bindings."
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

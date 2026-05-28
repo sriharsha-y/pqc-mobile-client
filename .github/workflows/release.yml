@@ -488,6 +488,27 @@ jobs:
       # --stacktrace gives us the full exception chain on signing
       # failures so we can distinguish armor-parse errors from
       # passphrase-decryption errors.
+      # Last line of defense before shipping: assemble the AAR and assert
+      # it carries the UniFFI Kotlin bindings. The uniffi-rs#2520 strip bug
+      # shipped multiple releases with an empty-API AAR (no PqcHttpClient/
+      # PqcConfig) that no other check caught. This guards the exact
+      # artifact about to be published; assembleRelease here primes the
+      # build the publish task reuses, so it is not wasted work.
+      - name: Assert AAR carries the UniFFI Kotlin bindings before publishing
+        working-directory: android
+        run: |
+          gradle assembleRelease --no-configuration-cache
+          AAR=build/outputs/aar/pqc-mobile-client-release.aar
+          unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
+          if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
+            echo "::error::$AAR is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
+            echo "::error::Refusing to publish an empty-API AAR (uniffi-rs#2520). Audit"
+            echo "::error::scripts/build-android.sh's host-dylib strip override + binding guard."
+            unzip -l /tmp/aar-classes.jar
+            exit 1
+          fi
+          echo "OK: AAR carries the UniFFI Kotlin bindings; proceeding to publish."
+
       - name: Publish to Maven Central
         working-directory: android
         env:

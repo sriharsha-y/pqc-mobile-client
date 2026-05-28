@@ -41,6 +41,21 @@ echo "==> Generating Kotlin bindings (via --library mode)"
 # required-features in Cargo.toml). The cross-compile build above is
 # intentionally feature-free so clap / goblin / uniffi_bindgen don't
 # get linked into the .so / .a artifacts shipped to mobile.
+#
+# CRITICAL — the host dylib MUST NOT be stripped (mozilla/uniffi-rs#2520):
+# our [profile.release] sets `strip = true` for mobile artifact size, but
+# `uniffi-bindgen --library` discovers the interface by reading the
+# UNIFFI_META_* symbols out of the dylib's regular symbol table (.symtab).
+# On Linux, `strip` removes those from .symtab (leaving them only in
+# .dynsym, which bindgen does NOT read), so bindgen SILENTLY generates
+# zero bindings (exit 0, empty out-dir) and the resulting AAR ships with
+# no Kotlin API. macOS `strip` keeps the symbols, so this only bites Linux
+# CI — which is exactly why it shipped undetected for several releases.
+# Override strip=false for THIS host build only; the mobile cargo-ndk .so
+# above were already built (stripped) before this point and are unaffected.
+# The export must also cover the `cargo run` bindgen invocation below, or
+# it would rebuild a stripped host dylib and re-trigger the bug.
+export CARGO_PROFILE_RELEASE_STRIP=false
 cargo build --release --features cli
 HOST_DYLIB="target/release/libpqc_client.dylib"
 if [ ! -f "$HOST_DYLIB" ]; then
@@ -58,6 +73,19 @@ cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --language kotlin \
     --out-dir generated/kotlin \
     --library "$HOST_DYLIB"
+
+# Fail-fast guard against a silent regression of the strip bug above (or
+# any other cause of empty --library output). uniffi-bindgen exits 0 even
+# when it finds no UNIFFI_META symbols and writes nothing — a zero-binding
+# generated/kotlin compiles into an AAR with no Kotlin API and was shipped
+# to Maven Central undetected. Refuse to continue if no .kt was produced.
+if [ -z "$(find generated/kotlin -name '*.kt' -print -quit)" ]; then
+    echo "::error::uniffi-bindgen produced ZERO Kotlin bindings in generated/kotlin/."
+    echo "::error::Almost certainly the uniffi-rs#2520 strip bug — the host dylib lost its"
+    echo "::error::UNIFFI_META_* symbols. Confirm CARGO_PROFILE_RELEASE_STRIP=false is in"
+    echo "::error::effect for the host build above (nm \$HOST_DYLIB | grep UNIFFI_META)."
+    exit 1
+fi
 
 echo "==> Extracting rustls-platform-verifier Kotlin glue into android/libs/"
 # rustls-platform-verifier ships its Android-side classes (the
