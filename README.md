@@ -93,12 +93,12 @@ pqc-mobile-client/
 ## Quick start
 
 ```bash
-./scripts/setup.sh                 # one-time: rust targets, cargo-ndk
-cargo test -- --nocapture   # sanity-test against pq.cloudflareresearch.com
-# The smoke suite confirms the negotiated KEX via the server's
-# /cdn-cgi/trace report, so it holds no shared client state and runs in parallel.
-./scripts/build-android.sh         # cross-compile all Android ABIs + Kotlin bindings
-./scripts/build-ios.sh             # build XCFramework + Swift bindings
+make setup      # one-time: rust targets, cargo-ndk
+make test       # sanity-test against pq.cloudflareresearch.com (smoke suite
+                # confirms the negotiated KEX via the server's /cdn-cgi/trace)
+make android    # cross-compile all Android ABIs + Kotlin bindings
+make ios        # build XCFramework + Swift bindings
+make help       # list all targets
 ```
 
 ## Releases
