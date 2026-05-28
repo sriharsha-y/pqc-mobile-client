@@ -95,6 +95,20 @@ jobs:
           fi
           echo "OK: AAR classes.jar carries the UniFFI Kotlin bindings."
 
+      # Consumer R8 rules must be packaged into the AAR (as proguard.txt) or
+      # apps with minifyEnabled=true fail the build (JNA java.awt) / crash at
+      # runtime (stripped UniFFI / rustls glue). See android/consumer-rules.pro.
+      - name: Assert AAR ships consumer ProGuard rules
+        run: |
+          AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
+          if ! unzip -l "$AAR" | grep -q 'proguard.txt'; then
+            echo "::error::$AAR is missing proguard.txt (consumer R8 rules)."
+            echo "::error::Audit consumerProguardFiles in android/build.gradle.kts."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          echo "OK: AAR ships consumer ProGuard rules (proguard.txt)."
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

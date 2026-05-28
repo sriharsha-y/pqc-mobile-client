@@ -22,6 +22,12 @@ android {
         // rustls-platform-verifier revocation checking is fully supported.
         // See the top-level README for rationale.
         minSdk = 24
+
+        // Ship R8/ProGuard keep rules inside the AAR so consumers with
+        // minifyEnabled=true don't have to discover them (JNA, the UniFFI
+        // bindings, and the rustls-platform-verifier glue are all R8 strip /
+        // rename targets, and JNA's java.awt refs otherwise fail the build).
+        consumerProguardFiles("consumer-rules.pro")
     }
 
     sourceSets["main"].apply {
