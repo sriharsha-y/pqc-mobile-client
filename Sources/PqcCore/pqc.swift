@@ -531,11 +531,23 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
+/**
+ * The HTTPS client exposed to Kotlin / Swift via UniFFI.
+ *
+ * Holds a single `reqwest::Client` with PQC TLS configured. Construct once
+ * per process (it owns the connection pool); calling `request` is cheap.
+ */
 public protocol PqcHttpClientProtocol: AnyObject, Sendable {
     
     func request(req: HttpRequest) async throws  -> HttpResponse
     
 }
+/**
+ * The HTTPS client exposed to Kotlin / Swift via UniFFI.
+ *
+ * Holds a single `reqwest::Client` with PQC TLS configured. Construct once
+ * per process (it owns the connection pool); calling `request` is cheap.
+ */
 open class PqcHttpClient: PqcHttpClientProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
@@ -575,6 +587,10 @@ open class PqcHttpClient: PqcHttpClientProtocol, @unchecked Sendable {
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
         return try! rustCall { uniffi_pqc_client_fn_clone_pqchttpclient(self.pointer, $0) }
     }
+    /**
+     * Returns `PqcError` (not panic) so consumers surface bad config —
+     * e.g. malformed base64 in pinned_cert_sha256 — as a typed error.
+     */
 public convenience init(config: PqcConfig)throws  {
     let pointer =
         try rustCallWithError(FfiConverterTypePqcError_lift) {
@@ -849,19 +865,112 @@ public func FfiConverterTypeHttpResponse_lower(_ value: HttpResponse) -> RustBuf
 }
 
 
+/**
+ * Configuration handed to `PqcHttpClient::new`. Defaults are tuned for
+ * mobile and safe to set from Swift/Kotlin without reading the docs.
+ * All `*_ms` fields are milliseconds.
+ */
 public struct PqcConfig {
+    /**
+     * Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
+     * accept. Matches if ANY cert in the chain — leaf or intermediate —
+     * has a matching SPKI hash (the leaf must still parse); empty disables
+     * pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
+     * public root. See `src/pinning.rs`.
+     */
     public var pinnedCertSha256: [String]
+    /**
+     * Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
+     * (default true). The ClientHello also carries classical groups, so a
+     * peer that rejects the hybrid falls back to classical — this is a
+     * preference, not enforcement. Set false only for A/B comparison.
+     */
     public var enablePostQuantum: Bool
+    /**
+     * Total request budget (handshake + headers + body); on expiry the
+     * request aborts with `PqcError::Timeout`. `None` means no total cap —
+     * discouraged for mobile.
+     */
     public var defaultTimeoutMs: UInt64?
+    /**
+     * TCP-connect / TLS-handshake budget, capped separately from
+     * `default_timeout_ms` so a stalled connect (e.g. cellular handover)
+     * fails fast instead of burning the whole request budget. `None` = 10s.
+     */
     public var connectTimeoutMs: UInt64?
+    /**
+     * Hard ceiling on a response body (post-decompression); exceeding it
+     * trips `PqcError::InvalidResponse`. Guards against decompression bombs
+     * (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
+     * expand to GBs and OOM the app. `None` defaults to 16 MiB.
+     */
     public var maxBodyBytes: UInt64?
+    /**
+     * Off by default: no cookie jar, so callers round-trip
+     * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
+     * endpoints is a session-leak vector — enable only when needed.
+     */
     public var enableCookies: Bool
+    /**
+     * Sent verbatim as `User-Agent`. `None` uses reqwest's default, which
+     * many WAFs (Akamai Bot Manager, bank UA allowlists) reject — set your
+     * app's identifier.
+     */
     public var userAgent: String?
+    /**
+     * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
+     * are refused so a redirect can't silently downgrade to an un-pinned
+     * host.
+     */
     public var redirectPolicy: RedirectPolicy
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(pinnedCertSha256: [String], enablePostQuantum: Bool = true, defaultTimeoutMs: UInt64?, connectTimeoutMs: UInt64?, maxBodyBytes: UInt64?, enableCookies: Bool, userAgent: String?, redirectPolicy: RedirectPolicy) {
+    public init(
+        /**
+         * Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
+         * accept. Matches if ANY cert in the chain — leaf or intermediate —
+         * has a matching SPKI hash (the leaf must still parse); empty disables
+         * pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
+         * public root. See `src/pinning.rs`.
+         */pinnedCertSha256: [String], 
+        /**
+         * Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
+         * (default true). The ClientHello also carries classical groups, so a
+         * peer that rejects the hybrid falls back to classical — this is a
+         * preference, not enforcement. Set false only for A/B comparison.
+         */enablePostQuantum: Bool = true, 
+        /**
+         * Total request budget (handshake + headers + body); on expiry the
+         * request aborts with `PqcError::Timeout`. `None` means no total cap —
+         * discouraged for mobile.
+         */defaultTimeoutMs: UInt64?, 
+        /**
+         * TCP-connect / TLS-handshake budget, capped separately from
+         * `default_timeout_ms` so a stalled connect (e.g. cellular handover)
+         * fails fast instead of burning the whole request budget. `None` = 10s.
+         */connectTimeoutMs: UInt64?, 
+        /**
+         * Hard ceiling on a response body (post-decompression); exceeding it
+         * trips `PqcError::InvalidResponse`. Guards against decompression bombs
+         * (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
+         * expand to GBs and OOM the app. `None` defaults to 16 MiB.
+         */maxBodyBytes: UInt64?, 
+        /**
+         * Off by default: no cookie jar, so callers round-trip
+         * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
+         * endpoints is a session-leak vector — enable only when needed.
+         */enableCookies: Bool, 
+        /**
+         * Sent verbatim as `User-Agent`. `None` uses reqwest's default, which
+         * many WAFs (Akamai Bot Manager, bank UA allowlists) reject — set your
+         * app's identifier.
+         */userAgent: String?, 
+        /**
+         * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
+         * are refused so a redirect can't silently downgrade to an un-pinned
+         * host.
+         */redirectPolicy: RedirectPolicy) {
         self.pinnedCertSha256 = pinnedCertSha256
         self.enablePostQuantum = enablePostQuantum
         self.defaultTimeoutMs = defaultTimeoutMs
@@ -1197,6 +1306,12 @@ extension PqcError: Foundation.LocalizedError {
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * What the client does on a 3xx. The reqwest default (10 unbounded
+ * redirects) is too permissive for a security-sensitive client. Variants
+ * are struct-style (the `{}`) to preserve the generated binding shape.
+ * `NoRedirects` (not `None`) avoids colliding with `Option::None` in matches.
+ */
 
 public enum RedirectPolicy {
     
@@ -1462,7 +1577,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pqc_client_checksum_method_pqchttpclient_request() != 32508) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pqc_client_checksum_constructor_pqchttpclient_new() != 38910) {
+    if (uniffi_pqc_client_checksum_constructor_pqchttpclient_new() != 5152) {
         return InitializationResult.apiChecksumMismatch
     }
 
