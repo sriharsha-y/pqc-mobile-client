@@ -23,4 +23,4 @@ pub use config::{PqcConfig, RedirectPolicy};
 pub use error::PqcError;
 pub use types::{HttpMethod, HttpRequest, HttpResponse};
 
-uniffi::include_scaffolding!("pqc");
+uniffi::setup_scaffolding!("pqc");

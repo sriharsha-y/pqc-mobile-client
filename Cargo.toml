@@ -67,9 +67,6 @@ log = "0.4"
 # uniffi-bindgen binary build opts into. See the [[bin]] section above.
 uniffi = { version = "0.29", features = ["tokio"] }
 
-[build-dependencies]
-uniffi = { version = "0.29", features = ["build"] }
-
 # Android-only: rustls-platform-verifier needs a JNI handshake from the
 # app's Application.onCreate to capture the Android Context so it can
 # reach KeyStore / NetworkSecurityConfig classes at handshake time.

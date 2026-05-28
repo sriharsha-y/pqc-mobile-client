@@ -21,15 +21,18 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Holds a single `reqwest::Client` with PQC TLS configured. Construct once
 /// per process (it owns the connection pool); calling `request` is cheap.
+#[derive(uniffi::Object)]
 pub struct PqcHttpClient {
     inner: reqwest::Client,
     default_timeout: Option<Duration>,
     max_body_bytes: u64,
 }
 
+#[uniffi::export]
 impl PqcHttpClient {
     /// Returns `PqcError` (not panic) so consumers surface bad config —
     /// e.g. malformed base64 in pinned_cert_sha256 — as a typed error.
+    #[uniffi::constructor]
     pub fn new(config: PqcConfig) -> Result<Self, PqcError> {
         let tls = build_tls_config(&config)?;
 
@@ -88,7 +91,7 @@ impl PqcHttpClient {
 
         // Build failures here are residual wiring errors (DNS/proxy init);
         // TLS was already validated above. Map to InvalidRequest per the
-        // UDL constructor doc.
+        // constructor doc.
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
         Ok(Self {
@@ -102,8 +105,8 @@ impl PqcHttpClient {
 // `async_runtime = "tokio"` makes UniFFI drive these exports on a real tokio
 // runtime; without it reqwest/hyper panic ("there is no reactor running")
 // when called through the FFI bridge (tests mask it via #[tokio::test]).
-// Constructor stays in a plain impl — proc-macro export doesn't support
-// associated functions.
+// The sync constructor is exported from a separate #[uniffi::export] block
+// above (async_runtime applies only to the async methods here).
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcHttpClient {
     pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
@@ -142,7 +145,7 @@ impl PqcHttpClient {
         let resp = builder.send().await.map_err(map_reqwest_err)?;
 
         let status = resp.status().as_u16();
-        // Map to the ALPN id the UDL documents ("h2", "http/1.1"); the
+        // Map to the ALPN id the API documents ("h2", "http/1.1"); the
         // Version Debug string ("HTTP/2.0") would break consumer equality.
         let negotiated_protocol = match resp.version() {
             reqwest::Version::HTTP_09 => "http/0.9".to_string(),

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Enum)]
 pub enum HttpMethod {
     Get,
     Post,
@@ -11,7 +11,7 @@ pub enum HttpMethod {
     Options,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct HttpRequest {
     pub method: HttpMethod,
     pub url: String,
@@ -20,7 +20,7 @@ pub struct HttpRequest {
     pub timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct HttpResponse {
     pub status: u16,
     pub headers: HashMap<String, Vec<String>>,
