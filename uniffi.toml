@@ -1,0 +1,15 @@
+# UniFFI binding configuration.
+#
+# Override the generated Kotlin package. UniFFI's default is
+# `uniffi.<namespace>` (here `uniffi.pqc`), which is generic, not
+# reverse-DNS, and could collide with another UniFFI-based dependency
+# that picked the same namespace. Pin it to the published artifact's
+# own namespace so consumers import `io.github.sriharsha_y.pqc.*`,
+# matching the AAR's `namespace` / Maven group.
+#
+# Only affects the Kotlin/Android binding. The Swift binding is a module
+# (`PqcCore`) and is unaffected. Changing this also requires the JNI
+# symbol in `src/android_init.rs` and the `PqcAndroidInit` Kotlin package
+# to match (JNI mangles the `_` in `sriharsha_y` to `_1`).
+[bindings.kotlin]
+package_name = "io.github.sriharsha_y.pqc"

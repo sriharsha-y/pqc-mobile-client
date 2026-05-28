@@ -8,9 +8,9 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import kotlinx.coroutines.runBlocking
-import uniffi.pqc.HttpMethod
-import uniffi.pqc.HttpRequest
-import uniffi.pqc.PqcHttpClient
+import io.github.sriharsha_y.pqc.HttpMethod
+import io.github.sriharsha_y.pqc.HttpRequest
+import io.github.sriharsha_y.pqc.PqcHttpClient
 
 /**
  * OkHttp [Interceptor] that delegates the entire request to the Rust

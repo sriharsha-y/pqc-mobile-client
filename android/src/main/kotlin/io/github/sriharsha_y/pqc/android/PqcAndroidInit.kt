@@ -1,4 +1,4 @@
-package uniffi.pqc.android
+package io.github.sriharsha_y.pqc.android
 
 import android.content.Context
 
@@ -12,20 +12,20 @@ import android.content.Context
  * without going through JNI, so this object hands it over.
  *
  * **Call exactly once, from `Application.onCreate`, BEFORE constructing
- * any [uniffi.pqc.PqcHttpClient]**:
+ * any [io.github.sriharsha_y.pqc.PqcHttpClient]**:
  *
  * ```kotlin
  * class MyApp : Application() {
  *   override fun onCreate() {
  *     super.onCreate()
- *     uniffi.pqc.android.PqcAndroidInit.init(this)
+ *     io.github.sriharsha_y.pqc.android.PqcAndroidInit.init(this)
  *     // ... PqcHttpClient may now be constructed
  *   }
  * }
  * ```
  *
  * Skipping this throws on the first request:
- *   `uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized`
+ *   `io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized`
  *
  * Idempotent at the Kotlin level — a redundant call short-circuits
  * before crossing into Rust.
@@ -64,11 +64,11 @@ object PqcAndroidInit {
     }
 
     /**
-     * Resolves to `Java_uniffi_pqc_android_PqcAndroidInit_nativeInit` in
-     * src/android_init.rs. The JVM derives the JNI symbol from the
-     * Kotlin method name (here, `nativeInit`) — not from the wrapping
-     * `init(...)` entry point above — so grep for `_nativeInit` when
-     * debugging UnsatisfiedLinkError, not `_init`.
+     * Resolves to `Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`
+     * in src/android_init.rs. The JVM derives the JNI symbol from the
+     * fully-qualified class + method name; the `_` in `sriharsha_y` is
+     * JNI-mangled to `_1`. Grep for `_nativeInit` when debugging
+     * UnsatisfiedLinkError, not `_init`.
      */
     @JvmStatic
     private external fun nativeInit(context: Context)

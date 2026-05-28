@@ -11,6 +11,6 @@
 
 # pqc-mobile-client: keep generated UniFFI Kotlin bindings and JNA's native
 # method declarations so R8 doesn't strip them when minifyEnabled is true.
--keep class uniffi.pqc.** { *; }
+-keep class io.github.sriharsha_y.pqc.** { *; }
 -keep class com.sun.jna.** { *; }
 -keepclasseswithmembers class * { native <methods>; }

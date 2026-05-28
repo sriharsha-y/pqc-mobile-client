@@ -28,12 +28,12 @@ android {
     sourceSets["main"].apply {
         // Inputs produced by scripts/build-android.sh:
         //   target/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libpqc_client.so
-        //   generated/kotlin/uniffi/pqc/pqc.kt
+        //   generated/kotlin/io/github/sriharsha_y/pqc/pqc.kt
         // Resolved relative to the gradle rootProject (android/).
         jniLibs.srcDir(rootProject.file("../target/jniLibs"))
         java.srcDir(rootProject.file("../generated/kotlin"))
         // Hand-written Kotlin glue under android/src/main/kotlin/ — adds
-        // uniffi.pqc.android.PqcAndroidInit (the JNI bridge that hands
+        // io.github.sriharsha_y.pqc.android.PqcAndroidInit (the JNI bridge that hands
         // the Application Context to rustls-platform-verifier). Sits
         // alongside the generated bindings so consumers receive a single
         // AAR with everything wired up.
