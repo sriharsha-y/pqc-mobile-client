@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.4.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.3.0...v0.4.0) (2026-05-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pinning:** a configured pin now matches any certificate in the chain, not only the leaf.
+* **client:** HttpResponse no longer has `negotiated_named_group`, and PqcError no longer has the `Cancelled` variant.
+* **client:** PqcConfig has lost `enable_http3` and gained six new fields. Constructor now returns Result instead of panicking on bad config. Headers are multi-value (`record<string, sequence<string>>`) on both HttpRequest and HttpResponse. HttpResponse gains `negotiated_protocol` (ALPN) alongside the existing `negotiated_named_group`.
+
+### Features
+
+* **android:** self-contained Maven Central AAR via fat-AAR bundling + JNI bridge ([d58eac1](https://github.com/sriharsha-y/pqc-mobile-client/commit/d58eac1b172a97cdd043fa3385bec5662fdee0f7))
+* **client:** drop racy negotiated_named_group and unused Cancelled ([ec5ff0c](https://github.com/sriharsha-y/pqc-mobile-client/commit/ec5ff0c176e1145260c1cd081ab338a2c77b6a67))
+* **client:** redesign PqcConfig with explicit timeouts, body cap, cookie/UA/redirect controls ([803406c](https://github.com/sriharsha-y/pqc-mobile-client/commit/803406c23c801cea6d3492cc888e9ae3310c587e))
+* **config:** default enable_post_quantum to true; clarify pinning and timeout docs ([8980f89](https://github.com/sriharsha-y/pqc-mobile-client/commit/8980f8991fcb94cda9a1e51033d7532f660f49da))
+* **pinning:** accept URL-safe base64 in decode_pin_list ([0dbefe7](https://github.com/sriharsha-y/pqc-mobile-client/commit/0dbefe7f160d9b919d2d1aca75142203c0526f9c))
+* **pinning:** match SPKI pins against any certificate in the chain ([292dda7](https://github.com/sriharsha-y/pqc-mobile-client/commit/292dda779f27705c0d4504b65f4a4bbd4706f8ad))
+* **rn-sample:** PQC on/off toggle verified via /cdn-cgi/trace; harden iOS URLProtocol ([f16452d](https://github.com/sriharsha-y/pqc-mobile-client/commit/f16452d63cd96225291be828281c8e527037956f))
+
+
+### Bug Fixes
+
+* **android:** abort if a platform-verifier init failure can't be reported ([01b99f6](https://github.com/sriharsha-y/pqc-mobile-client/commit/01b99f6c4e9326e482cdae2920c735ab643c02e8))
+* **client:** classify rustls General-arm pinning failures as PinningFailure ([b8bde22](https://github.com/sriharsha-y/pqc-mobile-client/commit/b8bde22da5155d2221af3720695f85cacd73bc62))
+* **ios:** bare-paths podspec + build-script symlinks for local Pod consumption ([4a1a9bb](https://github.com/sriharsha-y/pqc-mobile-client/commit/4a1a9bb0919510e2a1b27a28c1b4fa115dc5fd97))
+* **rn-sample:** target RN's min iOS so Hermes builds; surface iOS-26 native PQC; drop redundant button ([abd3cc4](https://github.com/sriharsha-y/pqc-mobile-client/commit/abd3cc403966869177ad298a381d79adbddb9b11))
+* **tls:** actually disable PQC when enable_post_quantum is false ([7715a08](https://github.com/sriharsha-y/pqc-mobile-client/commit/7715a089befa694c9945a4a1e37a8f7c5666403c))
+
+
+### Performance Improvements
+
+* **client:** restore connection reuse with a 60s pool idle timeout ([986773a](https://github.com/sriharsha-y/pqc-mobile-client/commit/986773af79d8aa624b0ff7f4b592b3173d9764d9))
+
 ## [0.3.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.2.1...v0.3.0) (2026-05-27)
 
 
