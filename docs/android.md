@@ -8,6 +8,14 @@
 
 The Rust core, the `.so` files, and the generated Kotlin bindings are the same regardless of consumer.
 
+> **Package note (upgraders):** the Kotlin bindings are published under
+> `io.github.sriharsha_y.pqc` (matching the Maven group / AAR namespace).
+> Earlier releases used UniFFI's default `uniffi.pqc`. If you are upgrading
+> from such a release, update your imports (`uniffi.pqc.*` →
+> `io.github.sriharsha_y.pqc.*`) and any proguard keep rule
+> (`-keep class uniffi.pqc.** { *; }` → `io.github.sriharsha_y.pqc.**`).
+> iOS/Swift consumers are unaffected (the binding is the `PqcCore` module).
+
 ## 1. Build outputs
 
 > **Note on regenerating bindings manually.** The build script invokes
