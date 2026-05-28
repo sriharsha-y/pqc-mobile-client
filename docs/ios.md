@@ -196,6 +196,33 @@ let session = URLSession(configuration: cfg)
 
 Existing API code (Alamofire, Moya, raw `URLSession.dataTask`) using this session continues to work unchanged.
 
+### Cookies & multi-value response headers
+
+`HTTPURLResponse` is backed by a `[String: String]` dictionary, so it **cannot carry more than one value for a header name**. The common shortcut of joining multiple `Set-Cookie` headers with `", "` corrupts them, because a cookie's `Expires` attribute itself contains a comma (`Expires=Wed, 21 Oct 2026 ...`) — any later comma-split mis-parses the boundary and drops or mangles cookies.
+
+The Rust core preserves each `Set-Cookie` as its own value, so a synthesizing `URLProtocol` must handle cookies explicitly rather than fold them into the response dict. Parse each value **on its own** (a single-entry dict per cookie avoids the comma ambiguity) and hand it to the cookie store the URL Loading System / RN networking reads from:
+
+```swift
+let cookieStorage = HTTPCookieStorage.shared
+for (name, values) in pqcResp.headers where name.lowercased() == "set-cookie" {
+    for raw in values {
+        let parsed = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": raw], for: url)
+        for cookie in parsed { cookieStorage.setCookie(cookie) }
+    }
+}
+
+// Build the response header dict from everything EXCEPT Set-Cookie:
+var headerFields = pqcResp.headers
+    .filter { $0.key.lowercased() != "set-cookie" }
+    .mapValues { $0.joined(separator: ", ") }
+```
+
+Comma-joining the **remaining** headers is fine — RFC 9110 §5.3 permits combining most field values with commas; `Set-Cookie` is the notable exception.
+
+**Banking posture:** the snippet above persists session cookies in `HTTPCookieStorage.shared`, so they auto-attach to later requests (normal iOS behavior). If you want the Rust client's stricter "no implicit cookie state" stance (`PqcConfig.enableCookies = false`), **skip the storage step** and instead surface the raw `Set-Cookie` values to your app layer to decide per request. Either way, never comma-join `Set-Cookie`.
+
+See `examples/RnSample/ios/RnSample/PqcURLProtocol.swift` for the full working implementation.
+
 ## 4. Native iOS — Alamofire / Moya / async-http-client
 
 Alamofire and Moya wrap `URLSession`, so they inherit the URLProtocol hook from Section 3 if the underlying session is the one with `PqcURLProtocol` registered. Construct Alamofire's `Session` with a `URLSessionConfiguration` that includes the protocol class:
@@ -286,39 +313,51 @@ Bundling Rust crypto promotes the app from "uses-OS-encryption-only" (exempt) to
 
 ## 9. Verification
 
-Debug-build sanity check:
+Debug-build sanity check. `HttpResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global — see the `HttpResponse` doc in `src/pqc.udl`). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
 
 ```swift
 Task {
-    let resp = try await PqcURLProtocol.client.request(req: HttpRequest(
+    let client = try PqcHttpClient(config: PqcConfig(/* … */))
+    let resp = try await client.request(req: HttpRequest(
         method: .get,
-        url: "https://pq.cloudflareresearch.com/",
+        url: "https://pq.cloudflareresearch.com/cdn-cgi/trace",
         headers: [:] as [String: [String]], body: nil, timeoutMs: 5000
     ))
-    print("negotiated group:", resp.negotiatedNamedGroup)
+    let body = String(decoding: Data(resp.body), as: UTF8.self)
+    let kex = body.split(separator: "\n")
+        .first { $0.hasPrefix("kex=") }?.dropFirst(4)
+    print("kex:", kex ?? "unknown", "alpn:", resp.negotiatedProtocol)
+    // kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
 }
 ```
 
 For production verification use Wireshark with `rvictl` USB tethering — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
 
-For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named group per request, broken down by client OS and app version.
+For fleet-level telemetry, query Akamai DataStream 2 (or your edge's TLS observability) for the negotiated named group per request, broken down by client OS and app version.
 
 ## 10. SPKI cert pinning — how to compute hashes
 
-`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty array disables pinning.
+`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of a certificate's **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty array disables pinning.
 
-Compute from a live server:
+A pin matches if **any certificate in the server's chain — leaf or intermediate — has a matching SPKI hash** (the leaf must still parse). This mirrors OkHttp's `CertificatePinner`, Apple's `NSPinnedDomains`, and Android's `NetworkSecurityConfig`.
+
+Compute a SPKI hash. The chain (leaf first, then intermediates) is shown by `-showcerts`:
 
 ```sh
+# Leaf SPKI:
 openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
   | openssl x509 -pubkey -noout \
   | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -binary \
   | base64
+
+# Intermediate SPKI: list the full chain, then run the same pipe on the
+# intermediate cert block (the 2nd certificate):
+openssl s_client -showcerts -servername api.example.com -connect api.example.com:443 < /dev/null
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Document a rotation playbook for cert renewal.
+**Recommended: pin your issuing intermediate CA.** Its key has a multi-year lifespan and is far more specific than a public root, so the leaf can rotate freely (CA-forced reissue, ACME renewal) without an app update. Pinning the leaf alone is the most fragile option — a single reissue without a matching pin already shipped will brick the app.
 
-**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
+**Always configure at least two pins** (e.g. the current intermediate + a backup intermediate or a pre-deployed next leaf), and document a rotation playbook. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.

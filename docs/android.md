@@ -242,29 +242,32 @@ Ship as an App Bundle so each device only downloads its ABI's `.so`. `arm64-v8a`
 
 ## 9. Verification
 
-Debug-build verification call:
+Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `HttpResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global (see the `HttpResponse` doc in `src/pqc.udl`):
 
 ```kotlin
 val resp = pqc.request(HttpRequest(
     method = HttpMethod.GET,
-    url = "https://pq.cloudflareresearch.com/",
+    url = "https://pq.cloudflareresearch.com/cdn-cgi/trace",
     headers = emptyMap<String, List<String>>(), body = null, timeoutMs = 5000UL,
 ))
-android.util.Log.i("PQC", "group=${resp.negotiatedNamedGroup} alpn=${resp.negotiatedProtocol}")
-// `negotiatedNamedGroup` is process-global ("X25519MLKEM768", "X25519", or
-// "unknown") — see HttpResponse doc in src/pqc.udl. `negotiatedProtocol` is
-// per-request ("h2", "http/1.1").
+val kex = String(resp.body).lineSequence()
+    .firstOrNull { it.startsWith("kex=") }?.removePrefix("kex=")
+android.util.Log.i("PQC", "kex=$kex alpn=${resp.negotiatedProtocol}")
+// kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
+// `negotiatedProtocol` is per-request ("h2", "http/1.1").
 ```
 
 For production verification use Wireshark on a USB-tethered device — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
 
-For fleet-level telemetry, query Akamai DataStream 2 for the negotiated named group per request, broken down by client OS and app version.
+For fleet-level telemetry, query Akamai DataStream 2 (or your edge's TLS observability) for the negotiated named group per request, broken down by client OS and app version.
 
 ## 10. SPKI cert pinning — how to compute hashes
 
-`PqcConfig.pinnedCertSha256` takes a list of base64-encoded SHA-256 hashes of the **Subject Public Key Info** (SPKI) — the same format used by RFC 7469 and Cronet's `addPublicKeyPins`. Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty list disables pinning.
+`PqcConfig.pinnedCertSha256` takes a list of base64-encoded SHA-256 hashes of a certificate's **Subject Public Key Info** (SPKI) — the same format used by RFC 7469 and Cronet's `addPublicKeyPins`. Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty list disables pinning.
 
-Compute from a live server:
+A pin matches if **any certificate in the server's chain — leaf or intermediate — has a matching SPKI hash** (the leaf must still parse), the same semantics as OkHttp's `CertificatePinner` and Android's `NetworkSecurityConfig` `<pin-set>`.
+
+Compute from a live server (use `-showcerts` to also see the intermediate, the 2nd cert in the chain):
 
 ```sh
 openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
@@ -283,8 +286,8 @@ openssl x509 -in cert.pem -pubkey -noout \
   | base64
 ```
 
-**Always pin at least two hashes** — the current leaf SPKI and a pre-deployed next leaf SPKI for rotation. Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal.
+**Recommended: pin your issuing intermediate CA.** Its key has a multi-year lifespan and is far more specific than a public root, so the leaf can rotate freely (CA-forced reissue, ACME renewal) without an app update. Pinning the leaf alone is the most fragile option — a single reissue without a matching pin already shipped will brick the app.
 
-**Pin leaf SPKIs only.** The verifier enforces **leaf-strict pinning**: only the end-entity (leaf) certificate's SPKI is compared against the pin list, regardless of what the server includes in its chain. Pinning to an intermediate or root CA SPKI will NOT match. This is deliberate — pinning anything other than the leaf (e.g., a popular root like ISRG Root X1) lets any cert under that root pass, defeating the pinning guarantee. For rotation, configure both the active leaf SPKI AND the pre-deployed next leaf SPKI.
+**Always pin at least two hashes** (e.g. the current intermediate + a backup intermediate, or a pre-deployed next leaf). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.
