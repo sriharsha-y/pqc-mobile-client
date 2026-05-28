@@ -38,16 +38,17 @@ jobs:
         with:
           shared-key: check-ubuntu
 
+      # Steps call the Makefile so local `make check` and CI stay identical.
       - name: Format check
-        run: cargo fmt --check
+        run: make fmt-check
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: make clippy
 
       - name: Tests
         # Includes the network smoke test (pq.cloudflareresearch.com); re-run
         # via workflow_dispatch if CF's PQ endpoint blips.
-        run: cargo test --release --locked -- --nocapture
+        run: make test
 
   # Supply-chain: cargo-audit (RustSec advisories) + cargo-deny (license/
   # bans/sources policy in deny.toml). Installed as prebuilt binaries.
@@ -59,7 +60,5 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny
-      - name: cargo audit (RustSec advisory scan)
-        run: cargo audit --deny warnings
-      - name: cargo deny (licenses + bans + sources)
-        run: cargo deny check
+      - name: Audit (cargo-audit + cargo-deny)
+        run: make audit

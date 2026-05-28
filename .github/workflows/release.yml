@@ -83,7 +83,7 @@ jobs:
         run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
 
       - name: Build
-        run: ./scripts/build-android.sh
+        run: make android
 
       - name: Package
         run: |
@@ -145,7 +145,7 @@ jobs:
       # uniffi-bindgen built from this crate's [[bin]] target.
 
       - name: Build
-        run: ./scripts/build-ios.sh
+        run: make ios
 
       # Defense in depth: if the `cli` feature ever leaks into the cross-
       # compile, uniffi-bindgen/clap/goblin bloat the archive ~58→90 MB.

@@ -45,7 +45,7 @@ jobs:
         run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
 
       - name: Build native libraries + Kotlin bindings
-        run: ./scripts/build-android.sh
+        run: make android
 
       - uses: actions/setup-java@v4
         with:
