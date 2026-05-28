@@ -96,9 +96,3 @@ pub enum RedirectPolicy {
     SameOriginOnly {},
     Limited { max: u8 },
 }
-
-impl Default for RedirectPolicy {
-    fn default() -> Self {
-        Self::SameOriginOnly {}
-    }
-}

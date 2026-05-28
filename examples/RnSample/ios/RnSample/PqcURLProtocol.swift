@@ -73,9 +73,6 @@ public final class PqcURLProtocol: URLProtocol {
 
     public override class func canInit(with request: URLRequest) -> Bool {
         guard request.url?.scheme == "https" else { return false }
-        if URLProtocol.property(forKey: "PqcHandled", in: request) as? Bool == true {
-            return false
-        }
         return interceptAll
     }
 
