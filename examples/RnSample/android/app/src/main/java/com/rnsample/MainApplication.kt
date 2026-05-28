@@ -65,31 +65,37 @@ class MainApplication : Application(), ReactApplication {
     //   uniffi.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
-    val pqc = try {
-      PqcHttpClient(
-        PqcConfig(
-          // Empty list = pinning disabled. For a real banking app, populate with
-          // base64(SHA-256(SPKI)) for the production cert + at least one backup.
-          pinnedCertSha256 = emptyList(),
-          enablePostQuantum = true,
-          defaultTimeoutMs = 15_000UL,
-          // null lets the client pick its built-in defaults (10s connect,
-          // 16 MiB body cap). For a production banking app, set these
-          // explicitly per your SLO so they survive a defaults change.
-          connectTimeoutMs = null,
-          maxBodyBytes = null,
-          // Banking clients should NOT auto-attach Set-Cookie across
-          // endpoints (session-leak vector). Round-trip cookies via
-          // headers explicitly when needed.
-          enableCookies = false,
-          // Identify the app to Akamai Bot Manager / bank WAFs.
-          userAgent = "RnSample/0.3.1 (pqc-mobile-client)",
-          // Refuse cross-origin redirects so the pin / PQ guarantees of
-          // the original handshake can never be silently dropped by a
-          // 3xx to a different host.
-          redirectPolicy = RedirectPolicy.SameOriginOnly,
-        )
-      )
+    // Shared config differing only in enablePostQuantum. A production
+    // app needs only the PQC client; the sample keeps both so the UI can
+    // toggle PQC on/off (the flag is fixed at client construction).
+    fun config(enablePqc: Boolean) = PqcConfig(
+      // Empty list = pinning disabled. For a real banking app, populate with
+      // base64(SHA-256(SPKI)) for the production cert + at least one backup.
+      pinnedCertSha256 = emptyList(),
+      enablePostQuantum = enablePqc,
+      defaultTimeoutMs = 15_000UL,
+      // null lets the client pick its built-in defaults (10s connect,
+      // 16 MiB body cap). For a production banking app, set these
+      // explicitly per your SLO so they survive a defaults change.
+      connectTimeoutMs = null,
+      maxBodyBytes = null,
+      // Banking clients should NOT auto-attach Set-Cookie across
+      // endpoints (session-leak vector). Round-trip cookies via
+      // headers explicitly when needed.
+      enableCookies = false,
+      // Identify the app to Akamai Bot Manager / bank WAFs.
+      userAgent = "RnSample/0.3.1 (pqc-mobile-client)",
+      // Refuse cross-origin redirects so the pin / PQ guarantees of
+      // the original handshake can never be silently dropped by a
+      // 3xx to a different host.
+      redirectPolicy = RedirectPolicy.SameOriginOnly,
+    )
+
+    val pqcClient: PqcHttpClient
+    val classicalClient: PqcHttpClient
+    try {
+      pqcClient = PqcHttpClient(config(enablePqc = true))
+      classicalClient = PqcHttpClient(config(enablePqc = false))
     } catch (t: Throwable) {
       Log.e(TAG, "PqcHttpClient construction failed; falling back to default OkHttp", t)
       return
@@ -101,7 +107,7 @@ class MainApplication : Application(), ReactApplication {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
         .cookieJar(ReactCookieJarContainer())
-        .addInterceptor(PqcInterceptor(pqc))    // MUST be last
+        .addInterceptor(PqcInterceptor(pqcClient, classicalClient))    // MUST be last
         .build()
     })
     Log.i(TAG, "PQC OkHttp factory installed")

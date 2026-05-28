@@ -57,15 +57,18 @@ The Metro bundler starts in a separate terminal automatically. The app shows a c
 
 ### JS
 
-- `App.tsx` just calls `fetch()` and renders the body. Zero PQC-specific JS code — the swap is entirely native.
+- `App.tsx` calls `fetch()` against Cloudflare's `/cdn-cgi/trace` endpoint and parses the `kex=` line the edge returns. A `Switch` toggles post-quantum on/off by setting an `X-Pqc-Mode` request header that the native layer routes on (PQC-on vs classical-only client). No cryptographic JS — the handshake is entirely native.
 
 ## Verification
 
-If the on-screen text reads `kex = X25519MLKEM768`, the handshake succeeded with PQC. Other observable signals:
+The app reads the **server's** report of the negotiated key exchange, which is authoritative and correct even under concurrent requests (unlike a client-side header — see below):
 
-- iOS device build: response headers include a synthetic `X-Pqc-Negotiated-Group` header (added by `PqcURLProtocol`) reporting the rustls-selected group.
-- Android: same `X-Pqc-Negotiated-Group` header (added by `PqcInterceptor`).
+- Toggle **on** → the trace shows `kex=X25519MLKEM768` (post-quantum hybrid negotiated).
+- Toggle **off** → the client offers classical groups only, so the trace shows `kex=X25519`.
+- This works because `https://pq.cloudflareresearch.com/cdn-cgi/trace` (any Cloudflare-served host exposes `/cdn-cgi/trace`) returns the key exchange the edge actually negotiated for *that* connection, in the response body.
 - On the wire: USB-tether the device, capture with Wireshark, filter `tls.handshake.type == 1`, inspect `key_share` extension for group `0x11EC` (IANA codepoint for `X25519MLKEM768`).
+
+> **Why not a client-side header?** The negotiated group is a property of the TLS *connection*, not the request; the Rust core can only observe it via a process-global side-channel that races under concurrent requests. The server's `kex=` avoids that entirely. For an arbitrary backend with no trace endpoint, use server-side TLS observability (Cloudflare DataStream, AWS CloudTrail `tlsDetails.keyExchange`, etc.).
 
 ## Limitations
 

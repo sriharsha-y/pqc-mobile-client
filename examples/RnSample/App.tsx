@@ -1,30 +1,35 @@
 /**
  * PQC Mobile Client — RN integration sample.
  *
- * Fires two HTTPS requests in sequence and reports the negotiated TLS
- * key-exchange group for each via the `X-Pqc-Negotiated-Group` response
- * header (injected by PqcURLProtocol on iOS / PqcInterceptor on Android
- * from the Rust core's `negotiatedNamedGroup`, sourced from
- * `src/kx_tracker.rs` which records the group rustls actually selected).
+ * Demonstrates the post-quantum TLS handshake AND how to *verify* it
+ * reliably. A single toggle controls whether the native Rust client
+ * advertises X25519MLKEM768 (post-quantum) or classical-only groups,
+ * then the app fetches Cloudflare's trace endpoint and reads the
+ * SERVER's report of the key exchange it negotiated:
  *
- *   1. https://pq.cloudflareresearch.com/ — Cloudflare edge advertises
- *      X25519MLKEM768; expected to negotiate the hybrid (green).
- *   2. https://github.com/ — GitHub edge does NOT advertise PQC;
- *      expected to fall back to classical X25519 (yellow).
+ *   https://pq.cloudflareresearch.com/cdn-cgi/trace  →  "kex=..." line
  *
- * Requests run sequentially, not in parallel. The kx_tracker uses a
- * process-global atomic, so concurrent in-flight requests could race
- * each other — but since each response also carries its own
- * `X-Pqc-Negotiated-Group` header read at await time, sequencing keeps
- * the per-card display correct without depending on the atomic.
+ * Why the server's `kex=` and not a client-side header? The negotiated
+ * group is a property of the TLS *connection*, not the request, and our
+ * Rust core can only observe it through a process-global side-channel
+ * that races under concurrent requests. Cloudflare's `/cdn-cgi/trace`
+ * reports what the edge actually negotiated for *this* connection, in
+ * the response body — server-authoritative and correct even under
+ * parallel requests. See docs/ios.md and docs/android.md.
+ *
+ * Toggle ON  → client offers X25519MLKEM768 (+ classical) → kex=X25519MLKEM768
+ * Toggle OFF → client offers classical only               → kex=X25519
+ *
+ * The native side (PqcInterceptor on Android / PqcURLProtocol on iOS)
+ * keeps two clients — PQC-on and PQC-off — and selects between them
+ * based on the `X-Pqc-Mode` request header this screen sets.
  *
  * iOS 26+ note: AppDelegate gates PqcURLProtocol off because Apple's
- * native URLSession already negotiates PQC. On that path the header is
- * absent; the UI falls back to an "unknown" state per card — the
- * handshake is still PQC, just not observable from the client side.
+ * native URLSession already negotiates PQC, so on that path the toggle
+ * has no effect and `kex` will reflect the OS handshake.
  */
 
-import React, {useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -32,65 +37,70 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 
-const EXPECTED_PQC_GROUP = 'X25519MLKEM768';
-const KEX_HEADER = 'X-Pqc-Negotiated-Group';
+// Any Cloudflare-served host exposes /cdn-cgi/trace; the research
+// endpoint is the documented one for PQC testing.
+const TRACE_URL = 'https://pq.cloudflareresearch.com/cdn-cgi/trace';
 
-type Target = {label: string; url: string};
+// Opt-in header the native layer routes on: "off" selects the
+// classical-only client; absent/anything-else selects the PQC client.
+const PQC_MODE_HEADER = 'X-Pqc-Mode';
 
-const TARGETS: Target[] = [
-  {label: 'Cloudflare (PQC edge)', url: 'https://pq.cloudflareresearch.com/'},
-  {label: 'GitHub (classical edge)', url: 'https://github.com/'},
-];
-
-type CardResult =
+type Result =
   | {status: 'idle'}
   | {status: 'loading'}
-  | {status: 'ok'; httpStatus: number; kex: string | null}
+  | {status: 'ok'; httpStatus: number; kex: string | null; raw: string}
   | {status: 'error'; message: string};
 
-export default function App(): React.JSX.Element {
-  const [results, setResults] = useState<CardResult[]>(
-    TARGETS.map(() => ({status: 'idle'})),
-  );
+/** Pull the `kex=...` value out of a /cdn-cgi/trace body. */
+function parseKex(traceBody: string): string | null {
+  const match = traceBody.match(/^kex=(.*)$/m);
+  return match ? match[1].trim() : null;
+}
 
-  useEffect(() => {
-    (async () => {
-      // Sequential, not Promise.all — see file-level comment about
-      // the kx_tracker race and per-request header reads.
-      for (let i = 0; i < TARGETS.length; i++) {
-        setResults(prev => {
-          const next = [...prev];
-          next[i] = {status: 'loading'};
-          return next;
-        });
-        try {
-          const resp = await fetch(TARGETS[i].url, {method: 'GET'});
-          await resp.text(); // drain
-          const kex =
-            resp.headers.get(KEX_HEADER) ??
-            resp.headers.get(KEX_HEADER.toLowerCase());
-          setResults(prev => {
-            const next = [...prev];
-            next[i] = {status: 'ok', httpStatus: resp.status, kex};
-            return next;
-          });
-        } catch (err: unknown) {
-          setResults(prev => {
-            const next = [...prev];
-            next[i] = {
-              status: 'error',
-              message: err instanceof Error ? err.message : String(err),
-            };
-            return next;
-          });
-        }
-      }
-    })();
+function isPostQuantum(kex: string | null): boolean {
+  // X25519MLKEM768 today; match the ML-KEM family defensively in case
+  // Cloudflare relabels (e.g. a future SecP256r1MLKEM768).
+  return !!kex && kex.toUpperCase().includes('MLKEM');
+}
+
+export default function App(): React.JSX.Element {
+  const [pqcEnabled, setPqcEnabled] = useState(true);
+  const [result, setResult] = useState<Result>({status: 'idle'});
+
+  const run = useCallback(async (enablePqc: boolean) => {
+    setResult({status: 'loading'});
+    try {
+      const resp = await fetch(TRACE_URL, {
+        method: 'GET',
+        // When PQC is toggled OFF, tell the native layer to route through
+        // the classical-only client. When ON, send nothing special.
+        headers: enablePqc ? {} : {[PQC_MODE_HEADER]: 'off'},
+      });
+      const raw = await resp.text();
+      setResult({
+        status: 'ok',
+        httpStatus: resp.status,
+        kex: parseKex(raw),
+        raw,
+      });
+    } catch (err: unknown) {
+      setResult({
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }, []);
+
+  // Run on mount and whenever the toggle flips.
+  useEffect(() => {
+    run(pqcEnabled);
+  }, [pqcEnabled, run]);
 
   return (
     <SafeAreaView style={styles.root}>
@@ -99,31 +109,48 @@ export default function App(): React.JSX.Element {
         <Text style={styles.appTitle}>pqc-mobile-client</Text>
         <Text style={styles.appSubtitle}>Platform: {Platform.OS}</Text>
 
-        {TARGETS.map((t, i) => (
-          <ResultCard key={t.url} target={t} result={results[i]} />
-        ))}
+        <View style={styles.toggleRow}>
+          <View style={styles.toggleText}>
+            <Text style={styles.toggleLabel}>Advertise post-quantum</Text>
+            <Text style={styles.toggleCaption}>
+              X25519MLKEM768 {pqcEnabled ? 'offered' : 'disabled (classical only)'}
+            </Text>
+          </View>
+          <Switch
+            value={pqcEnabled}
+            onValueChange={setPqcEnabled}
+            disabled={result.status === 'loading'}
+          />
+        </View>
+
+        <TouchableOpacity
+          style={[styles.button, result.status === 'loading' && styles.buttonDisabled]}
+          onPress={() => run(pqcEnabled)}
+          disabled={result.status === 'loading'}>
+          <Text style={styles.buttonText}>Re-run handshake</Text>
+        </TouchableOpacity>
+
+        <ResultCard pqcRequested={pqcEnabled} result={result} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 function ResultCard({
-  target,
+  pqcRequested,
   result,
 }: {
-  target: Target;
-  result: CardResult;
+  pqcRequested: boolean;
+  result: Result;
 }): React.JSX.Element {
-  const isPqc = result.status === 'ok' && result.kex === EXPECTED_PQC_GROUP;
+  const pqcNegotiated = result.status === 'ok' && isPostQuantum(result.kex);
 
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>{target.label}</Text>
-      <Text style={styles.cardUrl}>{target.url}</Text>
+      <Text style={styles.cardTitle}>Cloudflare /cdn-cgi/trace</Text>
+      <Text style={styles.cardUrl}>{TRACE_URL}</Text>
 
-      {result.status === 'idle' && (
-        <Text style={styles.muted}>queued…</Text>
-      )}
+      {result.status === 'idle' && <Text style={styles.muted}>idle</Text>}
 
       {result.status === 'loading' && (
         <View style={styles.spinner}>
@@ -134,12 +161,13 @@ function ResultCard({
 
       {result.status === 'ok' && (
         <>
-          <Text style={styles.label}>Negotiated KEX</Text>
+          <Text style={styles.label}>Negotiated KEX (server-reported)</Text>
           {result.kex === null ? (
             <>
-              <Text style={[styles.value, styles.kexUnknown]}>unknown</Text>
+              <Text style={[styles.value, styles.kexUnknown]}>not reported</Text>
               <Text style={styles.caption}>
-                Native URLSession handled the request (iOS 26+).
+                No `kex=` line in the trace body — endpoint may not be
+                Cloudflare-served.
               </Text>
             </>
           ) : (
@@ -147,15 +175,17 @@ function ResultCard({
               <Text
                 style={[
                   styles.value,
-                  isPqc ? styles.kexPqc : styles.kexClassical,
+                  pqcNegotiated ? styles.kexPqc : styles.kexClassical,
                 ]}>
                 {result.kex}
-                {isPqc ? '  ✓ post-quantum' : '  (classical)'}
+                {pqcNegotiated ? '  ✓ post-quantum' : '  (classical)'}
               </Text>
               <Text style={styles.caption}>
-                {isPqc
-                  ? 'Post-quantum hybrid handshake confirmed via the Rust core.'
-                  : 'Classical handshake — PQC was offered but the server did not select it.'}
+                {pqcRequested
+                  ? pqcNegotiated
+                    ? 'PQC offered and negotiated — confirmed by the edge.'
+                    : 'PQC offered but the edge selected classical (graceful downgrade).'
+                  : 'PQC disabled on the client — classical handshake as expected.'}
               </Text>
             </>
           )}
@@ -179,6 +209,27 @@ const styles = StyleSheet.create({
   scroll: {padding: 16, paddingTop: 24},
   appTitle: {color: '#e7eaf0', fontSize: 22, fontWeight: '600'},
   appSubtitle: {color: '#5d97f7', fontSize: 13, marginTop: 4, marginBottom: 18},
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#161a22',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+  },
+  toggleText: {flex: 1, paddingRight: 12},
+  toggleLabel: {color: '#e7eaf0', fontSize: 16, fontWeight: '600'},
+  toggleCaption: {color: '#7d8595', fontSize: 12, marginTop: 2},
+  button: {
+    backgroundColor: '#1f6feb',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  buttonDisabled: {opacity: 0.5},
+  buttonText: {color: '#ffffff', fontSize: 15, fontWeight: '600'},
   card: {
     backgroundColor: '#161a22',
     borderRadius: 14,
