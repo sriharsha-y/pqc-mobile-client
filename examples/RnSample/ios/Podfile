@@ -5,13 +5,17 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-# Floor the sample at iOS 13.0 explicitly to match PqcCore.podspec's
-# `s.platform = :ios, '13.0'` and the IPHONEOS_DEPLOYMENT_TARGET pin in
-# .github/workflows/release.yml. RN's `min_ios_version_supported` macro
-# tracks RN's own floor (currently 13.4) and could drift independently;
-# pinning here keeps the sample reproducible against the published Pod's
-# advertised minimum so a downward RN bump doesn't silently mismatch.
-platform :ios, '13.0'
+# The sample app must target React Native's own minimum (RN 0.76 =>
+# iOS 15.1); its core pods (hermes-engine, fmt, glog) declare a 15.1
+# floor, so pinning the app below that breaks the Hermes build with a
+# "'hermes/hermes.h' file not found" error. Use RN's macro so this
+# tracks the installed RN version automatically.
+#
+# This is independent of PqcCore.podspec's `s.platform = :ios, '13.0'`:
+# that is the LIBRARY's floor (it supports iOS 13.0+), which a 15.1 app
+# consumes without conflict. Don't conflate the library floor with the
+# sample app's deployment target.
+platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
 linkage = ENV['USE_FRAMEWORKS']

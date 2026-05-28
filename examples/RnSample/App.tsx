@@ -25,8 +25,10 @@
  * based on the `X-Pqc-Mode` request header this screen sets.
  *
  * iOS 26+ note: AppDelegate gates PqcURLProtocol off because Apple's
- * native URLSession already negotiates PQC, so on that path the toggle
- * has no effect and `kex` will reflect the OS handshake.
+ * native URLSession already negotiates PQC. On that path the Rust client
+ * is not in the request path and the toggle has no effect, so the UI
+ * disables the toggle and shows an explanatory banner; `kex` reflects the
+ * OS handshake.
  */
 
 import React, {useCallback, useEffect, useState} from 'react';
@@ -39,7 +41,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -72,6 +73,14 @@ function isPostQuantum(kex: string | null): boolean {
 export default function App(): React.JSX.Element {
   const [pqcEnabled, setPqcEnabled] = useState(true);
   const [result, setResult] = useState<Result>({status: 'idle'});
+
+  // iOS 26+ negotiates X25519MLKEM768 natively in URLSession, so
+  // AppDelegate.mm does NOT register PqcURLProtocol there — fetch() goes
+  // through the system stack and the X-Pqc-Mode header is ignored. The
+  // toggle is therefore inert on iOS 26+, so we disable it and explain.
+  const iosNativePqc =
+    Platform.OS === 'ios' &&
+    Number.parseInt(String(Platform.Version), 10) >= 26;
 
   const run = useCallback(async (enablePqc: boolean) => {
     setResult({status: 'loading'});
@@ -107,30 +116,45 @@ export default function App(): React.JSX.Element {
       <StatusBar barStyle="default" />
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.appTitle}>pqc-mobile-client</Text>
-        <Text style={styles.appSubtitle}>Platform: {Platform.OS}</Text>
+        <Text style={styles.appSubtitle}>
+          Platform: {Platform.OS}
+          {Platform.OS === 'ios' ? ` ${String(Platform.Version)}` : ''}
+        </Text>
+
+        {iosNativePqc && (
+          <View style={styles.banner}>
+            <Text style={styles.bannerText}>
+              iOS 26+ negotiates X25519MLKEM768 natively via URLSession, so the
+              Rust PQC client (PqcURLProtocol) is not installed on this OS. This
+              toggle has no effect here — the result below reflects the system
+              handshake.
+            </Text>
+          </View>
+        )}
 
         <View style={styles.toggleRow}>
           <View style={styles.toggleText}>
             <Text style={styles.toggleLabel}>Advertise post-quantum</Text>
             <Text style={styles.toggleCaption}>
-              X25519MLKEM768 {pqcEnabled ? 'offered' : 'disabled (classical only)'}
+              {iosNativePqc
+                ? 'Handled natively by iOS 26+ (toggle disabled)'
+                : `X25519MLKEM768 ${
+                    pqcEnabled ? 'offered' : 'disabled (classical only)'
+                  }`}
             </Text>
           </View>
           <Switch
-            value={pqcEnabled}
+            value={iosNativePqc || pqcEnabled}
             onValueChange={setPqcEnabled}
-            disabled={result.status === 'loading'}
+            disabled={iosNativePqc || result.status === 'loading'}
           />
         </View>
 
-        <TouchableOpacity
-          style={[styles.button, result.status === 'loading' && styles.buttonDisabled]}
-          onPress={() => run(pqcEnabled)}
-          disabled={result.status === 'loading'}>
-          <Text style={styles.buttonText}>Re-run handshake</Text>
-        </TouchableOpacity>
-
-        <ResultCard pqcRequested={pqcEnabled} result={result} />
+        <ResultCard
+          pqcRequested={pqcEnabled}
+          iosNativePqc={iosNativePqc}
+          result={result}
+        />
       </ScrollView>
     </SafeAreaView>
   );
@@ -138,9 +162,11 @@ export default function App(): React.JSX.Element {
 
 function ResultCard({
   pqcRequested,
+  iosNativePqc,
   result,
 }: {
   pqcRequested: boolean;
+  iosNativePqc: boolean;
   result: Result;
 }): React.JSX.Element {
   const pqcNegotiated = result.status === 'ok' && isPostQuantum(result.kex);
@@ -181,7 +207,9 @@ function ResultCard({
                 {pqcNegotiated ? '  ✓ post-quantum' : '  (classical)'}
               </Text>
               <Text style={styles.caption}>
-                {pqcRequested
+                {iosNativePqc
+                  ? 'Negotiated natively by iOS 26+ URLSession (Rust client not in the path).'
+                  : pqcRequested
                   ? pqcNegotiated
                     ? 'PQC offered and negotiated — confirmed by the edge.'
                     : 'PQC offered but the edge selected classical (graceful downgrade).'
@@ -221,15 +249,15 @@ const styles = StyleSheet.create({
   toggleText: {flex: 1, paddingRight: 12},
   toggleLabel: {color: '#e7eaf0', fontSize: 16, fontWeight: '600'},
   toggleCaption: {color: '#7d8595', fontSize: 12, marginTop: 2},
-  button: {
-    backgroundColor: '#1f6feb',
+  banner: {
+    backgroundColor: '#1d2535',
     borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginBottom: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: '#5d97f7',
   },
-  buttonDisabled: {opacity: 0.5},
-  buttonText: {color: '#ffffff', fontSize: 15, fontWeight: '600'},
+  bannerText: {color: '#aab6cf', fontSize: 12, lineHeight: 17},
   card: {
     backgroundColor: '#161a22',
     borderRadius: 14,
