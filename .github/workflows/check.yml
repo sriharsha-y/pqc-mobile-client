@@ -25,7 +25,7 @@ jobs:
     # macOS minutes count 10× against the GitHub free quota, and ios.yml
     # already exercises the macOS + aws-lc-sys + iOS-target toolchain.
     # Linux is enough here.
-    name: check (ubuntu)
+    name: check
     runs-on: ubuntu-latest
 
     steps:
