@@ -33,11 +33,9 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
         base
     });
 
-    // Clone the Arc — `builder_with_provider` consumes the provider by
-    // value, but the pinning branch below also needs a reference so
-    // `Verifier::with_provider` can share the same crypto stack
-    // (consistent FIPS posture + algorithm choice). Arc::clone is just
-    // an atomic refcount bump, not a deep copy.
+    // builder_with_provider consumes the provider, but the pinning branch
+    // also needs it to share the same crypto stack. Arc::clone is a
+    // refcount bump, not a deep copy.
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|_| PqcError::Tls)?;
@@ -46,19 +44,12 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
         // No pinning: just the platform verifier.
         builder.with_platform_verifier().with_no_client_auth()
     } else {
-        // Pinning enabled: wrap the platform verifier so the chain still
-        // validates against the system trust store, and additionally
-        // require that the leaf's SPKI hash matches a configured pin.
-        //
-        // The inner verifier MUST be configured with the same
-        // CryptoProvider rustls is using for the handshake. Calling
-        // `Verifier::new()` alone leaves the verifier reaching for
-        // rustls's process-default provider, which is unset in this
-        // crate (we never install one process-wide because we build
-        // configs by composition). The bare call's `get_provider`
-        // would then panic with "rustls default CryptoProvider not
-        // set" on the first signature verification.
-        // https://docs.rs/rustls-platform-verifier/0.5.3/rustls_platform_verifier/struct.Verifier.html#method.with_provider
+        // Wrap the platform verifier (chain still validates against the
+        // system store) and additionally require an SPKI pin match.
+        // The inner verifier MUST share rustls's CryptoProvider: a bare
+        // `Verifier::new()` reaches for the process-default provider,
+        // which we never install, and panics ("rustls default
+        // CryptoProvider not set") on the first signature check.
         let inner: Arc<dyn rustls::client::danger::ServerCertVerifier> =
             Arc::new(rustls_platform_verifier::Verifier::new().with_provider(provider.clone()));
         let pins = decode_pin_list(&cfg.pinned_cert_sha256)?;
@@ -70,16 +61,10 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
             .with_no_client_auth()
     };
 
-    // ALPN must be set explicitly. reqwest's `use_preconfigured_tls`
-    // does NOT inject ALPN protocols into a caller-supplied
-    // `ClientConfig` — its own docs are unambiguous:
-    //   "you'll need to set ALPN protocols yourself."
-    //   https://docs.rs/reqwest/0.12/reqwest/struct.ClientBuilder.html
-    //     #method.use_preconfigured_tls
-    // Without this, every handshake leaves alpn_protocols empty, the
-    // server picks (often HTTP/1.1), and the `http2` feature flag on
-    // the reqwest dep becomes a lie. We advertise h2 first per RFC
-    // 7540 §3.2 / RFC 7301 ordering convention.
+    // ALPN must be set explicitly: reqwest's use_preconfigured_tls does
+    // NOT inject it into a caller-supplied ClientConfig, so without this
+    // the server falls back to HTTP/1.1 and the http2 flag is a lie.
+    // h2 first per RFC 7301 ordering.
     let mut tls = tls;
     tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tls)

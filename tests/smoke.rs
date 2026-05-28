@@ -1,14 +1,7 @@
-//! Smoke test against Cloudflare's PQ research endpoint.
-//!
-//! Run with: `cargo test --release --test smoke -- --nocapture`
-//!
-//! Whether the PQ hybrid was actually negotiated is confirmed via the
-//! SERVER's report — Cloudflare's `/cdn-cgi/trace` returns a `kex=` line
-//! with the key exchange the edge negotiated for that connection. This
-//! is authoritative and per-connection, so the tests no longer depend on
-//! any client-side global state and can run in parallel.
-//!
-//! NOTE: requires network access. Skip in offline CI with `--skip network`.
+//! Smoke tests against Cloudflare's PQ research endpoint. Requires network.
+//! PQ negotiation is confirmed server-side via `/cdn-cgi/trace` (`kex=`),
+//! which is per-connection and authoritative, so tests run in parallel.
+//! Run: `cargo test --release --test smoke -- --nocapture`
 
 use pqc_client::{HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy};
 use std::collections::HashMap;
@@ -68,21 +61,16 @@ async fn pq_handshake_cloudflare() {
         kex, "X25519MLKEM768",
         "Cloudflare should negotiate X25519MLKEM768 when the client offers it"
     );
-    // Regression for M1: ALPN must be set so reqwest negotiates h2 with
-    // any HTTP/2-capable server. Without `tls.alpn_protocols`, the
-    // server falls back to HTTP/1.1 silently and our `http2(...)`
-    // feature flag becomes a lie.
+    // ALPN must be set so the server negotiates h2; without it the http2
+    // feature is silently a no-op.
     assert_eq!(
         resp.negotiated_protocol, "h2",
         "ALPN must select h2 against Cloudflare"
     );
 }
 
-/// Classical handshake: with PQC disabled on the CLIENT, it offers only
-/// classical groups, so the edge negotiates X25519 regardless of whether
-/// it supports PQC. This is deterministic and server-independent — we no
-/// longer depend on finding a server that happens to lack PQC support.
-/// Confirmed via the same server-authoritative `/cdn-cgi/trace` `kex=`.
+/// With PQC disabled the client offers only classical groups, so the edge
+/// negotiates X25519 — deterministic, confirmed via the same `kex=`.
 #[tokio::test]
 async fn classical_handshake_when_pq_disabled() {
     let mut cfg = default_test_config();
@@ -102,9 +90,7 @@ async fn classical_handshake_when_pq_disabled() {
     );
 }
 
-/// Pin failure: configure an obviously-wrong pin and assert the typed
-/// error variant. Validates the M5 typed downcast path and the
-/// pinning verifier's error propagation end-to-end.
+/// A bogus pin must surface the typed PinningFailure end-to-end.
 #[tokio::test]
 async fn pin_failure_surfaces_typed_error() {
     let mut cfg = default_test_config();
@@ -123,11 +109,8 @@ async fn pin_failure_surfaces_typed_error() {
     );
 }
 
-/// Trust verification: hit a host whose cert chain the platform
-/// verifier should reject (badssl.com's expired endpoint). Validates
-/// that PqcError::TrustVerification is what surfaces, not a generic
-/// Network or Tls error. badssl.com is documented as a stable test
-/// fixture — see https://badssl.com.
+/// An expired cert (badssl.com) must surface TrustVerification, not a
+/// generic Network/Tls error.
 #[tokio::test]
 async fn trust_failure_surfaces_typed_error() {
     let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
@@ -142,16 +125,9 @@ async fn trust_failure_surfaces_typed_error() {
     );
 }
 
-/// POST with a body: verifies the request-encoding path end-to-end —
-/// method, headers, and body bytes all survive the FFI boundary and
-/// land at the server as advertised. httpbin.org/post echoes the
-/// posted JSON under `json` (or `data` if the content-type is not
-/// application/json), so we can inspect the round-trip.
-///
-/// Why httpbin: documented stable echo service that supports POST,
-/// arbitrary headers, and HTTPS with a normally-trusted leaf cert.
-/// If httpbin.org is ever decommissioned, swap to postman-echo.com or
-/// stand up a local rustls server fixture.
+/// POST round-trip: method, headers, and body survive to the server.
+/// httpbin.org/post echoes the payload back. If it's ever gone, swap to
+/// postman-echo.com or a local rustls fixture.
 #[tokio::test]
 async fn post_body_round_trips() {
     let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
@@ -188,15 +164,8 @@ async fn post_body_round_trips() {
     );
 }
 
-/// Concurrent requests on a SINGLE PqcHttpClient: catches regressions
-/// where the client (or its underlying reqwest::Client / hyper pool)
-/// is not Send/Sync-safe across tokio tasks.
-///
-/// Why this matters at the FFI: the UniFFI-exposed `request` method
-/// is `async`, and consumers on iOS/Android routinely fan out parallel
-/// calls (image grids, prefetch waves). A non-Sync client would either
-/// panic under load or silently serialize requests — the latter is
-/// invisible in single-threaded tests but tanks throughput in prod.
+/// Many concurrent requests on one client — guards Send/Sync safety across
+/// tokio tasks, which consumers rely on when fanning out calls.
 #[tokio::test]
 async fn concurrent_requests_share_one_client() {
     use std::sync::Arc;
@@ -204,10 +173,7 @@ async fn concurrent_requests_share_one_client() {
     let client =
         Arc::new(PqcHttpClient::new(default_test_config()).expect("client should construct"));
 
-    // 8 = enough to exercise hyper's connection pool (default
-    // per-host pool size is small) and force at least one new
-    // connection beyond the first reused one. Small enough that
-    // Cloudflare's PQ research endpoint doesn't rate-limit us.
+    // Enough to exercise the connection pool without rate-limiting.
     const N: usize = 8;
 
     let handles: Vec<_> = (0..N)
@@ -224,10 +190,7 @@ async fn concurrent_requests_share_one_client() {
             .expect("task should not panic")
             .expect("request should succeed");
         assert!(resp.status < 500, "unexpected status: {}", resp.status);
-        // Liveness is the signal here: 8 tasks sharing one
-        // Arc<PqcHttpClient> all reach completion without panicking or
-        // deadlocking. (Per-request KEX confirmation belongs to the
-        // server-side `/cdn-cgi/trace` check, not a client global.)
+        // Liveness is the signal: all tasks complete without panic/deadlock.
         ok += 1;
     }
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");

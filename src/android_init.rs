@@ -1,37 +1,20 @@
-//! Android-only JNI entry point that hands the Android `Context` over to
-//! `rustls-platform-verifier`, which needs it to reach KeyStore +
-//! NetworkSecurityConfig at handshake time. Required exactly once per
-//! process, from `Application.onCreate`, BEFORE any `PqcHttpClient` is
-//! constructed.
+//! Android-only JNI entry point that hands the Android `Context` to
+//! `rustls-platform-verifier` (needed to reach KeyStore +
+//! NetworkSecurityConfig at handshake time). Must be called once per
+//! process from `Application.onCreate`, before any `PqcHttpClient`.
 //!
-//! Without this call, the first request throws
-//!   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
-//! at `io.github.sriharsha_y.pqc.PqcKt.uniffiCheckCallStatus(pqc.kt)`.
-//!
-//! Why JNI (not UniFFI): UniFFI can't pass a live `JNIEnv` / `JObject`
-//! through its FFI boundary — those are JVM-managed handles tied to the
-//! calling thread. `rustls-platform-verifier::android::init_hosted`
-//! *needs* exactly those handles to call back into the JVM. So we
-//! expose a `extern "system"` symbol that the JVM resolves via standard
-//! JNI lookup (`Java_<class>_<method>`), and Kotlin declares a matching
-//! `external fun` to call it.
+//! Why JNI, not UniFFI: UniFFI can't pass a live `JNIEnv`/`JObject`
+//! across its FFI boundary (they're thread-bound JVM handles), but the
+//! verifier needs exactly those to call back into the JVM. So we export
+//! an `extern "system"` symbol the JVM resolves by JNI name lookup.
 
 use jni::objects::{JClass, JObject};
 use jni::JNIEnv;
 
-/// JNI symbol name must mirror the Kotlin declaration exactly:
-///   `package io.github.sriharsha_y.pqc.android; object PqcAndroidInit {
-///        @JvmStatic private external fun nativeInit(ctx: Context)
-///    }`
-/// → `Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`.
+/// JNI symbol must mirror the Kotlin `external fun nativeInit` exactly.
 /// JNI mangling escapes the `_` in the `sriharsha_y` package segment as
-/// `_1` (a literal underscore in a Java name becomes `_1` in the symbol).
-/// Renaming the Kotlin side to `init` would clash with the public
-/// `init(ctx)` helper (the idempotency guard), so we keep `nativeInit` as
-/// the FFI entry point and `init` as the user-facing wrapper.
-///
-/// Returning `void` so a misbehaving init surfaces as a Java exception
-/// (init_hosted already throws on its own failures) rather than a
+/// `_1`, hence `..._sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`.
+/// Returns `void` so init failure surfaces as a Java exception, not a
 /// silent `false`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit<'local>(
@@ -39,28 +22,12 @@ pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_na
     _class: JClass<'local>,
     context: JObject<'local>,
 ) {
-    // init_with_env captures a global reference to the Application
-    // Context and a JavaVM handle. Idempotent via the crate's internal
-    // OnceCell; the Kotlin side ALSO double-checks, which is
-    // belt-and-suspenders.
-    //
-    // (We previously called `init_hosted`, which is deprecated in
-    // rustls-platform-verifier 0.5.x — functionally identical, but kept
-    // only for back-compat and slated for removal. See
-    //   https://docs.rs/rustls-platform-verifier/0.5.3/
-    //   rustls_platform_verifier/android/fn.init_hosted.html
-    // The migration target is `init_with_env`.)
+    // Captures a global ref to the Application Context + a JavaVM handle.
+    // Idempotent via the crate's internal OnceCell.
     if let Err(e) = rustls_platform_verifier::android::init_with_env(&mut env, context) {
-        // Bubble the failure up as a Java RuntimeException so the
-        // crash is loud + diagnosable in logcat. Swallowing it would
-        // just defer the same error to the first request, with a
-        // much less informative call site.
-        //
-        // If throw_new ITSELF fails we cannot signal the failure to the
-        // JVM the normal way, and returning would let the Kotlin wrapper
-        // mark itself initialized — turning a hard init failure into a
-        // silent broken state. Abort the VM instead so the failure can
-        // never be mistaken for success.
+        // Surface as a Java exception (loud in logcat). If throw_new
+        // itself fails, abort the VM — returning would let the Kotlin
+        // wrapper mark itself initialized, masking a hard init failure.
         if env
             .throw_new(
                 "java/lang/RuntimeException",

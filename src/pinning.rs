@@ -1,42 +1,20 @@
 //! SPKI public-key-pinning verifier.
 //!
-//! Wraps `rustls-platform-verifier` so the system trust chain validates
-//! first (CT, revocation, MDM-distributed enterprise roots all still
-//! apply), then enforces that the **leaf** certificate's SubjectPublicKeyInfo
-//! SHA-256 matches one of the configured pins.
+//! Wraps `rustls-platform-verifier`: the system trust chain validates first
+//! (CT, revocation, MDM roots all apply), then we require that at least one
+//! cert in the server-presented chain — leaf OR intermediate — has an SPKI
+//! whose SHA-256 matches a configured pin. Matches OkHttp's CertificatePinner,
+//! Apple NSPinnedDomains, Android NetworkSecurityConfig. Empty list disables
+//! pinning.
 //!
-//! Empty pin list disables pinning (verification falls through to the
-//! platform verifier alone).
+//! Two safeguards:
+//! 1. The leaf MUST parse — a chain whose end-entity we can't read is
+//!    rejected, so a malformed leaf can't be skipped for an intermediate match.
+//! 2. Pin the right thing: NEVER a public root (every cert it issues would
+//!    satisfy the pin). Pin the issuing intermediate (leaf rotates freely) or
+//!    the leaf plus a backup; always keep >= 2 pins (OWASP Pinning Cheat Sheet).
 //!
-//! ## What gets pinned: any certificate in the chain
-//!
-//! After the platform verifier validates the chain to a trusted root, we
-//! require that at least one certificate in the server-presented chain —
-//! the leaf OR any intermediate — has an SPKI whose SHA-256 matches a
-//! configured pin. This matches OkHttp's `CertificatePinner`, Apple's
-//! `NSPinnedDomains`, and Android's `NetworkSecurityConfig`, and lets you
-//! pin your issuing intermediate CA so the leaf can rotate freely under
-//! the same issuer without shipping an app update.
-//!
-//! Two safeguards keep this honest:
-//!
-//! 1. **The leaf MUST parse.** A chain whose end-entity cert we cannot
-//!    read is rejected outright, so a malformed leaf can never be
-//!    "skipped" in favour of an intermediate match. (Unparseable
-//!    intermediates simply can't match — they're ignored.)
-//!
-//! 2. **Pin the right thing.** NEVER pin a public *root* CA: every cert
-//!    that root issues would satisfy the pin, giving no protection beyond
-//!    the OS trust store. Pin your issuing **intermediate CA** (resilient:
-//!    the leaf rotates freely) OR the leaf plus a pre-deployed backup
-//!    leaf. Always configure **>= 2 pins** so a forced reissue can't brick
-//!    the app — see OWASP's Pinning Cheat Sheet.
-//!
-//! Pin format: base64-encoded SHA-256 of the DER-encoded SPKI (the
-//! same format used by HTTP Public Key Pinning RFC 7469 and by Cronet's
-//! `addPublicKeyPins`).
-//!
-//! How to compute a pin from a server cert:
+//! Pin format: base64 SHA-256 of the DER SPKI (RFC 7469). Compute with:
 //! ```sh
 //! openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
 //!   | openssl x509 -pubkey -noout \
@@ -92,13 +70,8 @@ impl ServerCertVerifier for PinningVerifier {
             return Ok(verified);
         }
 
-        // Chain-matching SPKI pinning. The platform verifier above has
-        // already validated the chain to a trusted root; we now narrow
-        // that to "contains a cert whose SPKI I pinned".
-        //
-        // The leaf MUST parse first: a chain whose end-entity cert we
-        // can't read is rejected outright, so a malformed leaf can never
-        // be skipped in favour of an intermediate match.
+        // Leaf MUST parse first, so a malformed end-entity can't be skipped
+        // in favour of an intermediate match.
         let leaf_hash = extract_spki_sha256(end_entity).ok_or_else(|| {
             rustls::Error::General(
                 "certificate pinning failure: leaf certificate SPKI could not be extracted"
@@ -106,9 +79,8 @@ impl ServerCertVerifier for PinningVerifier {
             )
         })?;
 
-        // Match a pin against the leaf OR any intermediate. Pinning the
-        // issuing intermediate CA is the rotation-resilient pattern;
-        // unparseable intermediates simply can't match and are ignored.
+        // Match the leaf OR any intermediate (unparseable intermediates
+        // just can't match).
         let matched = self.pins.contains(&leaf_hash)
             || intermediates
                 .iter()
@@ -147,12 +119,8 @@ impl ServerCertVerifier for PinningVerifier {
         self.inner.supported_verify_schemes()
     }
 
-    // RFC 7250 raw-public-key mode is opt-in client-side; today the
-    // platform verifier returns `false`. Delegating defensively so that
-    // if rustls-platform-verifier ever flips this for a future Apple /
-    // Android trust-store API, we don't silently downgrade the signal
-    // to `false` and confuse rustls's chain-parsing branch.
-    // https://docs.rs/rustls/0.23.40/rustls/client/danger/trait.ServerCertVerifier.html#method.requires_raw_public_keys
+    // Delegate so we track the inner verifier if it ever enables RFC 7250
+    // raw-public-key mode, instead of hardcoding false.
     fn requires_raw_public_keys(&self) -> bool {
         self.inner.requires_raw_public_keys()
     }
@@ -169,16 +137,10 @@ pub fn extract_spki_sha256(cert: &CertificateDer<'_>) -> Option<SpkiHash> {
     digest.as_ref().try_into().ok()
 }
 
-/// Decode a list of base64-encoded SPKI SHA-256 strings into raw 32-byte hashes.
-/// Returns `PqcError::InvalidRequest` if any entry is malformed.
-///
-/// Accepts BOTH standard (`+`/`/`) and URL-safe (`-`/`_`) base64
-/// alphabets, with or without padding. The UDL's `pinned_cert_sha256`
-/// doc-comment promises both, and the two alphabets show up in the
-/// wild for the same use case: openssl emits standard; JWT-adjacent
-/// tooling and Android Keystore exports emit URL-safe. Refusing one
-/// or the other would be a silent footgun — the pin just "never
-/// matches" with no useful error.
+/// Decode base64 SPKI SHA-256 strings to raw 32-byte hashes;
+/// `PqcError::InvalidRequest` on any malformed entry. Accepts standard AND
+/// URL-safe alphabets (padded or not) — openssl emits one, Keystore exports
+/// the other; refusing either would be a silent "never matches".
 pub fn decode_pin_list(encoded: &[String]) -> Result<Vec<SpkiHash>, PqcError> {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     use base64::Engine;
@@ -186,9 +148,7 @@ pub fn decode_pin_list(encoded: &[String]) -> Result<Vec<SpkiHash>, PqcError> {
     encoded
         .iter()
         .map(|s| {
-            // Try alphabets in order; first to decode wins. The wrong
-            // alphabet on a given string fails fast with an
-            // InvalidByte error, so the fall-through is cheap.
+            // First alphabet to decode wins.
             let bytes = STANDARD
                 .decode(s)
                 .or_else(|_| STANDARD_NO_PAD.decode(s))
@@ -273,10 +233,8 @@ mod tests {
 
     #[test]
     fn intermediate_pin_match_accepts() {
-        // Chain-matching: pinning the intermediate CA accepts a chain
-        // whose leaf differs, as long as the pinned intermediate is
-        // present. This is the rotation-resilient pattern (the leaf can
-        // rotate freely under the same issuer).
+        // Pinning the intermediate accepts a chain with a differing leaf —
+        // the rotation-resilient pattern.
         let leaf = make_test_cert();
         let intermediate = make_test_cert();
         let int_hash = extract_spki_sha256(&intermediate).unwrap();
@@ -290,8 +248,7 @@ mod tests {
 
     #[test]
     fn pin_absent_from_chain_rejects() {
-        // A pin matching neither the leaf nor any intermediate must be
-        // rejected — the core pinning guarantee.
+        // The core guarantee: a pin matching nothing in the chain rejects.
         let leaf = make_test_cert();
         let intermediate = make_test_cert();
         let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![[7u8; 32]]);
@@ -304,10 +261,7 @@ mod tests {
 
     #[test]
     fn unparseable_leaf_rejects_even_if_intermediate_matches() {
-        // The leaf MUST parse. Even when a pinned intermediate IS present,
-        // a chain whose end-entity cert we can't read is rejected — a
-        // malformed leaf can never be skipped in favour of an intermediate
-        // match.
+        // Even with a pinned intermediate present, an unreadable leaf rejects.
         let garbage = CertificateDer::from(vec![0u8; 16]);
         let intermediate = make_test_cert();
         let int_hash = extract_spki_sha256(&intermediate).unwrap();
@@ -333,8 +287,7 @@ mod tests {
 
     #[test]
     fn rotation_pin_set_accepts_either_leaf() {
-        // Backwards-compatible rotation: pin both old and new leaf SPKIs;
-        // either should accept.
+        // Pin both old and new leaf SPKIs; either accepts.
         let leaf_a = make_test_cert();
         let leaf_b = make_test_cert();
         let hash_a = extract_spki_sha256(&leaf_a).unwrap();
@@ -414,10 +367,8 @@ mod tests {
     fn decode_pin_list_accepts_url_safe_alphabet() {
         use base64::engine::general_purpose::URL_SAFE;
         use base64::Engine;
-        // Construct a 32-byte payload whose base64 encoding actually
-        // contains the URL-safe-distinctive characters '-' and '_'
-        // (which standard base64 would emit as '+' and '/'). The byte
-        // sequence 0xFB 0xFF picks up both in adjacent positions.
+        // 0xFB 0xFF encodes to base64 containing both '-' and '_', so this
+        // actually exercises the URL-safe alphabet.
         let raw: [u8; 32] = [0xFB, 0xFF]
             .iter()
             .cycle()
