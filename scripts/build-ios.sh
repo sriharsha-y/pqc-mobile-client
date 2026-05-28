@@ -40,9 +40,8 @@ lipo -create \
     -output target/ios-sim/libpqc_client.a
 
 echo "==> Generating Swift bindings (via --library mode)"
-# --library (not --udl) so bindgen sees the proc-macro-exported `request`
-# method too. It reads a host-built dylib (--features cli enables the
-# uniffi-bindgen binary).
+# --library reads the UniFFI metadata (all proc-macro — no .udl) from a
+# host-built dylib (--features cli enables the uniffi-bindgen binary).
 cargo build --release --features cli
 HOST_DYLIB="target/release/libpqc_client.dylib"
 if [ ! -f "$HOST_DYLIB" ]; then

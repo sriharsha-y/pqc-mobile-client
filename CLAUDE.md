@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pqc_client` is a Rust library that exposes a Post-Quantum TLS HTTPS client (X25519MLKEM768 hybrid, IANA `0x11EC`) to iOS 13.0+ and Android API 24+ via **UniFFI**. The floor is set by `rustls-platform-verifier` 0.5: on Android the AAR's `minSdk` is 22 (full revocation checking requires API ≥ 24, hence our 24 floor); on iOS the verifier uses `SecTrustEvaluateWithError` (iOS 12+), and we pin 13.0 for Swift/UniFFI tooling headroom. The same Rust core ships to six consumers (native iOS/Android, RN iOS/Android, with OkHttp/URLSession or direct API patterns) — only the call-site glue differs.
 
-The crate compiles to `cdylib` + `staticlib` + `lib`. There is also a host-only `uniffi-bindgen` binary used during the build to generate Kotlin/Swift bindings from `src/pqc.udl`.
+The crate compiles to `cdylib` + `staticlib` + `lib`. There is also a host-only `uniffi-bindgen` binary used during the build to generate Kotlin/Swift bindings from the crate's proc-macro definitions (read via `--library` mode from the compiled dylib — there is no `.udl` file).
 
 ## Common commands
 
@@ -49,9 +49,9 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 
 ## Source layout
 
-- `src/lib.rs` — module wiring + `uniffi::include_scaffolding!("pqc")`.
+- `src/lib.rs` — module wiring + `uniffi::setup_scaffolding!("pqc")`.
 - `src/android_init.rs` — JNI bridge (`Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`; the `_1` is JNI escaping for the `_` in the `sriharsha_y` package segment) that hands the Android `Application` context to `rustls-platform-verifier`. iOS has no equivalent (Apple's `Security` framework is process-wide).
-- `src/pqc.udl` — UniFFI interface; **this is the source of truth for the Kotlin/Swift API surface**. Changes here regenerate bindings.
+- The UniFFI API surface is defined **in Rust via proc-macros** (no `.udl` file): `#[derive(uniffi::Record)]` on the config/request/response types, `#[derive(uniffi::Enum)]` on `HttpMethod`/`RedirectPolicy`, `#[derive(uniffi::Error)]` + `#[uniffi(flat_error)]` on `PqcError`, and `#[derive(uniffi::Object)]` + `#[uniffi::export]` (with `#[uniffi::constructor]` on `new`, `async_runtime = "tokio"` on `request`) on `PqcHttpClient`. The Rust types are the source of truth for the Kotlin/Swift bindings. **NOTE: `PqcError` MUST keep `#[uniffi(flat_error)]`** — without it the generated error loses its `message` field (a silent breaking change for consumers).
 - `src/client.rs` — `PqcHttpClient`, the reqwest wrapper.
 - `src/tls.rs` — rustls + `rustls-post-quantum` + `rustls-platform-verifier` wiring; this is where the PQC group list is installed.
 - `src/pinning.rs` — SPKI SHA-256 cert pinning layered on top of platform verifier.

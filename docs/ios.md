@@ -313,7 +313,7 @@ Bundling Rust crypto promotes the app from "uses-OS-encryption-only" (exempt) to
 
 ## 9. Verification
 
-Debug-build sanity check. `HttpResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global — see the `HttpResponse` doc in `src/pqc.udl`). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
+Debug-build sanity check. `HttpResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global — see the `HttpResponse` doc in `src/types.rs`). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
 
 ```swift
 Task {

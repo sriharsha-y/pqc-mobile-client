@@ -250,7 +250,7 @@ Ship as an App Bundle so each device only downloads its ABI's `.so`. `arm64-v8a`
 
 ## 9. Verification
 
-Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `HttpResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global (see the `HttpResponse` doc in `src/pqc.udl`):
+Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `HttpResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global (see the `HttpResponse` doc in `src/types.rs`):
 
 ```kotlin
 val resp = pqc.request(HttpRequest(

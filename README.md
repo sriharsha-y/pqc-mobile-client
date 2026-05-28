@@ -61,10 +61,8 @@ The Rust core, Kotlin bindings, and Swift bindings are **identical** across all 
 pqc-mobile-client/
 ├── Cargo.toml              Rust crate manifest
 ├── rust-toolchain.toml     Pinned Rust toolchain + cross-compile targets
-├── build.rs                UniFFI scaffolding generation
 ├── src/
-│   ├── lib.rs              UniFFI entry point
-│   ├── pqc.udl             UniFFI interface (generates Kotlin + Swift bindings)
+│   ├── lib.rs              UniFFI entry point (proc-macro scaffolding)
 │   ├── client.rs           PqcHttpClient implementation (wraps reqwest)
 │   ├── config.rs           PqcConfig + RedirectPolicy
 │   ├── tls.rs              rustls + PQC + platform-verifier wiring
@@ -142,7 +140,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | Timeouts (connect / total) | ✅ `connectTimeoutMs` separated from `defaultTimeoutMs` so connect can fail fast on cell handover |
 | Cancellation | ✅ Via UniFFI async + tokio |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
-| ALPN reporting on `HttpResponse` | ✅ `negotiatedProtocol` (per-request "h2"/"http/1.1"). The negotiated KEX **group** is intentionally not surfaced — it's a per-connection property the client can only read via a racy global; confirm PQC via the server's `/cdn-cgi/trace` `kex=` instead (see `src/pqc.udl`) |
+| ALPN reporting on `HttpResponse` | ✅ `negotiatedProtocol` (per-request "h2"/"http/1.1"). The negotiated KEX **group** is intentionally not surfaced — it's a per-connection property the client can only read via a racy global; confirm PQC via the server's `/cdn-cgi/trace` `kex=` instead (see `HttpResponse` in `src/types.rs`) |
 | Android GMS + non-GMS devices | ✅ |
 | iOS 13 – 18 | ✅ |
 | iOS 26+ | ✅ (skip via `#available` and let native URLSession negotiate PQC) |
@@ -168,7 +166,7 @@ No manual tagging required. The `CHANGELOG.md` lives in-repo and is maintained a
 | `x509-parser` | 0.16 | Extract SPKI bytes from server cert for pinning |
 | `base64` | 0.22 | Decode user-supplied pin hashes |
 | `tokio` | 1 | Async runtime |
-| `uniffi` | 0.29 | Generates Kotlin + Swift bindings from `src/pqc.udl` |
+| `uniffi` | 0.29 | Generates Kotlin + Swift bindings from the crate's proc-macro definitions |
 
 ## Status
 
