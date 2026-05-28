@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.2...v0.5.3) (2026-05-28)
+
+
+### Miscellaneous Chores
+
+* cut 0.5.3 to publish the UDL-&gt;proc-macro migration ([b27b519](https://github.com/sriharsha-y/pqc-mobile-client/commit/b27b519d5b0c0ce4126aa7dabb4bdff73ac0b4bb))
+
 ## [0.5.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.1...v0.5.2) (2026-05-28)
 
 
