@@ -2,6 +2,8 @@
   <img src="docs/assets/banner.png" alt="pqc-mobile-client — Post-Quantum TLS HTTPS client for iOS, Android, and React Native" width="100%">
 </p>
 
+# PQC Mobile Client
+
 [![check](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/check.yml)
 [![android](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/android.yml)
 [![ios](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml/badge.svg)](https://github.com/sriharsha-y/pqc-mobile-client/actions/workflows/ios.yml)
