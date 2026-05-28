@@ -64,6 +64,15 @@ cargo run --release --features cli --bin uniffi-bindgen -- generate \
     --out-dir generated/swift \
     --library "$HOST_DYLIB"
 
+# Fail-fast if bindgen silently wrote nothing (it exits 0 on an empty
+# interface). No strip override is needed here, unlike build-android.sh:
+# this path is macOS-only and macOS strip keeps the UNIFFI_META symbols
+# bindgen reads (mozilla/uniffi-rs#2520 only bites Linux).
+if [ ! -s generated/swift/pqc.swift ]; then
+    echo "::error::uniffi-bindgen produced no Swift binding (generated/swift/pqc.swift missing or empty)."
+    exit 1
+fi
+
 # UniFFI emits {pqc.swift, pqcFFI.h, pqcFFI.modulemap}.
 # The XCFramework needs the .h + a `module.modulemap` inside its Headers/
 # directory of each slice. We rename pqcFFI.modulemap to module.modulemap
