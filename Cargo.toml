@@ -43,7 +43,7 @@ cache = [
     "dep:reqwest-middleware",
     "dep:cacache",
     "dep:moka",
-    "dep:bincode",
+    "dep:postcard",
     "dep:serde",
     "dep:async-trait",
 ]
@@ -101,7 +101,9 @@ http-cache-semantics = { version = "2.1", features = ["serde"], optional = true 
 reqwest-middleware = { version = "0.4", optional = true }
 cacache = { version = "13", default-features = false, features = ["tokio-runtime"], optional = true }
 moka = { version = "0.12", features = ["future"], optional = true }
-bincode = { version = "1", optional = true }
+# Compact serde serializer for cache records. postcard (maintained) rather than
+# bincode 1.x, which RUSTSEC-2025-0141 flags unmaintained (no patched version).
+postcard = { version = "1", default-features = false, features = ["use-std"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 async-trait = { version = "0.1", optional = true }
 

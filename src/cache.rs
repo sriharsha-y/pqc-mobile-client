@@ -35,8 +35,9 @@ const DEFAULT_MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 #[cfg(target_os = "ios")]
 const DEFAULT_MEM_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The persisted cache record. Same `{ response, policy }` shape the bundled
-/// http-cache managers use, so the on-disk encoding stays conventional.
+/// The persisted cache record: the response plus the RFC policy needed to
+/// revalidate it. Serialized with postcard (compact serde binary). The on-disk
+/// format is private to this manager, so it need not match anything else.
 #[derive(Serialize, Deserialize)]
 struct Store {
     response: HttpResponse,
@@ -168,7 +169,7 @@ impl CacheManager for PqcCacheManager {
         // Memory tier first (iOS).
         if let Some(mem) = &self.mem {
             if let Some(bytes) = mem.get(cache_key).await {
-                if let Ok(store) = bincode::deserialize::<Store>(&bytes) {
+                if let Ok(store) = postcard::from_bytes::<Store>(&bytes) {
                     return Ok(Some((store.response, store.policy)));
                 }
             }
@@ -177,7 +178,7 @@ impl CacheManager for PqcCacheManager {
         // error, so a corrupt or absent entry can't break the request.
         if let Some(disk) = &self.disk {
             if let Ok(bytes) = cacache::read(&disk.path, cache_key).await {
-                let store: Store = match bincode::deserialize(&bytes) {
+                let store: Store = match postcard::from_bytes(&bytes) {
                     Ok(s) => s,
                     Err(_) => return Ok(None),
                 };
@@ -201,7 +202,7 @@ impl CacheManager for PqcCacheManager {
             policy,
         };
         // A serialization failure must not fail the request — just don't cache.
-        let bytes = match bincode::serialize(&store) {
+        let bytes = match postcard::to_allocvec(&store) {
             Ok(b) => b,
             Err(_) => return Ok(response),
         };
