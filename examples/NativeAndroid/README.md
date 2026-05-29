@@ -7,15 +7,13 @@ from the server's `/cdn-cgi/trace` report.
 
 One screen — a post-quantum toggle and a live result card, styled to match the
 [React Native sample](../RnSample). The toggle drives `enablePostQuantum`, so
-flipping it off makes the edge report `kex=X25519` (classical):
+flipping it off makes the edge report `kex=X25519` (classical). The result card
+shows the server-reported KEX (green = `X25519MLKEM768`, amber = classical),
+the negotiated ALPN, and the HTTP status:
 
-```
-status = 200
-alpn   = h2
-kex    = X25519MLKEM768
-
-✅ Post-quantum hybrid negotiated.
-```
+<p align="center">
+  <img src="screenshot.png" alt="PQC Native Android sample showing kex=X25519MLKEM768" width="300">
+</p>
 
 ## How it consumes the library
 
@@ -82,7 +80,7 @@ NativeAndroid/
     └── src/main/
         ├── AndroidManifest.xml       # INTERNET permission + SampleApplication
         ├── java/.../SampleApplication.kt   # calls PqcAndroidInit.init(this)
-        └── java/.../MainActivity.kt        # the button + PQC verification
+        └── java/.../MainActivity.kt        # the toggle + result card + PQC call
 ```
 
 See [`docs/android.md`](../../docs/android.md) for the production integration
