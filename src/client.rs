@@ -183,11 +183,16 @@ impl PqcHttpClient {
         let timeout_ms = req
             .timeout_ms
             .or(self.default_timeout.map(|d| d.as_millis() as u64));
+        // Move the body out once rather than cloning it: each match arm below
+        // consumes it, but the arms are mutually exclusive so the borrow
+        // checker allows the move. Cloning here would copy the entire upload
+        // payload on every request, including the default (non-cache) path.
+        let body = req.body;
 
         // `reqwest::RequestBuilder` and `reqwest_middleware::RequestBuilder`
         // share the same header/body/timeout/send surface, so one macro fills
-        // both backends without drift. (Moving `method` in each match arm is
-        // fine — the arms are mutually exclusive.)
+        // both backends without drift. (`method`/`body` are moved in each match
+        // arm — fine, the arms are mutually exclusive.)
         macro_rules! build_request {
             ($rb:expr) => {{
                 let mut b = $rb;
@@ -200,8 +205,8 @@ impl PqcHttpClient {
                         b = b.header(name.clone(), value);
                     }
                 }
-                if let Some(ref body) = req.body {
-                    b = b.body(body.clone());
+                if let Some(body) = body {
+                    b = b.body(body);
                 }
                 if let Some(t) = timeout_ms {
                     b = b.timeout(Duration::from_millis(t));
@@ -306,10 +311,6 @@ impl PqcHttpClient {
     }
 }
 
-/// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
-/// from a pinning/trust/TLS failure (don't retry). Pass 1 downcasts to
-/// `&rustls::Error` (authoritative, no string fragility); pass 2 is a
-/// substring fallback for our pinning marker carried as a rustls string.
 /// Map a `reqwest_middleware::Error` (the cached backend's send error) to a
 /// `PqcError`. Transport/TLS failures arrive as `Reqwest` and reuse the same
 /// classifier; `Middleware` is a cache-layer failure — not transport — so it
@@ -323,6 +324,10 @@ fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
     }
 }
 
+/// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
+/// from a pinning/trust/TLS failure (don't retry). Pass 1 downcasts to
+/// `&rustls::Error` (authoritative, no string fragility); pass 2 is a
+/// substring fallback for our pinning marker carried as a rustls string.
 fn map_reqwest_err(e: reqwest::Error) -> PqcError {
     if e.is_timeout() {
         return PqcError::Timeout;

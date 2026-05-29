@@ -1,27 +1,21 @@
 //! Opt-in RFC 9111 HTTP response cache (the `cache` cargo feature).
 //!
-//! The RFC semantics — freshness, conditional revalidation, `Vary`, age,
-//! heuristics, authenticated-response rules — are owned by the proven
-//! `http-cache` / `http-cache-semantics` stack (the same engine OkHttp- and
-//! browser-class caches rely on). Cacheability is therefore decided by request
-//! method + response status + cache headers, **never** by file type, exactly
-//! like the platform caches (Android OkHttp `Cache`, iOS `URLCache`).
+//! RFC semantics (freshness, revalidation, `Vary`, auth rules) come from the
+//! `http-cache` / `http-cache-semantics` stack, so cacheability is decided by
+//! method + status + headers, never by file type — like OkHttp `Cache` /
+//! `URLCache`. See docs/{android,ios}.md for the consumer-facing narrative.
 //!
-//! What this module adds is the storage backend the bundled managers don't
-//! give us: [`PqcCacheManager`] is a **persistent, byte-bounded** disk tier
-//! (cacache) — like OkHttp's `Cache(dir, maxSize)` and `URLCache`'s disk store
-//! — optionally fronted by an **in-memory** tier (moka) on iOS to mirror
-//! `URLCache`'s memory+disk composite. It is configured as a *private* cache
-//! (`shared = false`) by the client.
+//! This module supplies the storage the bundled managers lack: [`PqcCacheManager`]
+//! is a private (`shared = false`), byte-bounded `cacache` disk tier, fronted by
+//! a `moka` in-memory tier on iOS (mirroring `URLCache`'s mem+disk; Android is
+//! disk-only like OkHttp).
 //!
-//! Two deliberate, documented divergences from the native LRU:
-//!   * disk eviction is by **insertion time** (cacache exposes no access
-//!     time), an approximation of LRU; the iOS memory tier is true LRU.
-//!   * `max_body_bytes` (the decompression-bomb cap) is **not** applied to the
-//!     middleware's internal fetch of a cacheable GET/HEAD — matching OkHttp,
-//!     which has no such cap (iOS's URLSession guard never applied to our
-//!     reqwest path). The client still caps the body it hands back, and this
-//!     manager refuses to *store* entries larger than the disk budget.
+//! Two intentional divergences from a strict native LRU: disk eviction is by
+//! insertion time, not access time (cacache exposes no access time; the iOS
+//! memory tier is true LRU); and `max_body_bytes` does not bound the
+//! middleware's internal buffering of a cacheable GET/HEAD (matches OkHttp,
+//! which has no such cap — the client still caps the body it returns and the
+//! manager refuses to *store* entries larger than the disk budget).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,8 +131,11 @@ impl PqcCacheManager {
                 }
                 if cacache::remove_sync(&path, &m.key).is_ok() {
                     // Reclaim the content blob too; remove_sync only drops the
-                    // index entry. Bodies are unique per URL, so the blob is
-                    // not shared in practice.
+                    // index entry. cacache dedups content by hash, so in the
+                    // rare case two keys share a blob (e.g. distinct URLs that
+                    // redirect to the same canonical body) this invalidates the
+                    // co-referencing entry — a safe degradation (its next read
+                    // misses and refetches), not corruption.
                     let _ = cacache::remove_hash_sync(&path, &m.integrity);
                     total = total.saturating_sub(m.size as u64);
                 }
@@ -242,7 +239,21 @@ impl CacheManager for PqcCacheManager {
             mem.invalidate(cache_key).await;
         }
         if let Some(disk) = &self.disk {
+            // Reclaim the content blob, not just the index entry — otherwise
+            // the blob orphans (invisible to size()/eviction) and disk usage
+            // creeps past max_cache_bytes. http-cache calls delete() on every
+            // non-cacheable request that has a matching cached GET (RFC
+            // invalidation), so this happens routinely. Same rare shared-blob
+            // caveat as eviction applies.
+            let sri = cacache::metadata(&disk.path, cache_key)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| m.integrity);
             let _ = cacache::remove(&disk.path, cache_key).await;
+            if let Some(sri) = sri {
+                let _ = cacache::remove_hash(&disk.path, &sri).await;
+            }
         }
         Ok(())
     }
@@ -371,14 +382,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_removes_entry() {
+    async fn delete_removes_entry_and_reclaims_content() {
         let dir = tmp_dir();
         let m = disk_mgr(&dir, 1 << 20);
-        m.put("k1".into(), resp(b"v".to_vec()), fresh_policy())
+        m.put("k1".into(), resp(vec![7u8; 4096]), fresh_policy())
             .await
             .unwrap();
+        assert!(m.size().await > 0);
         m.delete("k1").await.unwrap();
         assert!(m.get("k1").await.unwrap().is_none());
+        // delete() must reclaim the content blob, not just the index entry —
+        // otherwise the blob orphans and disk creeps past max_cache_bytes.
+        assert_eq!(
+            m.size().await,
+            0,
+            "delete() should reclaim the content blob"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
