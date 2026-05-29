@@ -51,7 +51,11 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-post-quantum = "0.2"
 rustls-platform-verifier = "0.5"
 
-# FIPS-validated crypto provider (ML-KEM, SHA-256 for SPKI hashing)
+# Crypto provider (ML-KEM, SHA-256 for SPKI hashing). aws-lc-rs is built on
+# AWS-LC, which is FIPS-capable via the crate's "fips" feature (the validated
+# AWS-LC-FIPS module). This build intentionally uses the standard, non-FIPS
+# "aws-lc-sys" configuration — enabling "fips" requires a frozen validated
+# source rev with a narrower platform matrix (not all Android/iOS targets).
 aws-lc-rs = { version = "1.13", default-features = false, features = ["aws-lc-sys"] }
 
 # Cert parsing for SPKI extraction (cert pinning)

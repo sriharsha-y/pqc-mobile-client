@@ -32,7 +32,7 @@ Reports will be acknowledged within **5 working days**. An initial assessment (a
 
 - Vulnerabilities in upstream crates (`reqwest`, `rustls`, `rustls-post-quantum`, `aws-lc-rs`, etc.) should be reported to those projects directly. If a known upstream advisory affects this crate, please open a normal issue or PR pinning a fixed version.
 - Vulnerabilities in the consumer app's wiring of the library are the consumer's responsibility, not this library's, unless caused by missing/incorrect guidance in the integration docs.
-- Theoretical attacks against the underlying primitives (X25519, ML-KEM-768, AES-GCM, etc.). The crate uses standard FIPS-validated implementations via `aws-lc-rs`; cryptographic primitive analysis belongs upstream.
+- Theoretical attacks against the underlying primitives (X25519, ML-KEM-768, AES-GCM, etc.). The crate uses standard, well-reviewed implementations via `aws-lc-rs` (built on AWS-LC, which is FIPS-capable via its `fips` feature; this build uses the non-FIPS configuration); cryptographic primitive analysis belongs upstream.
 
 ## Disclosure policy
 

@@ -22,7 +22,7 @@ Akamai, Cloudflare, and AWS edges already negotiate hybrid PQC TLS (`X25519MLKEM
 - **Android Conscrypt** — `X25519MLKEM768` only landed upstream as a non-default, opt-in named group in `2.6-alpha` (May 2026); no stable Conscrypt release ships it, it is off by default (only `X25519`/`P-256`/`P-384` are default), and reaching it requires bundling the standalone library and calling `SSLParameters.setNamedGroups`. The updatable *system* Conscrypt module that backs `javax.net.ssl` lags further behind, with no committed default-on date.
 - **Cronet** — its Chromium net stack does contain `X25519MLKEM768` (the `cronet-embedded` artifact was revived at Chrome 141/143 in late-2025/early-2026, so it is no longer frozen), but `CronetEngine.Builder` exposes **no public API for TLS group selection**, the only lever is the unstable `setExperimentalOptions` JSON, and PQC is not confirmed on-by-default in the embedded build. The reliably PQC-capable path remains GMS-delivered Cronet, which excludes non-GMS devices.
 
-This crate is a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability — with PQC on by default and no dependence on Google Play Services. _(Conscrypt/Cronet landscape verified 2026-05; both are moving fast, so re-check before relying on these specifics.)_
+This crate is a **unified, single-codebase** alternative that works on every supported OS version and on every Android device regardless of GMS availability — with PQC on by default, no dependence on Google Play Services, and built on FIPS-capable crypto (`aws-lc-rs` / AWS-LC, validatable via its `fips` feature). _(Conscrypt/Cronet landscape verified 2026-05; both are moving fast, so re-check before relying on these specifics.)_
 
 ## Install
 
@@ -132,7 +132,7 @@ The same Rust core ships to every consumer; only the integration glue at the cal
    │  pqc_client (this crate)                  │
    │  reqwest ─ hyper ─ rustls                 │
    │  rustls-post-quantum (X25519MLKEM768)     │
-   │  aws-lc-rs (FIPS 140-3)                   │
+   │  aws-lc-rs (FIPS-capable)                 │
    │  rustls-platform-verifier                 │
    │  tokio                                     │
    └─────────────────────────────────────────┘
@@ -197,7 +197,7 @@ Automated by [release-please](https://github.com/googleapis/release-please) from
 | `rustls` | Pure-Rust TLS 1.3 stack |
 | `rustls-post-quantum` | Adds `X25519MLKEM768` to the offered group list |
 | `rustls-platform-verifier` | Defers cert validation to the OS trust store |
-| `aws-lc-rs` | FIPS 140-3 validated crypto (also SPKI SHA-256 for pinning) |
+| `aws-lc-rs` | Crypto via AWS-LC; FIPS-capable (`fips` feature), non-FIPS in this build (also SPKI SHA-256 for pinning) |
 | `x509-parser` | Extract SPKI bytes from the server cert for pinning |
 | `tokio` | Async runtime |
 | `uniffi` | Generates the Kotlin + Swift bindings |
