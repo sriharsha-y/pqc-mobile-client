@@ -121,6 +121,7 @@ tokio = { version = "1", features = ["full"] }
 env_logger = "0.11"
 # Self-signed certs for pinning unit tests
 rcgen = "0.13"
+http = "1.4.1"
 
 # Release profile tuned for mobile binary size.
 #

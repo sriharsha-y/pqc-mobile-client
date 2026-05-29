@@ -273,3 +273,165 @@ pub fn build_cached_client(
         }))
         .build()
 }
+
+#[cfg(test)]
+mod tests {
+    //! Cover the storage layer we own (the disk tier — `mem` is `None` off
+    //! iOS, so host tests exercise the Android-equivalent path). RFC 9111
+    //! semantics are the upstream `http-cache-semantics` crate's concern.
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A unique, freshly-empty temp dir for one test.
+    fn tmp_dir() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("pqc-cache-test-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn disk_mgr(dir: &Path, max_bytes: u64) -> PqcCacheManager {
+        PqcCacheManager {
+            disk: Some(DiskTier {
+                path: dir.to_path_buf(),
+                max_bytes,
+            }),
+            mem: None,
+        }
+    }
+
+    /// A storable policy (`max-age=60`, status 200) for a GET.
+    fn fresh_policy() -> CachePolicy {
+        let req = http::Request::get("https://example.com/x")
+            .body(())
+            .unwrap();
+        let res = http::Response::builder()
+            .status(200)
+            .header("cache-control", "max-age=60")
+            .body(())
+            .unwrap();
+        CachePolicy::new(&req, &res)
+    }
+
+    fn resp(body: Vec<u8>) -> HttpResponse {
+        HttpResponse {
+            body,
+            headers: HashMap::new(),
+            status: 200,
+            url: "https://example.com/x".parse().unwrap(),
+            version: http_cache::HttpVersion::Http11,
+        }
+    }
+
+    #[tokio::test]
+    async fn put_then_get_roundtrips() {
+        let dir = tmp_dir();
+        let m = disk_mgr(&dir, 1 << 20);
+        m.put("k1".into(), resp(b"hello".to_vec()), fresh_policy())
+            .await
+            .unwrap();
+        let got = m.get("k1").await.unwrap();
+        assert!(got.is_some(), "stored entry should be retrievable");
+        assert_eq!(got.unwrap().0.body, b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn size_grows_then_clear_zeroes() {
+        let dir = tmp_dir();
+        let m = disk_mgr(&dir, 1 << 20);
+        assert_eq!(m.size().await, 0);
+        m.put("k1".into(), resp(vec![0u8; 4096]), fresh_policy())
+            .await
+            .unwrap();
+        assert!(m.size().await > 0, "size should grow after a store");
+        m.clear().await;
+        assert_eq!(m.size().await, 0, "clear() must empty the cache");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn oversized_entry_is_not_stored() {
+        let dir = tmp_dir();
+        // Budget smaller than the body → entry must be skipped, not stored.
+        let m = disk_mgr(&dir, 64);
+        m.put("big".into(), resp(vec![0u8; 8192]), fresh_policy())
+            .await
+            .unwrap();
+        assert!(
+            m.get("big").await.unwrap().is_none(),
+            "oversized entry must not be stored"
+        );
+        assert_eq!(m.size().await, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_entry() {
+        let dir = tmp_dir();
+        let m = disk_mgr(&dir, 1 << 20);
+        m.put("k1".into(), resp(b"v".to_vec()), fresh_policy())
+            .await
+            .unwrap();
+        m.delete("k1").await.unwrap();
+        assert!(m.get("k1").await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn eviction_keeps_under_budget_and_drops_oldest() {
+        let dir = tmp_dir();
+        // ~5 KiB bodies, 12 KiB budget → only the newest ~2 entries survive.
+        let body = 5 * 1024;
+        let budget = 12 * 1024;
+        let m = disk_mgr(&dir, budget);
+        for i in 0..4 {
+            m.put(format!("k{i}"), resp(vec![i as u8; body]), fresh_policy())
+                .await
+                .unwrap();
+            // cacache timestamps are ms-resolution; space writes so the
+            // oldest-first eviction order is deterministic.
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+        assert!(
+            m.size().await <= budget,
+            "cache must stay within its byte budget"
+        );
+        assert!(
+            m.get("k0").await.unwrap().is_none(),
+            "oldest entry should be evicted"
+        );
+        assert!(
+            m.get("k3").await.unwrap().is_some(),
+            "newest entry should survive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn overwrite_reclaims_old_blob() {
+        let dir = tmp_dir();
+        let m = disk_mgr(&dir, 1 << 20);
+        m.put("k1".into(), resp(vec![1u8; 4096]), fresh_policy())
+            .await
+            .unwrap();
+        let after_first = m.size().await;
+        // Overwrite the same key with a same-sized but different body. Without
+        // blob reclamation the old content would linger and size would grow.
+        m.put("k1".into(), resp(vec![2u8; 4096]), fresh_policy())
+            .await
+            .unwrap();
+        let after_overwrite = m.size().await;
+        assert!(
+            after_overwrite <= after_first + 256,
+            "overwrite must reclaim the old blob (first={after_first}, after={after_overwrite})"
+        );
+        // And the latest body wins.
+        assert_eq!(m.get("k1").await.unwrap().unwrap().0.body, vec![2u8; 4096]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
