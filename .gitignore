@@ -72,4 +72,17 @@ examples/*/android/local.properties
 examples/*/android/app/src/main/jniLibs/
 examples/*/android/app/src/main/java/uniffi/
 examples/*/ios/PqcCore.xcframework/
+
+# Native examples (NativeAndroid / NativeIos) — Gradle/Xcode build outputs.
+# Their layout differs from RnSample's (Gradle root is the example dir itself),
+# so they need their own patterns.
+examples/NativeAndroid/.gradle/
+examples/NativeAndroid/.kotlin/
+examples/NativeAndroid/build/
+examples/NativeAndroid/app/build/
+examples/NativeAndroid/local.properties
+examples/NativeIos/build/
+examples/NativeIos/DerivedData/
+examples/NativeIos/*.xcodeproj/xcuserdata/
+examples/NativeIos/*.xcodeproj/project.xcworkspace/xcuserdata/
 examples/*/ios/RnSample/pqc.swift

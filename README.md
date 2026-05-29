@@ -109,6 +109,8 @@ print("status=\(resp.status) alpn=\(resp.negotiatedProtocol)")
 |---|---|
 | Android integration (OkHttp / Retrofit / Ktor / React Native) | [`docs/android.md`](docs/android.md) |
 | iOS integration (`URLSession` / `URLProtocol` / React Native) | [`docs/ios.md`](docs/ios.md) |
+| Runnable native Android sample (Kotlin) | [`examples/NativeAndroid`](examples/NativeAndroid) |
+| Runnable native iOS sample (SwiftUI) | [`examples/NativeIos`](examples/NativeIos) |
 | Runnable React Native sample app | [`examples/RnSample`](examples/RnSample) |
 | Contributing & release flow | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Security policy | [`SECURITY.md`](SECURITY.md) |
