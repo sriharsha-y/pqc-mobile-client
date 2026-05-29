@@ -29,6 +29,9 @@ fn default_test_config() -> PqcConfig {
         enable_cookies: false,
         user_agent: Some("pqc-client-smoke-test/0.3.1".to_string()),
         redirect_policy: RedirectPolicy::SameOriginOnly {},
+        enable_cache: false,
+        cache_dir: None,
+        max_cache_bytes: None,
     }
 }
 

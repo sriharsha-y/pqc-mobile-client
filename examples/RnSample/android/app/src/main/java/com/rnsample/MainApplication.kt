@@ -83,6 +83,11 @@ class MainApplication : Application(), ReactApplication {
       // Refuse cross-origin redirects so the original handshake's pin / PQ
       // guarantees can't be silently dropped by a 3xx to another host.
       redirectPolicy = RedirectPolicy.SameOriginOnly,
+      // Opt-in RFC 9111 response cache (off here). To enable, set
+      // enableCache = true and pass cacheDir = cacheDir.absolutePath.
+      enableCache = false,
+      cacheDir = null,
+      maxCacheBytes = null,
     )
 
     val pqcClient: PqcHttpClient

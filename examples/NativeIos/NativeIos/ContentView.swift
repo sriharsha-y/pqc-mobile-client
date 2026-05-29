@@ -185,7 +185,13 @@ struct ContentView: View {
                 maxBodyBytes: nil,
                 enableCookies: false,
                 userAgent: "PqcNativeIosSample/1.0",
-                redirectPolicy: .sameOriginOnly
+                redirectPolicy: .sameOriginOnly,
+                // Opt-in RFC 9111 response cache (off here; the trace endpoint
+                // is uncacheable anyway). To enable, set enableCache: true and
+                // pass a Caches dir path. See docs/ios.md.
+                enableCache: false,
+                cacheDir: nil,
+                maxCacheBytes: nil
             ))
 
             let resp = try await client.request(req: HttpRequest(

@@ -44,7 +44,14 @@ public final class PqcURLProtocol: URLProtocol {
                     userAgent: "RnSample/0.3.1 (pqc-mobile-client)",
                     // Refuse cross-origin redirects — they re-handshake to a
                     // host whose pin / PQ guarantees are independent.
-                    redirectPolicy: .sameOriginOnly
+                    redirectPolicy: .sameOriginOnly,
+                    // Opt-in RFC 9111 response cache (off here). To enable, set
+                    // enableCache: true and pass a Caches dir path; keep the
+                    // URLProtocol's cacheStoragePolicy .notAllowed so the Rust
+                    // cache is the single cache. See docs/ios.md.
+                    enableCache: false,
+                    cacheDir: nil,
+                    maxCacheBytes: nil
                 )
             )
         } catch {

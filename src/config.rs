@@ -52,6 +52,35 @@ pub struct PqcConfig {
     /// are refused so a redirect can't silently downgrade to an un-pinned
     /// host.
     pub redirect_policy: RedirectPolicy,
+
+    // ----- Caching -----
+    /// Opt-in RFC 9111 response cache (default false). When enabled it mirrors
+    /// the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
+    /// cacheability is decided by request method + response status + cache
+    /// headers (`Cache-Control`, `ETag`, `Last-Modified`, `Vary`, …), never by
+    /// file type / `Content-Type`. A private cache (`shared = false`), so it
+    /// honors `no-store`/`no-cache` but — like the native private caches —
+    /// will cache responses to `Authorization`-bearing requests when their
+    /// headers permit; suppress those by having the server send `no-store`.
+    ///
+    /// Only effective in builds compiled with the `cache` cargo feature; in a
+    /// feature-less build this is a no-op (and `clear_cache`/`cache_size_bytes`
+    /// are inert). See `src/cache.rs`.
+    #[uniffi(default = false)]
+    pub enable_cache: bool,
+
+    /// Directory for the persistent on-disk cache tier (present on both
+    /// platforms, matching OkHttp's `Cache` directory and `URLCache`'s disk
+    /// store). Pass an app-writable path — Android `context.cacheDir`, iOS the
+    /// `.cachesDirectory`. `None` disables the disk tier; the cache then lives
+    /// only in the in-memory tier where one exists (iOS), or is effectively
+    /// disabled (Android). Ignored when `enable_cache` is false.
+    pub cache_dir: Option<String>,
+
+    /// Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
+    /// entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
+    /// defaults to 20 MiB, matching a typical `URLCache` disk capacity.
+    pub max_cache_bytes: Option<u64>,
 }
 
 /// What the client does on a 3xx. The reqwest default (10 unbounded

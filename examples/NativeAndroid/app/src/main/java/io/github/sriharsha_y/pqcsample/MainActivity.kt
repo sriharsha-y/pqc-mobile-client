@@ -199,6 +199,12 @@ class MainActivity : Activity() {
                     enableCookies = false,
                     userAgent = "PqcNativeAndroidSample/1.0",
                     redirectPolicy = RedirectPolicy.SameOriginOnly,
+                    // Opt-in RFC 9111 response cache (off here; the trace
+                    // endpoint is uncacheable anyway). To enable, set true and
+                    // pass an app dir, e.g. cacheDir = cacheDir.absolutePath.
+                    enableCache = false,
+                    cacheDir = null,
+                    maxCacheBytes = null,
                 )
             )
             val resp = client.request(
