@@ -8,7 +8,7 @@
 CLIPPY     := cargo clippy --all-targets --locked -- -D warnings
 CARGO_TEST := cargo test --release --locked -- --nocapture
 
-.PHONY: help setup fmt fmt-check clippy test check audit ci android ios build sample clean
+.PHONY: help setup fmt fmt-check clippy test test-cache check audit ci android ios build sample clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) \
@@ -29,7 +29,10 @@ clippy: ## Lint with clippy, warnings as errors (CI parity)
 test: ## Unit + smoke tests; hits pq.cloudflareresearch.com (CI parity)
 	$(CARGO_TEST)
 
-check: fmt-check clippy test ## Full local check — mirrors the CI 'check' job
+test-cache: ## Compile + unit-test the `cache` feature (lib only, no network)
+	cargo test --features cache --release --locked --lib -- --nocapture
+
+check: fmt-check clippy test test-cache ## Full local check — mirrors the CI 'check' job
 
 audit: ## Supply-chain scan: cargo-audit + cargo-deny (CI parity)
 	cargo audit --deny warnings

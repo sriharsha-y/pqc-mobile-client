@@ -50,6 +50,12 @@ jobs:
         # via workflow_dispatch if CF's PQ endpoint blips.
         run: make test
 
+      - name: Tests (cache feature)
+        # Compiles src/cache.rs (otherwise cfg'd out of the default build) under
+        # -D warnings and runs its unit tests. Same runner/cache as above, so it
+        # only adds the cache dependency subtree's compile, not a full rebuild.
+        run: make test-cache
+
   # Supply-chain: cargo-audit (RustSec advisories) + cargo-deny (license/
   # bans/sources policy in deny.toml). Installed as prebuilt binaries.
   audit:
