@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.4](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.3...v0.5.4) (2026-05-29)
+
+
+### Bug Fixes
+
+* **examples:** apply system-bar insets in NativeAndroid ([92c23f5](https://github.com/sriharsha-y/pqc-mobile-client/commit/92c23f5cc00cc821ca6ca44f5299e837ef7f0da8))
+
 ## [0.5.3](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.2...v0.5.3) (2026-05-28)
 
 
