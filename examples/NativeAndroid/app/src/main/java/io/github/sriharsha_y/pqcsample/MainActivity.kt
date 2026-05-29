@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -58,7 +59,7 @@ class MainActivity : Activity() {
 
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(24), dp(16), dp(16))
+            setPadding(dp(16), dp(8), dp(16), dp(16))
         }
 
         column.addView(text("pqc-mobile-client", 22f, cTitle, bold = true))
@@ -73,6 +74,9 @@ class MainActivity : Activity() {
             addView(column, ViewGroup.LayoutParams(MP, MP))
         }
         setContentView(root)
+        // targetSdk 35 draws edge-to-edge on Android 15+, so pad the root by
+        // the status-bar / cutout / nav-bar insets to keep content clear of them.
+        applySystemBarInsets(root)
 
         // Auto-run on launch (toggle defaults to ON / post-quantum).
         run(toggle.isChecked)
@@ -265,4 +269,22 @@ class MainActivity : Activity() {
         }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** Pad [view] by the system-bar + display-cutout insets (edge-to-edge). */
+    private fun applySystemBarInsets(view: View) {
+        view.setOnApplyWindowInsetsListener { v, insets ->
+            val (top, bottom) = if (Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                bars.top to bars.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                (insets.systemWindowInsetTop to insets.systemWindowInsetBottom)
+            }
+            v.setPadding(v.paddingLeft, top, v.paddingRight, bottom)
+            insets
+        }
+        view.requestApplyInsets()
+    }
 }
