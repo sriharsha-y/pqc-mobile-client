@@ -312,16 +312,40 @@ impl PqcHttpClient {
 }
 
 /// Map a `reqwest_middleware::Error` (the cached backend's send error) to a
-/// `PqcError`. Transport/TLS failures arrive as `Reqwest` and reuse the same
-/// classifier; `Middleware` is a cache-layer failure — not transport — so it
-/// maps to `Network` (the manager itself swallows cache I/O errors, so this is
-/// rare).
+/// `PqcError`. A plain transport/TLS failure arrives as `Reqwest` and reuses
+/// the full classifier. `Middleware` is trickier: on a cacheable GET/HEAD the
+/// http-cache middleware boxes the real send error into an `anyhow` error, so
+/// a rustls **pinning / trust** failure is buried in its source chain rather
+/// than the `Reqwest` arm. We MUST walk that chain and classify it — otherwise
+/// a MITM / pinning failure would be silently downgraded to a benign
+/// (retryable) `Network`, defeating the signal consumers branch on.
 #[cfg(feature = "cache")]
 fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
     match e {
         reqwest_middleware::Error::Reqwest(e) => map_reqwest_err(e),
-        reqwest_middleware::Error::Middleware(_) => PqcError::Network,
+        reqwest_middleware::Error::Middleware(e) => classify_err_chain(e.chain()),
     }
+}
+
+/// Classify an error source chain by typed downcast — authoritative, no string
+/// fragility (so it can't be contaminated by a URL in an error's `Display`).
+/// A `rustls::Error` anywhere in the chain wins (pinning / trust / TLS); a
+/// reqwest timeout maps to `Timeout`; anything else is `Network`.
+#[cfg(feature = "cache")]
+fn classify_err_chain<'a>(
+    chain: impl Iterator<Item = &'a (dyn std::error::Error + 'static)>,
+) -> PqcError {
+    for cause in chain {
+        if let Some(rustls_err) = cause.downcast_ref::<rustls::Error>() {
+            return classify_rustls_error(rustls_err);
+        }
+        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>() {
+            if req_err.is_timeout() {
+                return PqcError::Timeout;
+            }
+        }
+    }
+    PqcError::Network
 }
 
 /// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
@@ -513,6 +537,53 @@ mod tests {
         assert!(matches!(
             classify_rustls_error(&err),
             crate::error::PqcError::PinningFailure
+        ));
+    }
+
+    // ---- Cached-backend error classification (classify_err_chain) ----
+    // Regression guard: on the cached path, http-cache boxes the send error
+    // into a Middleware(anyhow) whose chain carries the rustls error. The
+    // chain walker must surface the security signal, NOT downgrade to Network.
+
+    /// A rustls pinning failure anywhere in the chain → PinningFailure.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_pinning_failure_not_downgraded() {
+        use super::classify_err_chain;
+        let err = rustls::Error::General(
+            "certificate pinning failure: no certificate in the chain matched any configured pin"
+                .to_string(),
+        );
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::PinningFailure
+        ));
+    }
+
+    /// A rustls invalid-certificate error in the chain → TrustVerification.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_trust_failure_not_downgraded() {
+        use super::classify_err_chain;
+        let err = rustls::Error::InvalidCertificate(rustls::CertificateError::Expired);
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::TrustVerification
+        ));
+    }
+
+    /// A non-rustls, non-timeout error still falls back to Network.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_other_error_is_network() {
+        use super::classify_err_chain;
+        let err = std::io::Error::other("cache write failed");
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::Network
         ));
     }
 }
