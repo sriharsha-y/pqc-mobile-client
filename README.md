@@ -19,10 +19,10 @@ Post-Quantum TLS HTTPS client for mobile — **iOS 13+** and **Android API 24+**
 Akamai, Cloudflare, and AWS edges already negotiate hybrid PQC TLS (`X25519MLKEM768`). iOS 26+ and Chrome do too — but most shipped mobile OSes don't:
 
 - **iOS 13–18** — no native PQC TLS; `URLSession`'s TLS engine is closed and doesn't expose group selection.
-- **Android API 24+** — system Conscrypt doesn't advertise `X25519MLKEM768` on any shipped release, with no committed default-on date.
-- **Cronet** — ships PQC only via the Play-Services-gated artifact (no GMS → no PQC); the `cronet-embedded` artifact is frozen pre-PQC.
+- **Android Conscrypt** — `X25519MLKEM768` only landed upstream as a non-default, opt-in named group in `2.6-alpha` (May 2026); no stable Conscrypt release ships it, it is off by default (only `X25519`/`P-256`/`P-384` are default), and reaching it requires bundling the standalone library and calling `SSLParameters.setNamedGroups`. The updatable *system* Conscrypt module that backs `javax.net.ssl` lags further behind, with no committed default-on date.
+- **Cronet** — its Chromium net stack does contain `X25519MLKEM768` (the `cronet-embedded` artifact was revived at Chrome 141/143 in late-2025/early-2026, so it is no longer frozen), but `CronetEngine.Builder` exposes **no public API for TLS group selection**, the only lever is the unstable `setExperimentalOptions` JSON, and PQC is not confirmed on-by-default in the embedded build. The reliably PQC-capable path remains GMS-delivered Cronet, which excludes non-GMS devices.
 
-This crate is a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability.
+This crate is a **unified, single-codebase, FIPS-validated** alternative that works on every supported OS version and on every Android device regardless of GMS availability — with PQC on by default and no dependence on Google Play Services. _(Conscrypt/Cronet landscape verified 2026-05; both are moving fast, so re-check before relying on these specifics.)_
 
 ## Install
 
