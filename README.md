@@ -54,6 +54,7 @@ Most apps wire this into their existing HTTP stack — an **OkHttp `Interceptor`
 
 ```kotlin
 import io.github.sriharsha_y.pqc.*
+import kotlinx.coroutines.runBlocking   // request() is a suspend fun; call it from a coroutine
 
 // Once, in Application.onCreate, before constructing any client:
 PqcAndroidInit.init(this)

@@ -75,11 +75,13 @@ pub struct PqcConfig {
     /// `.cachesDirectory`. `None` disables the disk tier; the cache then lives
     /// only in the in-memory tier where one exists (iOS), or is effectively
     /// disabled (Android). Ignored when `enable_cache` is false.
+    #[uniffi(default = None)]
     pub cache_dir: Option<String>,
 
     /// Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
     /// entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
     /// defaults to 20 MiB, matching a typical `URLCache` disk capacity.
+    #[uniffi(default = None)]
     pub max_cache_bytes: Option<u64>,
 }
 
