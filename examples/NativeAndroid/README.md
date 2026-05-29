@@ -5,7 +5,9 @@ A minimal **pure-native Android** app (Kotlin, no React Native) that calls
 `pq.cloudflareresearch.com`, and reports the negotiated key-exchange group
 from the server's `/cdn-cgi/trace` report.
 
-One screen, one button:
+One screen — a post-quantum toggle and a live result card, styled to match the
+[React Native sample](../RnSample). The toggle drives `enablePostQuantum`, so
+flipping it off makes the edge report `kex=X25519` (classical):
 
 ```
 status = 200
