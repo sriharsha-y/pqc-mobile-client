@@ -12,6 +12,11 @@ mod pinning;
 mod tls;
 mod types;
 
+// Opt-in RFC 9111 response cache. Compiled only with the `cache` feature;
+// the runtime `PqcConfig.enable_cache` flag gates it further. See src/cache.rs.
+#[cfg(feature = "cache")]
+mod cache;
+
 // Android-only JNI shim that initializes rustls-platform-verifier with
 // the Application Context. Must be called from MainApplication.onCreate
 // before constructing PqcHttpClient — see src/android_init.rs.

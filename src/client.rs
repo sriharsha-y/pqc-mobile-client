@@ -17,15 +17,31 @@ const DEFAULT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 /// handover: absorbs one SYN retry, still fails fast.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The networking backend. `Plain` is today's bare `reqwest::Client` (the
+/// default, zero overhead). `Cached` wraps it in the RFC 9111 cache middleware
+/// (only when the `cache` feature is compiled in *and* `enable_cache` is set).
+/// TLS / PQC / pinning are identical either way — the middleware wraps the
+/// already-built client.
+enum HttpBackend {
+    Plain(reqwest::Client),
+    #[cfg(feature = "cache")]
+    Cached(reqwest_middleware::ClientWithMiddleware),
+}
+
 /// The HTTPS client exposed to Kotlin / Swift via UniFFI.
 ///
-/// Holds a single `reqwest::Client` with PQC TLS configured. Construct once
-/// per process (it owns the connection pool); calling `request` is cheap.
+/// Holds a single client with PQC TLS configured. Construct once per process
+/// (it owns the connection pool); calling `request` is cheap.
 #[derive(uniffi::Object)]
 pub struct PqcHttpClient {
-    inner: reqwest::Client,
+    inner: HttpBackend,
     default_timeout: Option<Duration>,
     max_body_bytes: u64,
+    // Kept (separately from the middleware's copy) so `clear_cache` /
+    // `cache_size_bytes` can reach the store directly. `None` when caching is
+    // off. Cloneable handle — shares the underlying store with the middleware.
+    #[cfg(feature = "cache")]
+    cache_manager: Option<crate::cache::PqcCacheManager>,
 }
 
 #[uniffi::export]
@@ -94,11 +110,55 @@ impl PqcHttpClient {
         // constructor doc.
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
-        Ok(Self {
-            inner: client,
-            default_timeout: config.default_timeout_ms.map(Duration::from_millis),
-            max_body_bytes: config.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
-        })
+        let default_timeout = config.default_timeout_ms.map(Duration::from_millis);
+        let max_body_bytes = config.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES);
+
+        #[cfg(feature = "cache")]
+        {
+            // `enable_cache` builds the cache layer; a missing tier (e.g.
+            // Android with no `cache_dir`) logs and falls back to no caching
+            // rather than failing the constructor.
+            let cache_manager = if config.enable_cache {
+                let m = crate::cache::PqcCacheManager::new(&config);
+                if m.is_none() {
+                    log::warn!(
+                        "pqc cache: enable_cache=true but no usable tier \
+                         (set cache_dir for a persistent cache); caching disabled"
+                    );
+                }
+                m
+            } else {
+                None
+            };
+            let inner = match &cache_manager {
+                Some(m) => {
+                    HttpBackend::Cached(crate::cache::build_cached_client(client, m.clone()))
+                }
+                None => HttpBackend::Plain(client),
+            };
+            // Tail of the function when `cache` is compiled in (the
+            // `cfg(not)` block below is stripped away).
+            Ok(Self {
+                inner,
+                default_timeout,
+                max_body_bytes,
+                cache_manager,
+            })
+        }
+
+        #[cfg(not(feature = "cache"))]
+        {
+            // Fail loud: asking for caching in a build that didn't compile it
+            // in is a misconfiguration, not a silent no-op.
+            if config.enable_cache {
+                return Err(PqcError::InvalidRequest);
+            }
+            Ok(Self {
+                inner: HttpBackend::Plain(client),
+                default_timeout,
+                max_body_bytes,
+            })
+        }
     }
 }
 
@@ -120,29 +180,47 @@ impl PqcHttpClient {
             HttpMethod::Options => reqwest::Method::OPTIONS,
         };
 
-        let mut builder = self.inner.request(method, &req.url);
-
-        for (k, values) in &req.headers {
-            let name = HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            for v in values {
-                let value =
-                    HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-                builder = builder.header(name.clone(), value);
-            }
-        }
-
-        if let Some(body) = req.body {
-            builder = builder.body(body);
-        }
-
         let timeout_ms = req
             .timeout_ms
             .or(self.default_timeout.map(|d| d.as_millis() as u64));
-        if let Some(t) = timeout_ms {
-            builder = builder.timeout(Duration::from_millis(t));
+
+        // `reqwest::RequestBuilder` and `reqwest_middleware::RequestBuilder`
+        // share the same header/body/timeout/send surface, so one macro fills
+        // both backends without drift. (Moving `method` in each match arm is
+        // fine — the arms are mutually exclusive.)
+        macro_rules! build_request {
+            ($rb:expr) => {{
+                let mut b = $rb;
+                for (k, values) in &req.headers {
+                    let name =
+                        HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
+                    for v in values {
+                        let value = HeaderValue::try_from(v.as_str())
+                            .map_err(|_| PqcError::InvalidRequest)?;
+                        b = b.header(name.clone(), value);
+                    }
+                }
+                if let Some(ref body) = req.body {
+                    b = b.body(body.clone());
+                }
+                if let Some(t) = timeout_ms {
+                    b = b.timeout(Duration::from_millis(t));
+                }
+                b
+            }};
         }
 
-        let resp = builder.send().await.map_err(map_reqwest_err)?;
+        let resp = match &self.inner {
+            HttpBackend::Plain(c) => build_request!(c.request(method, &req.url))
+                .send()
+                .await
+                .map_err(map_reqwest_err)?,
+            #[cfg(feature = "cache")]
+            HttpBackend::Cached(c) => build_request!(c.request(method, &req.url))
+                .send()
+                .await
+                .map_err(map_middleware_err)?,
+        };
 
         let status = resp.status().as_u16();
         // Map to the ALPN id the API documents ("h2", "http/1.1"); the
@@ -204,12 +282,47 @@ impl PqcHttpClient {
             negotiated_protocol,
         })
     }
+
+    /// Clear all cached responses. Best-effort and non-throwing, mirroring
+    /// `URLCache.removeAllCachedResponses` / OkHttp `Cache.evictAll`. Also the
+    /// recommended logout / session-end hook so cached responses don't outlive
+    /// a session. A no-op when caching is disabled or the `cache` feature was
+    /// not compiled in.
+    pub async fn clear_cache(&self) {
+        #[cfg(feature = "cache")]
+        if let Some(m) = &self.cache_manager {
+            m.clear().await;
+        }
+    }
+
+    /// Total bytes in the on-disk cache, for a "Clear cache (X MB)"
+    /// affordance. Returns `0` when caching is disabled or absent.
+    pub async fn cache_size_bytes(&self) -> u64 {
+        #[cfg(feature = "cache")]
+        if let Some(m) = &self.cache_manager {
+            return m.size().await;
+        }
+        0
+    }
 }
 
 /// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
 /// from a pinning/trust/TLS failure (don't retry). Pass 1 downcasts to
 /// `&rustls::Error` (authoritative, no string fragility); pass 2 is a
 /// substring fallback for our pinning marker carried as a rustls string.
+/// Map a `reqwest_middleware::Error` (the cached backend's send error) to a
+/// `PqcError`. Transport/TLS failures arrive as `Reqwest` and reuse the same
+/// classifier; `Middleware` is a cache-layer failure — not transport — so it
+/// maps to `Network` (the manager itself swallows cache I/O errors, so this is
+/// rare).
+#[cfg(feature = "cache")]
+fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
+    match e {
+        reqwest_middleware::Error::Reqwest(e) => map_reqwest_err(e),
+        reqwest_middleware::Error::Middleware(_) => PqcError::Network,
+    }
+}
+
 fn map_reqwest_err(e: reqwest::Error) -> PqcError {
     if e.is_timeout() {
         return PqcError::Timeout;
