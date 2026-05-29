@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PQC Native Android</string>
+    <string name="run_button">Verify post-quantum TLS</string>
+    <string name="running">Running…</string>
+    <string name="intro">Tap the button to open a Post-Quantum TLS connection to pq.cloudflareresearch.com and read back the negotiated key-exchange group from the server\'s /cdn-cgi/trace report.\n\nExpected: kex = X25519MLKEM768</string>
+</resources>
