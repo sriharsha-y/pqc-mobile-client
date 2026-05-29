@@ -299,3 +299,38 @@ openssl x509 -in cert.pem -pubkey -noout \
 **Always pin at least two hashes** (e.g. the current intermediate + a backup intermediate, or a pre-deployed next leaf). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.
+
+## 11. Response caching (opt-in)
+
+The Rust core can cache HTTP responses (RFC 9111), so repeat GETs are served without a network round-trip — the same idea as an OkHttp `Cache`, but it lives in the core because the core owns the socket (OkHttp's own `Cache` is bypassed by the interceptor, see §5). It is **off by default**. Enable it per client:
+
+```kotlin
+import java.io.File
+
+val httpCacheDir = File(context.cacheDir, "pqc-http").absolutePath
+val config = PqcConfig(
+    // … existing fields …
+    redirectPolicy = RedirectPolicy.SameOriginOnly,
+    enableCache = true,
+    cacheDir = httpCacheDir,                // required on Android — no dir, no cache
+    maxCacheBytes = 10uL * 1024u * 1024u,   // 10 MiB, like a typical OkHttp Cache; null → 20 MiB
+)
+
+// On logout / session end, drop everything (also good for a "Clear cache" button):
+client.clearCache()
+val bytes: ULong = client.cacheSizeBytes()  // e.g. to render "Clear cache (1.2 MB)"
+```
+
+**Use exactly one cache.** Leave OkHttp's `Cache` unset when this is enabled — the interceptor already bypasses it, so the core's cache is the single source of truth and there's no double storage.
+
+### What gets cached (it's not about file type)
+
+Cacheability is decided by **request method + response status + cache headers** — never by extension or `Content-Type`. A `.json`, `.html`, `.svg`, or image are all cached identically *if and only if* their headers allow it. In practice CDN assets sent with `Cache-Control: max-age=…` cache; API responses sent with `Cache-Control: no-store` (typical for account/balance/transaction endpoints) do not.
+
+This is a **private** cache (`shared = false`), so — exactly like OkHttp/`URLCache` — it will cache responses to `Authorization`-bearing requests when their headers permit. To keep a sensitive endpoint out of the cache, have the server send `Cache-Control: no-store` (or `no-cache` to force revalidation). `clearCache()` on logout is the belt-and-suspenders backstop.
+
+### Notes / behavior vs. native
+
+- **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache = true` makes the constructor throw `PqcError.InvalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
+- **Eviction** is by insertion time (FIFO) once `maxCacheBytes` is exceeded — a close approximation of OkHttp's LRU (the disk store exposes no access time).
+- **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
