@@ -17,22 +17,21 @@ public final class PqcURLProtocol: URLProtocol {
     /// hosts in a real app.
     private static let interceptAll = true
 
-    // "off" selects the classical-only client. Stripped before the request
-    // leaves the device.
+    // "off" makes the request skip interception and use the iOS system stack
+    // (URLSession) — see canInit. Otherwise it's routed through the PQC client.
     static let pqcModeHeader = "X-Pqc-Mode"
 
-    // Shared config differing only in enablePostQuantum; the sample keeps
-    // both clients so the UI can toggle PQC (the flag is fixed at construction).
+    // The client always advertises the X25519MLKEM768 hybrid. The classical
+    // path is the iOS system stack (see canInit), not a second client.
     //
     // NOTE: pinnedCertSha256 is [] here. A real banking app MUST populate it
     // with base64(SHA-256(SPKI)) for the production leaf (+ a pre-deployed
     // next leaf for rotation). See docs/ios.md §10.
-    private static func makeClient(enablePqc: Bool) -> PqcHttpClient? {
+    private static func makeClient() -> PqcHttpClient? {
         do {
             return try PqcHttpClient(
                 config: PqcConfig(
                     pinnedCertSha256: [],
-                    enablePostQuantum: enablePqc,
                     defaultTimeoutMs: 15_000,
                     // nil → built-in defaults (10s connect, 16 MiB body cap).
                     // Set explicitly in production to survive a defaults change.
@@ -62,13 +61,19 @@ public final class PqcURLProtocol: URLProtocol {
 
     // `pqc` prefix avoids shadowing URLProtocol's inherited `client`
     // property (the delegate we call back into via self.client?.urlProtocol).
-    private static let pqcClient: PqcHttpClient? = makeClient(enablePqc: true)
-    private static let classicalClient: PqcHttpClient? = makeClient(enablePqc: false)
+    private static let pqcClient: PqcHttpClient? = makeClient()
 
     private var pqcTask: Task<Void, Never>?
 
     public override class func canInit(with request: URLRequest) -> Bool {
         guard request.url?.scheme == "https" else { return false }
+        // Toggle "off": don't intercept, so the request goes through the iOS
+        // system stack (URLSession) instead of this library — letting the
+        // sample contrast the PQC handshake with the platform's classical one.
+        if request.value(forHTTPHeaderField: pqcModeHeader)?
+            .caseInsensitiveCompare("off") == .orderedSame {
+            return false
+        }
         return interceptAll
     }
 
@@ -87,13 +92,11 @@ public final class PqcURLProtocol: URLProtocol {
                         userInfo: [NSLocalizedDescriptionKey: "missing URL"]
                     )
                 }
-                // "off" selects the classical-only client; stripped below.
+                // Requests carrying X-Pqc-Mode: off are not intercepted (see
+                // canInit) — they use URLSession directly. Anything reaching
+                // here therefore goes through the PQC client.
                 let allHeaders = req.allHTTPHeaderFields ?? [:]
-                let modeValue = allHeaders.first {
-                    $0.key.caseInsensitiveCompare(Self.pqcModeHeader) == .orderedSame
-                }?.value
-                let classicalOnly = modeValue?.caseInsensitiveCompare("off") == .orderedSame
-                guard let pqcClient = classicalOnly ? Self.classicalClient : Self.pqcClient else {
+                guard let pqcClient = Self.pqcClient else {
                     throw NSError(
                         domain: "PqcURLProtocol",
                         code: -3,

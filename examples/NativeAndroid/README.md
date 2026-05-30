@@ -5,8 +5,9 @@ A minimal **pure-native Android** app (Kotlin, no React Native) that calls
 `pq.cloudflareresearch.com`, and reports the negotiated key-exchange group
 from the server's `/cdn-cgi/trace` report.
 
-One screen — a post-quantum toggle and a live result card, styled to match the
-[React Native sample](../RnSample). The toggle drives `enablePostQuantum`, so
+One screen — a networking-stack toggle and a live result card, styled to match
+the [React Native sample](../RnSample). The toggle switches between this
+library's PQC client and the Android system stack (`HttpsURLConnection`), so
 flipping it off makes the edge report `kex=X25519` (classical). The result card
 shows the server-reported KEX (green = `X25519MLKEM768`, amber = classical),
 the negotiated ALPN, and the HTTP status:

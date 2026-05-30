@@ -57,14 +57,14 @@ The Metro bundler starts in a separate terminal automatically. The app shows a c
 
 ### JS
 
-- `App.tsx` calls `fetch()` against Cloudflare's `/cdn-cgi/trace` endpoint and parses the `kex=` line the edge returns. A `Switch` toggles post-quantum on/off by setting an `X-Pqc-Mode` request header that the native layer routes on (PQC-on vs classical-only client). No cryptographic JS — the handshake is entirely native.
+- `App.tsx` calls `fetch()` against Cloudflare's `/cdn-cgi/trace` endpoint and parses the `kex=` line the edge returns. A `Switch` toggles between this library's PQC client and the OS network stack by setting an `X-Pqc-Mode` request header: when `off`, the native layer falls through to OkHttp / URLSession instead of routing through the library. No cryptographic JS — the handshake is entirely native.
 
 ## Verification
 
 The app reads the **server's** report of the negotiated key exchange, which is authoritative and correct even under concurrent requests (unlike a client-side header — see below):
 
 - Toggle **on** → the trace shows `kex=X25519MLKEM768` (post-quantum hybrid negotiated).
-- Toggle **off** → the client offers classical groups only, so the trace shows `kex=X25519`.
+- Toggle **off** → the request uses the OS network stack (OkHttp / URLSession), which doesn't offer the hybrid, so the trace shows `kex=X25519`.
 - This works because `https://pq.cloudflareresearch.com/cdn-cgi/trace` (any Cloudflare-served host exposes `/cdn-cgi/trace`) returns the key exchange the edge actually negotiated for *that* connection, in the response body.
 - On the wire: USB-tether the device, capture with Wireshark, filter `tls.handshake.type == 1`, inspect `key_share` extension for group `0x11EC` (IANA codepoint for `X25519MLKEM768`).
 

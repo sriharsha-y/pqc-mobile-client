@@ -63,13 +63,13 @@ class MainApplication : Application(), ReactApplication {
     //   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
-    // Shared config differing only in enablePostQuantum; the sample keeps
-    // both clients so the UI can toggle PQC (the flag is fixed at construction).
-    fun config(enablePqc: Boolean) = PqcConfig(
+    // Always advertises the X25519MLKEM768 hybrid. The classical path is
+    // OkHttp's own stack (X-Pqc-Mode: off → PqcInterceptor falls through to the
+    // OS network stack), not a second client.
+    val config = PqcConfig(
       // Empty = pinning disabled. A real banking app should populate with
       // base64(SHA-256(SPKI)) for the production cert + at least one backup.
       pinnedCertSha256 = emptyList(),
-      enablePostQuantum = enablePqc,
       defaultTimeoutMs = 15_000UL,
       // null = built-in defaults (10s connect, 16 MiB body cap). Set these
       // explicitly in production so they survive a defaults change.
@@ -91,10 +91,8 @@ class MainApplication : Application(), ReactApplication {
     )
 
     val pqcClient: PqcHttpClient
-    val classicalClient: PqcHttpClient
     try {
-      pqcClient = PqcHttpClient(config(enablePqc = true))
-      classicalClient = PqcHttpClient(config(enablePqc = false))
+      pqcClient = PqcHttpClient(config)
     } catch (t: Throwable) {
       Log.e(TAG, "PqcHttpClient construction failed; falling back to default OkHttp", t)
       return
@@ -106,7 +104,7 @@ class MainApplication : Application(), ReactApplication {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
         .cookieJar(ReactCookieJarContainer())
-        .addInterceptor(PqcInterceptor(pqcClient, classicalClient))    // MUST be last
+        .addInterceptor(PqcInterceptor(pqcClient))    // MUST be last
         .build()
     })
     Log.i(TAG, "PQC OkHttp factory installed")

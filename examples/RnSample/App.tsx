@@ -16,8 +16,9 @@
  *
  * Toggle ON  → kex=X25519MLKEM768   Toggle OFF → kex=X25519
  *
- * The native side (PqcInterceptor / PqcURLProtocol) keeps two clients and
- * selects between them via the `X-Pqc-Mode` header this screen sets.
+ * Toggle OFF sets an `X-Pqc-Mode: off` header; the native side (PqcInterceptor
+ * / PqcURLProtocol) then falls through to the OS network stack (OkHttp /
+ * URLSession) instead of this library, so the toggle compares the two.
  *
  * iOS 26+: AppDelegate gates PqcURLProtocol off (URLSession negotiates PQC
  * natively), so the Rust client is out of the path and the toggle is inert;
@@ -40,7 +41,7 @@ import {
 // The documented Cloudflare endpoint for PQC testing.
 const TRACE_URL = 'https://pq.cloudflareresearch.com/cdn-cgi/trace';
 
-// "off" selects the classical-only client; absent/else selects PQC.
+// "off" → native shim uses the OS network stack; absent/else → PQC client.
 const PQC_MODE_HEADER = 'X-Pqc-Mode';
 
 type Result =
@@ -77,7 +78,7 @@ export default function App(): React.JSX.Element {
     try {
       const resp = await fetch(TRACE_URL, {
         method: 'GET',
-        // OFF routes through the classical-only client; ON sends nothing special.
+        // OFF makes the native shim fall through to the OS stack; ON routes via PQC.
         headers: enablePqc ? {} : {[PQC_MODE_HEADER]: 'off'},
       });
       const raw = await resp.text();
@@ -123,13 +124,13 @@ export default function App(): React.JSX.Element {
 
         <View style={styles.toggleRow}>
           <View style={styles.toggleText}>
-            <Text style={styles.toggleLabel}>Advertise post-quantum</Text>
+            <Text style={styles.toggleLabel}>Networking stack</Text>
             <Text style={styles.toggleCaption}>
               {iosNativePqc
                 ? 'Handled natively by iOS 26+ (toggle disabled)'
-                : `X25519MLKEM768 ${
-                    pqcEnabled ? 'offered' : 'disabled (classical only)'
-                  }`}
+                : pqcEnabled
+                ? 'PQC client (this library)'
+                : 'System stack (no PQC)'}
             </Text>
           </View>
           <Switch
@@ -200,9 +201,9 @@ function ResultCard({
                   ? 'Negotiated natively by iOS 26+ URLSession (Rust client not in the path).'
                   : pqcRequested
                   ? pqcNegotiated
-                    ? 'PQC offered and negotiated — confirmed by the edge.'
-                    : 'PQC offered but the edge selected classical (graceful downgrade).'
-                  : 'PQC disabled on the client — classical handshake as expected.'}
+                    ? 'This library offered X25519MLKEM768; the edge negotiated it.'
+                    : 'This library offered the hybrid but the edge chose classical (graceful downgrade).'
+                  : 'System network stack — classical handshake; this library is bypassed.'}
               </Text>
             </>
           )}

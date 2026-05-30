@@ -22,18 +22,24 @@ import io.github.sriharsha_y.pqc.PqcHttpClient
  * logging) still run; OkHttp's cache / pool / TLS are bypassed because the
  * Rust core owns the socket.
  *
- * Takes TWO clients because `enable_post_quantum` is fixed at construction:
- * a PQC client and a classical-only one, picked per request via the opt-in
- * [PQC_MODE_HEADER]. Production needs only the PQC client — this duality
- * exists purely to demonstrate both paths.
+ * The opt-in [PQC_MODE_HEADER] = "off" makes the interceptor fall through to
+ * OkHttp's own stack (Conscrypt) instead of the Rust client, so the sample can
+ * contrast the PQC handshake with the platform's classical one. Production
+ * needs neither the header nor the fall-through — just route through the client.
  */
 class PqcInterceptor(
     private val pqcClient: PqcHttpClient,
-    private val classicalClient: PqcHttpClient,
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val req = chain.request()
+
+        // Toggle "off": don't route through the Rust client — proceed with
+        // OkHttp's own stack (Conscrypt) so the sample can contrast PQC vs.
+        // the platform handshake. Strip the marker header so it never leaves.
+        if (req.header(PQC_MODE_HEADER)?.equals("off", ignoreCase = true) == true) {
+            return chain.proceed(req.newBuilder().removeHeader(PQC_MODE_HEADER).build())
+        }
 
         val bodyBytes: ByteArray? = req.body?.let {
             val buf = Buffer()
@@ -41,18 +47,10 @@ class PqcInterceptor(
             buf.readByteArray()
         }
 
-        // Route on the opt-in mode header, then strip it so it never
-        // leaves the device. "off" → classical-only client.
-        val classicalOnly = req.header(PQC_MODE_HEADER)?.equals("off", ignoreCase = true) == true
-        val client = if (classicalOnly) classicalClient else pqcClient
-
-        val headers = req.headers.toMultimap().toMutableMap().apply {
-            // Case-insensitive removal: toMultimap() lowercases names.
-            remove(PQC_MODE_HEADER.lowercase())
-        }
+        val headers = req.headers.toMultimap().toMutableMap()
 
         val pqcResp = runBlocking {
-            client.request(
+            pqcClient.request(
                 HttpRequest(
                     method = req.method.toPqcMethod(),
                     url = req.url.toString(),
