@@ -29,15 +29,22 @@ The Rust core, the `.so` files, and the generated Kotlin bindings are the same r
 After `make android` at the repo root:
 
 ```
-target/jniLibs/
-├── arm64-v8a/libpqc_client.so       (~3–4 MB stripped, opt-level=z, LTO)
-├── armeabi-v7a/libpqc_client.so
-└── x86_64/libpqc_client.so          (emulator)
+target/jniLibs/                      # `--features cache` (the release-artifact default):
+├── arm64-v8a/libpqc_client.so       # ~5.5 MiB  (modern devices)
+├── armeabi-v7a/libpqc_client.so     # ~3.2 MiB  (old 32-bit ARM)
+└── x86_64/libpqc_client.so          # ~6.7 MiB  (emulator; not shipped via Play)
 
 generated/kotlin/
 └── io/github/sriharsha_y/pqc/
-    └── pqc.kt                     (UniFFI-generated Kotlin bindings)
+    └── pqc.kt                       (UniFFI-generated Kotlin bindings)
 ```
+
+The `.so` is dynamically linked, so the file size IS the on-device install
+delta (the Play App Bundle ships only the device's ABI). With Play's default
+on-the-wire compression the **download** size for arm64-v8a is ~2.6 MiB; the
+**installed** footprint is ~5.5 MiB (the `.so` is stored uncompressed inside
+the APK so `dlopen` can `mmap` it). Dropping the cache feature
+(`PQC_CARGO_FEATURES=""` when building) saves ~0.8 MiB on arm64-v8a.
 
 ## 2. Packaging options
 
