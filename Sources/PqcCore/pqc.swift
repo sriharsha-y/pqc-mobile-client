@@ -534,10 +534,25 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 /**
  * The HTTPS client exposed to Kotlin / Swift via UniFFI.
  *
- * Holds a single `reqwest::Client` with PQC TLS configured. Construct once
- * per process (it owns the connection pool); calling `request` is cheap.
+ * Holds a single client with PQC TLS configured. Construct once per process
+ * (it owns the connection pool); calling `request` is cheap.
  */
 public protocol PqcHttpClientProtocol: AnyObject, Sendable {
+    
+    /**
+     * Total bytes in the on-disk cache, for a "Clear cache (X MB)"
+     * affordance. Returns `0` when caching is disabled or absent.
+     */
+    func cacheSizeBytes() async  -> UInt64
+    
+    /**
+     * Clear all cached responses. Best-effort and non-throwing, mirroring
+     * `URLCache.removeAllCachedResponses` / OkHttp `Cache.evictAll`. Also the
+     * recommended logout / session-end hook so cached responses don't outlive
+     * a session. A no-op when caching is disabled or the `cache` feature was
+     * not compiled in.
+     */
+    func clearCache() async 
     
     func request(req: HttpRequest) async throws  -> HttpResponse
     
@@ -545,8 +560,8 @@ public protocol PqcHttpClientProtocol: AnyObject, Sendable {
 /**
  * The HTTPS client exposed to Kotlin / Swift via UniFFI.
  *
- * Holds a single `reqwest::Client` with PQC TLS configured. Construct once
- * per process (it owns the connection pool); calling `request` is cheap.
+ * Holds a single client with PQC TLS configured. Construct once per process
+ * (it owns the connection pool); calling `request` is cheap.
  */
 open class PqcHttpClient: PqcHttpClientProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -611,6 +626,53 @@ public convenience init(config: PqcConfig)throws  {
 
     
 
+    
+    /**
+     * Total bytes in the on-disk cache, for a "Clear cache (X MB)"
+     * affordance. Returns `0` when caching is disabled or absent.
+     */
+open func cacheSizeBytes()async  -> UInt64  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_pqc_client_fn_method_pqchttpclient_cache_size_bytes(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_pqc_client_rust_future_poll_u64,
+            completeFunc: ffi_pqc_client_rust_future_complete_u64,
+            freeFunc: ffi_pqc_client_rust_future_free_u64,
+            liftFunc: FfiConverterUInt64.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Clear all cached responses. Best-effort and non-throwing, mirroring
+     * `URLCache.removeAllCachedResponses` / OkHttp `Cache.evictAll`. Also the
+     * recommended logout / session-end hook so cached responses don't outlive
+     * a session. A no-op when caching is disabled or the `cache` feature was
+     * not compiled in.
+     */
+open func clearCache()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_pqc_client_fn_method_pqchttpclient_clear_cache(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_pqc_client_rust_future_poll_void,
+            completeFunc: ffi_pqc_client_rust_future_complete_void,
+            freeFunc: ffi_pqc_client_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
     
 open func request(req: HttpRequest)async throws  -> HttpResponse  {
     return
@@ -781,14 +843,30 @@ public func FfiConverterTypeHttpRequest_lower(_ value: HttpRequest) -> RustBuffe
 
 public struct HttpResponse {
     public var status: UInt16
+    /**
+     * The final URL the body was actually fetched from, after any redirects
+     * were followed. Equals the request URL when no redirect occurred. Lets
+     * callers detect a redirect they refused (see `RedirectPolicy`) and learn
+     * the effective origin — mirrors OkHttp `Response.request().url()` and
+     * `URLResponse.url`.
+     */
+    public var finalUrl: String
     public var headers: [String: [String]]
     public var body: Data
     public var negotiatedProtocol: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(status: UInt16, headers: [String: [String]], body: Data, negotiatedProtocol: String) {
+    public init(status: UInt16, 
+        /**
+         * The final URL the body was actually fetched from, after any redirects
+         * were followed. Equals the request URL when no redirect occurred. Lets
+         * callers detect a redirect they refused (see `RedirectPolicy`) and learn
+         * the effective origin — mirrors OkHttp `Response.request().url()` and
+         * `URLResponse.url`.
+         */finalUrl: String, headers: [String: [String]], body: Data, negotiatedProtocol: String) {
         self.status = status
+        self.finalUrl = finalUrl
         self.headers = headers
         self.body = body
         self.negotiatedProtocol = negotiatedProtocol
@@ -805,6 +883,9 @@ extension HttpResponse: Equatable, Hashable {
         if lhs.status != rhs.status {
             return false
         }
+        if lhs.finalUrl != rhs.finalUrl {
+            return false
+        }
         if lhs.headers != rhs.headers {
             return false
         }
@@ -819,6 +900,7 @@ extension HttpResponse: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(status)
+        hasher.combine(finalUrl)
         hasher.combine(headers)
         hasher.combine(body)
         hasher.combine(negotiatedProtocol)
@@ -835,6 +917,7 @@ public struct FfiConverterTypeHttpResponse: FfiConverterRustBuffer {
         return
             try HttpResponse(
                 status: FfiConverterUInt16.read(from: &buf), 
+                finalUrl: FfiConverterString.read(from: &buf), 
                 headers: FfiConverterDictionaryStringSequenceString.read(from: &buf), 
                 body: FfiConverterData.read(from: &buf), 
                 negotiatedProtocol: FfiConverterString.read(from: &buf)
@@ -843,6 +926,7 @@ public struct FfiConverterTypeHttpResponse: FfiConverterRustBuffer {
 
     public static func write(_ value: HttpResponse, into buf: inout [UInt8]) {
         FfiConverterUInt16.write(value.status, into: &buf)
+        FfiConverterString.write(value.finalUrl, into: &buf)
         FfiConverterDictionaryStringSequenceString.write(value.headers, into: &buf)
         FfiConverterData.write(value.body, into: &buf)
         FfiConverterString.write(value.negotiatedProtocol, into: &buf)
@@ -880,13 +964,6 @@ public struct PqcConfig {
      */
     public var pinnedCertSha256: [String]
     /**
-     * Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
-     * (default true). The ClientHello also carries classical groups, so a
-     * peer that rejects the hybrid falls back to classical — this is a
-     * preference, not enforcement. Set false only for A/B comparison.
-     */
-    public var enablePostQuantum: Bool
-    /**
      * Total request budget (handshake + headers + body); on expiry the
      * request aborts with `PqcError::Timeout`. `None` means no total cap —
      * discouraged for mobile.
@@ -898,13 +975,6 @@ public struct PqcConfig {
      * fails fast instead of burning the whole request budget. `None` = 10s.
      */
     public var connectTimeoutMs: UInt64?
-    /**
-     * Hard ceiling on a response body (post-decompression); exceeding it
-     * trips `PqcError::InvalidResponse`. Guards against decompression bombs
-     * (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
-     * expand to GBs and OOM the app. `None` defaults to 16 MiB.
-     */
-    public var maxBodyBytes: UInt64?
     /**
      * Off by default: no cookie jar, so callers round-trip
      * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
@@ -921,8 +991,44 @@ public struct PqcConfig {
      * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
      * are refused so a redirect can't silently downgrade to an un-pinned
      * host.
+     *
+     * "Refused" here follows reqwest semantics: the redirect is **not
+     * followed**, and the 3xx response itself (with its `Location` header) is
+     * returned to the caller — it is *not* turned into an error. Callers that
+     * treat any `status < 400` as success should therefore check for 3xx, or
+     * read `final_url` on the response to confirm where the body came from.
      */
     public var redirectPolicy: RedirectPolicy
+    /**
+     * Opt-in RFC 9111 response cache (default false). When enabled it mirrors
+     * the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
+     * cacheability is decided by request method + response status + cache
+     * headers (`Cache-Control`, `ETag`, `Last-Modified`, `Vary`, …), never by
+     * file type / `Content-Type`. A private cache (`shared = false`), so it
+     * honors `no-store`/`no-cache` but — like the native private caches —
+     * will cache responses to `Authorization`-bearing requests when their
+     * headers permit; suppress those by having the server send `no-store`.
+     *
+     * Only effective in builds compiled with the `cache` cargo feature; in a
+     * feature-less build this is a no-op (and `clear_cache`/`cache_size_bytes`
+     * are inert). See `src/cache.rs`.
+     */
+    public var enableCache: Bool
+    /**
+     * Directory for the persistent on-disk cache tier (present on both
+     * platforms, matching OkHttp's `Cache` directory and `URLCache`'s disk
+     * store). Pass an app-writable path — Android `context.cacheDir`, iOS the
+     * `.cachesDirectory`. `None` disables the disk tier; the cache then lives
+     * only in the in-memory tier where one exists (iOS), or is effectively
+     * disabled (Android). Ignored when `enable_cache` is false.
+     */
+    public var cacheDir: String?
+    /**
+     * Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
+     * entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
+     * defaults to 20 MiB, matching a typical `URLCache` disk capacity.
+     */
+    public var maxCacheBytes: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -935,12 +1041,6 @@ public struct PqcConfig {
          * public root. See `src/pinning.rs`.
          */pinnedCertSha256: [String], 
         /**
-         * Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
-         * (default true). The ClientHello also carries classical groups, so a
-         * peer that rejects the hybrid falls back to classical — this is a
-         * preference, not enforcement. Set false only for A/B comparison.
-         */enablePostQuantum: Bool = true, 
-        /**
          * Total request budget (handshake + headers + body); on expiry the
          * request aborts with `PqcError::Timeout`. `None` means no total cap —
          * discouraged for mobile.
@@ -950,12 +1050,6 @@ public struct PqcConfig {
          * `default_timeout_ms` so a stalled connect (e.g. cellular handover)
          * fails fast instead of burning the whole request budget. `None` = 10s.
          */connectTimeoutMs: UInt64?, 
-        /**
-         * Hard ceiling on a response body (post-decompression); exceeding it
-         * trips `PqcError::InvalidResponse`. Guards against decompression bombs
-         * (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
-         * expand to GBs and OOM the app. `None` defaults to 16 MiB.
-         */maxBodyBytes: UInt64?, 
         /**
          * Off by default: no cookie jar, so callers round-trip
          * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
@@ -970,15 +1064,49 @@ public struct PqcConfig {
          * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
          * are refused so a redirect can't silently downgrade to an un-pinned
          * host.
-         */redirectPolicy: RedirectPolicy) {
+         *
+         * "Refused" here follows reqwest semantics: the redirect is **not
+         * followed**, and the 3xx response itself (with its `Location` header) is
+         * returned to the caller — it is *not* turned into an error. Callers that
+         * treat any `status < 400` as success should therefore check for 3xx, or
+         * read `final_url` on the response to confirm where the body came from.
+         */redirectPolicy: RedirectPolicy, 
+        /**
+         * Opt-in RFC 9111 response cache (default false). When enabled it mirrors
+         * the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
+         * cacheability is decided by request method + response status + cache
+         * headers (`Cache-Control`, `ETag`, `Last-Modified`, `Vary`, …), never by
+         * file type / `Content-Type`. A private cache (`shared = false`), so it
+         * honors `no-store`/`no-cache` but — like the native private caches —
+         * will cache responses to `Authorization`-bearing requests when their
+         * headers permit; suppress those by having the server send `no-store`.
+         *
+         * Only effective in builds compiled with the `cache` cargo feature; in a
+         * feature-less build this is a no-op (and `clear_cache`/`cache_size_bytes`
+         * are inert). See `src/cache.rs`.
+         */enableCache: Bool = false, 
+        /**
+         * Directory for the persistent on-disk cache tier (present on both
+         * platforms, matching OkHttp's `Cache` directory and `URLCache`'s disk
+         * store). Pass an app-writable path — Android `context.cacheDir`, iOS the
+         * `.cachesDirectory`. `None` disables the disk tier; the cache then lives
+         * only in the in-memory tier where one exists (iOS), or is effectively
+         * disabled (Android). Ignored when `enable_cache` is false.
+         */cacheDir: String? = nil, 
+        /**
+         * Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
+         * entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
+         * defaults to 20 MiB, matching a typical `URLCache` disk capacity.
+         */maxCacheBytes: UInt64? = nil) {
         self.pinnedCertSha256 = pinnedCertSha256
-        self.enablePostQuantum = enablePostQuantum
         self.defaultTimeoutMs = defaultTimeoutMs
         self.connectTimeoutMs = connectTimeoutMs
-        self.maxBodyBytes = maxBodyBytes
         self.enableCookies = enableCookies
         self.userAgent = userAgent
         self.redirectPolicy = redirectPolicy
+        self.enableCache = enableCache
+        self.cacheDir = cacheDir
+        self.maxCacheBytes = maxCacheBytes
     }
 }
 
@@ -992,16 +1120,10 @@ extension PqcConfig: Equatable, Hashable {
         if lhs.pinnedCertSha256 != rhs.pinnedCertSha256 {
             return false
         }
-        if lhs.enablePostQuantum != rhs.enablePostQuantum {
-            return false
-        }
         if lhs.defaultTimeoutMs != rhs.defaultTimeoutMs {
             return false
         }
         if lhs.connectTimeoutMs != rhs.connectTimeoutMs {
-            return false
-        }
-        if lhs.maxBodyBytes != rhs.maxBodyBytes {
             return false
         }
         if lhs.enableCookies != rhs.enableCookies {
@@ -1013,18 +1135,28 @@ extension PqcConfig: Equatable, Hashable {
         if lhs.redirectPolicy != rhs.redirectPolicy {
             return false
         }
+        if lhs.enableCache != rhs.enableCache {
+            return false
+        }
+        if lhs.cacheDir != rhs.cacheDir {
+            return false
+        }
+        if lhs.maxCacheBytes != rhs.maxCacheBytes {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(pinnedCertSha256)
-        hasher.combine(enablePostQuantum)
         hasher.combine(defaultTimeoutMs)
         hasher.combine(connectTimeoutMs)
-        hasher.combine(maxBodyBytes)
         hasher.combine(enableCookies)
         hasher.combine(userAgent)
         hasher.combine(redirectPolicy)
+        hasher.combine(enableCache)
+        hasher.combine(cacheDir)
+        hasher.combine(maxCacheBytes)
     }
 }
 
@@ -1038,25 +1170,27 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
         return
             try PqcConfig(
                 pinnedCertSha256: FfiConverterSequenceString.read(from: &buf), 
-                enablePostQuantum: FfiConverterBool.read(from: &buf), 
                 defaultTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
                 connectTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
-                maxBodyBytes: FfiConverterOptionUInt64.read(from: &buf), 
                 enableCookies: FfiConverterBool.read(from: &buf), 
                 userAgent: FfiConverterOptionString.read(from: &buf), 
-                redirectPolicy: FfiConverterTypeRedirectPolicy.read(from: &buf)
+                redirectPolicy: FfiConverterTypeRedirectPolicy.read(from: &buf), 
+                enableCache: FfiConverterBool.read(from: &buf), 
+                cacheDir: FfiConverterOptionString.read(from: &buf), 
+                maxCacheBytes: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: PqcConfig, into buf: inout [UInt8]) {
         FfiConverterSequenceString.write(value.pinnedCertSha256, into: &buf)
-        FfiConverterBool.write(value.enablePostQuantum, into: &buf)
         FfiConverterOptionUInt64.write(value.defaultTimeoutMs, into: &buf)
         FfiConverterOptionUInt64.write(value.connectTimeoutMs, into: &buf)
-        FfiConverterOptionUInt64.write(value.maxBodyBytes, into: &buf)
         FfiConverterBool.write(value.enableCookies, into: &buf)
         FfiConverterOptionString.write(value.userAgent, into: &buf)
         FfiConverterTypeRedirectPolicy.write(value.redirectPolicy, into: &buf)
+        FfiConverterBool.write(value.enableCache, into: &buf)
+        FfiConverterOptionString.write(value.cacheDir, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxCacheBytes, into: &buf)
     }
 }
 
@@ -1193,8 +1327,6 @@ public enum PqcError: Swift.Error {
     
     case InvalidRequest(message: String)
     
-    case InvalidResponse(message: String)
-    
     case PinningFailure(message: String)
     
     case TrustVerification(message: String)
@@ -1231,15 +1363,11 @@ public struct FfiConverterTypePqcError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .InvalidResponse(
+        case 5: return .PinningFailure(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .PinningFailure(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 7: return .TrustVerification(
+        case 6: return .TrustVerification(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -1262,12 +1390,10 @@ public struct FfiConverterTypePqcError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         case .InvalidRequest(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .InvalidResponse(_ /* message is ignored*/):
-            writeInt(&buf, Int32(5))
         case .PinningFailure(_ /* message is ignored*/):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(5))
         case .TrustVerification(_ /* message is ignored*/):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(6))
 
         
         }
@@ -1573,6 +1699,12 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_pqc_client_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqchttpclient_cache_size_bytes() != 50194) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqchttpclient_clear_cache() != 43165) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pqc_client_checksum_method_pqchttpclient_request() != 32508) {
         return InitializationResult.apiChecksumMismatch
