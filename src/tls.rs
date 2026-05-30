@@ -7,11 +7,13 @@ use crate::config::PqcConfig;
 use crate::error::PqcError;
 use crate::pinning::{decode_pin_list, PinningVerifier};
 
-/// Build a rustls `ClientConfig` with the requested crypto provider.
+/// Build a rustls `ClientConfig` for the PQC hybrid handshake.
 ///
-/// - When `enable_post_quantum` is true, uses `rustls_post_quantum::provider()`
-///   which prepends `X25519MLKEM768` to the default group list (so the
-///   `ClientHello` carries both `X25519MLKEM768` and `X25519` key_shares).
+/// - Always uses `rustls_post_quantum::provider()`, which prepends
+///   `X25519MLKEM768` to the default group list (so the `ClientHello` carries
+///   both `X25519MLKEM768` and classical `X25519` key_shares; a PQ-capable
+///   peer negotiates the hybrid, anything else falls back to classical). There
+///   is deliberately no switch to turn this off — see `PqcConfig`.
 /// - Cert chain validation defers to the platform trust store via
 ///   `rustls-platform-verifier` (iOS Security framework / Android KeyStore),
 ///   so MDM-distributed enterprise roots, captive portals, and OS revocation
@@ -19,19 +21,11 @@ use crate::pinning::{decode_pin_list, PinningVerifier};
 /// - When `pinned_cert_sha256` is non-empty, wraps the platform verifier in a
 ///   `PinningVerifier` that additionally enforces an SPKI pin from the chain.
 pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
-    let provider = Arc::new(if cfg.enable_post_quantum {
-        rustls_post_quantum::provider()
-    } else {
-        // rustls's DEFAULT_KX_GROUPS includes X25519MLKEM768 regardless of
-        // the `prefer-post-quantum` feature (it only changes the hybrid's
-        // position), so default_provider() still offers the hybrid and a
-        // PQ-capable server negotiates it. To actually disable PQC, drop
-        // the MLKEM hybrid so the ClientHello carries classical groups only.
-        let mut base = rustls::crypto::aws_lc_rs::default_provider();
-        base.kx_groups
-            .retain(|g| g.name() != rustls::NamedGroup::X25519MLKEM768);
-        base
-    });
+    // Always offer the X25519MLKEM768 hybrid. This provider prepends it to the
+    // default group list, so the ClientHello carries both the hybrid and
+    // classical X25519 — servers that don't support the hybrid negotiate
+    // classical automatically, transparently to the caller.
+    let provider = Arc::new(rustls_post_quantum::provider());
 
     // builder_with_provider consumes the provider, but the pinning branch
     // also needs it to share the same crypto stack. Arc::clone is a

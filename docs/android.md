@@ -122,7 +122,6 @@ class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
 // (e.g. bad base64 in pinnedCertSha256) — wrap in try/catch in production.
 val pqc = PqcHttpClient(PqcConfig(
     pinnedCertSha256 = CertPins.SPKI_SHA256,   // see Section 10 for how to compute
-    enablePostQuantum = true,
     defaultTimeoutMs = 15_000UL,
     connectTimeoutMs = null,                   // 10s default
     maxBodyBytes = null,                       // 16 MiB default
@@ -165,7 +164,6 @@ class MainApplication : Application(), ReactApplication {
     private val pqc by lazy {
         PqcHttpClient(PqcConfig(
             pinnedCertSha256 = CertPins.SPKI_SHA256,
-            enablePostQuantum = true,
             defaultTimeoutMs = 15_000UL,
             connectTimeoutMs = null,
             maxBodyBytes = null,
@@ -206,7 +204,6 @@ import kotlinx.coroutines.runBlocking
 
 val pqc = PqcHttpClient(PqcConfig(
     pinnedCertSha256 = emptyList(),
-    enablePostQuantum = true,
     defaultTimeoutMs = 10_000UL,
     connectTimeoutMs = null,
     maxBodyBytes = null,

@@ -10,12 +10,12 @@ pub struct PqcConfig {
     /// public root. See `src/pinning.rs`.
     pub pinned_cert_sha256: Vec<String>,
 
-    /// Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
-    /// (default true). The ClientHello also carries classical groups, so a
-    /// peer that rejects the hybrid falls back to classical — this is a
-    /// preference, not enforcement. Set false only for A/B comparison.
-    #[uniffi(default = true)]
-    pub enable_post_quantum: bool,
+    // NOTE: there is no "enable post-quantum" toggle. This client *always*
+    // advertises the X25519MLKEM768 hybrid (IANA 0x11EC) alongside classical
+    // X25519 — offering the hybrid is the entire purpose of the crate. A
+    // PQ-capable peer negotiates it; any other peer transparently falls back
+    // to classical. To compare PQC vs. classical, point the example apps at
+    // this client vs. the platform network stack rather than flipping a flag.
 
     // ----- Timeouts -----
     /// Total request budget (handshake + headers + body); on expiry the
@@ -51,6 +51,12 @@ pub struct PqcConfig {
     /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
     /// are refused so a redirect can't silently downgrade to an un-pinned
     /// host.
+    ///
+    /// "Refused" here follows reqwest semantics: the redirect is **not
+    /// followed**, and the 3xx response itself (with its `Location` header) is
+    /// returned to the caller — it is *not* turned into an error. Callers that
+    /// treat any `status < 400` as success should therefore check for 3xx, or
+    /// read `final_url` on the response to confirm where the body came from.
     pub redirect_policy: RedirectPolicy,
 
     // ----- Caching -----

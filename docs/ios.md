@@ -97,7 +97,6 @@ final class PqcURLProtocol: URLProtocol {
         try? PqcHttpClient(
             config: PqcConfig(
                 pinnedCertSha256: CertPins.spkiSha256,
-                enablePostQuantum: true,
                 defaultTimeoutMs: 15_000,
                 connectTimeoutMs: nil,           // 10s default
                 maxBodyBytes: nil,               // 16 MiB default
@@ -245,7 +244,6 @@ For new code paths or non-URLSession-based clients, call `PqcHttpClient` directl
 let pqc = try PqcHttpClient(
     config: PqcConfig(
         pinnedCertSha256: [],
-        enablePostQuantum: true,
         defaultTimeoutMs: 10_000,
         connectTimeoutMs: nil,           // 10s default
         maxBodyBytes: nil,               // 16 MiB default

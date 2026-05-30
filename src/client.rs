@@ -228,6 +228,9 @@ impl PqcHttpClient {
         };
 
         let status = resp.status().as_u16();
+        // The URL the body actually came from (post-redirect). Captured before
+        // `resp` is consumed by the streaming loop below.
+        let final_url = resp.url().to_string();
         // Map to the ALPN id the API documents ("h2", "http/1.1"); the
         // Version Debug string ("HTTP/2.0") would break consumer equality.
         let negotiated_protocol = match resp.version() {
@@ -282,6 +285,7 @@ impl PqcHttpClient {
 
         Ok(HttpResponse {
             status,
+            final_url,
             headers,
             body,
             negotiated_protocol,

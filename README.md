@@ -62,7 +62,6 @@ PqcAndroidInit.init(this)
 // Constructor throws PqcException on bad config (e.g. a malformed pin):
 val client = PqcHttpClient(PqcConfig(
     pinnedCertSha256 = emptyList(),   // SPKI pins; empty = platform trust only
-    enablePostQuantum = true,
     defaultTimeoutMs = 15_000UL,
     connectTimeoutMs = null,          // 10s default
     maxBodyBytes = null,              // 16 MiB default
@@ -90,7 +89,6 @@ import PqcCore
 
 let client = try PqcHttpClient(config: PqcConfig(
     pinnedCertSha256: [],
-    enablePostQuantum: true,
     defaultTimeoutMs: 15_000,
     connectTimeoutMs: nil,
     maxBodyBytes: nil,
