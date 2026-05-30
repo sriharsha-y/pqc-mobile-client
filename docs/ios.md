@@ -97,10 +97,8 @@ final class PqcURLProtocol: URLProtocol {
         try? PqcHttpClient(
             config: PqcConfig(
                 pinnedCertSha256: CertPins.spkiSha256,
-                enablePostQuantum: true,
                 defaultTimeoutMs: 15_000,
                 connectTimeoutMs: nil,           // 10s default
-                maxBodyBytes: nil,               // 16 MiB default
                 enableCookies: false,            // banking: no auto cookie jar
                 userAgent: "MyApp/1.0",          // identify to bank WAF / Akamai
                 redirectPolicy: .sameOriginOnly  // refuse cross-origin 3xx
@@ -245,10 +243,8 @@ For new code paths or non-URLSession-based clients, call `PqcHttpClient` directl
 let pqc = try PqcHttpClient(
     config: PqcConfig(
         pinnedCertSha256: [],
-        enablePostQuantum: true,
         defaultTimeoutMs: 10_000,
         connectTimeoutMs: nil,           // 10s default
-        maxBodyBytes: nil,               // 16 MiB default
         enableCookies: false,
         userAgent: "MyApp/1.0",
         redirectPolicy: .sameOriginOnly
@@ -361,3 +357,39 @@ openssl s_client -showcerts -servername api.example.com -connect api.example.com
 **Always configure at least two pins** (e.g. the current intermediate + a backup intermediate or a pre-deployed next leaf), and document a rotation playbook. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.
+
+## 11. Response caching (opt-in)
+
+The Rust core can cache HTTP responses (RFC 9111), so repeat GETs are served without a network round-trip — the same idea as `URLCache`, but it lives in the core because the core owns the socket (the `URLProtocol` path marks its responses `.notAllowed`, see §3). On iOS it's a **memory + disk** cache, mirroring `URLCache`'s composite; on Android it's disk-only. It is **off by default**. Enable it per client:
+
+```swift
+let caches = FileManager.default
+    .urls(for: .cachesDirectory, in: .userDomainMask).first!
+let httpCacheDir = caches.appendingPathComponent("pqc-http").path
+
+let config = PqcConfig(
+    // … existing fields …
+    redirectPolicy: .sameOriginOnly,
+    enableCache: true,
+    cacheDir: httpCacheDir,             // persistent disk tier; nil → memory-only
+    maxCacheBytes: 20 * 1024 * 1024     // 20 MiB, like URLCache's disk capacity; nil → 20 MiB
+)
+
+// On logout / session end (and a "Clear cache" button):
+await client.clearCache()
+let bytes = await client.cacheSizeBytes()   // UInt64, e.g. for "Clear cache (1.2 MB)"
+```
+
+**Use exactly one cache.** Keep the `URLProtocol`'s `cacheStoragePolicy: .notAllowed` (and leave `URLCache` unconfigured for the routed session) so the core's cache is the single source of truth — no double storage. Direct-`URLSession`/direct-API consumers just set the config above; nothing else changes.
+
+### What gets cached (it's not about file type)
+
+Cacheability is decided by **request method + response status + cache headers** — never by extension or `Content-Type`. A `.json`, `.html`, `.svg`, or image are all cached identically *if and only if* their headers allow it. In practice CDN assets sent with `Cache-Control: max-age=…` cache; API responses sent with `Cache-Control: no-store` (typical for account/balance/transaction endpoints) do not.
+
+This is a **private** cache (`shared = false`), so — exactly like `URLCache`/OkHttp — it will cache responses to `Authorization`-bearing requests when their headers permit. To keep a sensitive endpoint out of the cache, have the server send `Cache-Control: no-store` (or `no-cache` to force revalidation). `clearCache()` on logout is the belt-and-suspenders backstop.
+
+### Notes / behavior vs. native
+
+- **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache: true` makes the initializer throw `PqcError.invalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
+- **vs. `URLCache`:** the memory tier is true LRU; the disk tier evicts oldest-first (FIFO) once `maxCacheBytes` is exceeded. We deliberately do **not** replicate two `URLCache` quirks: its 200–299-only status filter (we cache the broader RFC set) and its "reject responses larger than ~5% of capacity" rule (we bound by total size + LRU instead).
+- **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.

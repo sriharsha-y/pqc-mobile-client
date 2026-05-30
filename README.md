@@ -54,6 +54,7 @@ Most apps wire this into their existing HTTP stack — an **OkHttp `Interceptor`
 
 ```kotlin
 import io.github.sriharsha_y.pqc.*
+import kotlinx.coroutines.runBlocking   // request() is a suspend fun; call it from a coroutine
 
 // Once, in Application.onCreate, before constructing any client:
 PqcAndroidInit.init(this)
@@ -61,10 +62,8 @@ PqcAndroidInit.init(this)
 // Constructor throws PqcException on bad config (e.g. a malformed pin):
 val client = PqcHttpClient(PqcConfig(
     pinnedCertSha256 = emptyList(),   // SPKI pins; empty = platform trust only
-    enablePostQuantum = true,
     defaultTimeoutMs = 15_000UL,
     connectTimeoutMs = null,          // 10s default
-    maxBodyBytes = null,              // 16 MiB default
     enableCookies = false,
     userAgent = "MyApp/1.0",
     redirectPolicy = RedirectPolicy.SameOriginOnly,
@@ -89,10 +88,8 @@ import PqcCore
 
 let client = try PqcHttpClient(config: PqcConfig(
     pinnedCertSha256: [],
-    enablePostQuantum: true,
     defaultTimeoutMs: 15_000,
     connectTimeoutMs: nil,
-    maxBodyBytes: nil,
     enableCookies: false,
     userAgent: "MyApp/1.0",
     redirectPolicy: .sameOriginOnly))
@@ -159,7 +156,7 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 | System trust store (iOS Keychain / Android KeyStore) | ✅ via `rustls-platform-verifier` |
 | Cert pinning (SPKI SHA-256, any cert in chain) | ✅ Layered on platform verifier; empty list disables |
 | Cookies | ✅ Opt-in via `enableCookies`; off by default |
-| gzip / brotli | ✅ Body capped via `maxBodyBytes` (16 MiB default) to defuse decompression bombs |
+| gzip / brotli | ✅ Transparent decoding via reqwest (no cap — matches `URLSession` / `OkHttp`) |
 | Redirects | ✅ `SameOriginOnly` default; also `NoRedirects` / `Limited(max)` |
 | Timeouts (connect / total) | ✅ Separated so connect fails fast on cell handover |
 | Connection pooling | ✅ |

@@ -10,13 +10,6 @@ pub struct PqcConfig {
     /// public root. See `src/pinning.rs`.
     pub pinned_cert_sha256: Vec<String>,
 
-    /// Advertise X25519MLKEM768 (IANA 0x11EC) as the preferred KEX group
-    /// (default true). The ClientHello also carries classical groups, so a
-    /// peer that rejects the hybrid falls back to classical — this is a
-    /// preference, not enforcement. Set false only for A/B comparison.
-    #[uniffi(default = true)]
-    pub enable_post_quantum: bool,
-
     // ----- Timeouts -----
     /// Total request budget (handshake + headers + body); on expiry the
     /// request aborts with `PqcError::Timeout`. `None` means no total cap —
@@ -27,13 +20,6 @@ pub struct PqcConfig {
     /// `default_timeout_ms` so a stalled connect (e.g. cellular handover)
     /// fails fast instead of burning the whole request budget. `None` = 10s.
     pub connect_timeout_ms: Option<u64>,
-
-    // ----- Body protection -----
-    /// Hard ceiling on a response body (post-decompression); exceeding it
-    /// trips `PqcError::InvalidResponse`. Guards against decompression bombs
-    /// (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
-    /// expand to GBs and OOM the app. `None` defaults to 16 MiB.
-    pub max_body_bytes: Option<u64>,
 
     // ----- Cookies -----
     /// Off by default: no cookie jar, so callers round-trip
@@ -51,7 +37,44 @@ pub struct PqcConfig {
     /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
     /// are refused so a redirect can't silently downgrade to an un-pinned
     /// host.
+    ///
+    /// "Refused" here follows reqwest semantics: the redirect is **not
+    /// followed**, and the 3xx response itself (with its `Location` header) is
+    /// returned to the caller — it is *not* turned into an error. Callers that
+    /// treat any `status < 400` as success should therefore check for 3xx, or
+    /// read `final_url` on the response to confirm where the body came from.
     pub redirect_policy: RedirectPolicy,
+
+    // ----- Caching -----
+    /// Opt-in RFC 9111 response cache (default false). When enabled it mirrors
+    /// the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
+    /// cacheability is decided by request method + response status + cache
+    /// headers (`Cache-Control`, `ETag`, `Last-Modified`, `Vary`, …), never by
+    /// file type / `Content-Type`. A private cache (`shared = false`), so it
+    /// honors `no-store`/`no-cache` but — like the native private caches —
+    /// will cache responses to `Authorization`-bearing requests when their
+    /// headers permit; suppress those by having the server send `no-store`.
+    ///
+    /// Only effective in builds compiled with the `cache` cargo feature; in a
+    /// feature-less build this is a no-op (and `clear_cache`/`cache_size_bytes`
+    /// are inert). See `src/cache.rs`.
+    #[uniffi(default = false)]
+    pub enable_cache: bool,
+
+    /// Directory for the persistent on-disk cache tier (present on both
+    /// platforms, matching OkHttp's `Cache` directory and `URLCache`'s disk
+    /// store). Pass an app-writable path — Android `context.cacheDir`, iOS the
+    /// `.cachesDirectory`. `None` disables the disk tier; the cache then lives
+    /// only in the in-memory tier where one exists (iOS), or is effectively
+    /// disabled (Android). Ignored when `enable_cache` is false.
+    #[uniffi(default = None)]
+    pub cache_dir: Option<String>,
+
+    /// Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
+    /// entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
+    /// defaults to 20 MiB, matching a typical `URLCache` disk capacity.
+    #[uniffi(default = None)]
+    pub max_cache_bytes: Option<u64>,
 }
 
 /// What the client does on a 3xx. The reqwest default (10 unbounded

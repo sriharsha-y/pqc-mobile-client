@@ -63,18 +63,17 @@ class MainApplication : Application(), ReactApplication {
     //   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
-    // Shared config differing only in enablePostQuantum; the sample keeps
-    // both clients so the UI can toggle PQC (the flag is fixed at construction).
-    fun config(enablePqc: Boolean) = PqcConfig(
+    // Always advertises the X25519MLKEM768 hybrid. The classical path is
+    // OkHttp's own stack (X-Pqc-Mode: off → PqcInterceptor falls through to the
+    // OS network stack), not a second client.
+    val config = PqcConfig(
       // Empty = pinning disabled. A real banking app should populate with
       // base64(SHA-256(SPKI)) for the production cert + at least one backup.
       pinnedCertSha256 = emptyList(),
-      enablePostQuantum = enablePqc,
       defaultTimeoutMs = 15_000UL,
-      // null = built-in defaults (10s connect, 16 MiB body cap). Set these
-      // explicitly in production so they survive a defaults change.
+      // null = 10s connect default. Set explicitly in production so it
+      // survives a defaults change.
       connectTimeoutMs = null,
-      maxBodyBytes = null,
       // Banking clients should NOT auto-attach Set-Cookie across endpoints
       // (session-leak vector); round-trip cookies via headers when needed.
       enableCookies = false,
@@ -83,13 +82,16 @@ class MainApplication : Application(), ReactApplication {
       // Refuse cross-origin redirects so the original handshake's pin / PQ
       // guarantees can't be silently dropped by a 3xx to another host.
       redirectPolicy = RedirectPolicy.SameOriginOnly,
+      // Opt-in RFC 9111 response cache (off here). To enable, set
+      // enableCache = true and pass cacheDir = cacheDir.absolutePath.
+      enableCache = false,
+      cacheDir = null,
+      maxCacheBytes = null,
     )
 
     val pqcClient: PqcHttpClient
-    val classicalClient: PqcHttpClient
     try {
-      pqcClient = PqcHttpClient(config(enablePqc = true))
-      classicalClient = PqcHttpClient(config(enablePqc = false))
+      pqcClient = PqcHttpClient(config)
     } catch (t: Throwable) {
       Log.e(TAG, "PqcHttpClient construction failed; falling back to default OkHttp", t)
       return
@@ -101,7 +103,7 @@ class MainApplication : Application(), ReactApplication {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
         .cookieJar(ReactCookieJarContainer())
-        .addInterceptor(PqcInterceptor(pqcClient, classicalClient))    // MUST be last
+        .addInterceptor(PqcInterceptor(pqcClient))    // MUST be last
         .build()
     })
     Log.i(TAG, "PQC OkHttp factory installed")

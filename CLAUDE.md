@@ -43,6 +43,10 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 - Generating bindings always uses `cargo run --release --features cli --bin uniffi-bindgen -- generate ...` on the **host**.
 - When adding new code paths or examples, do not enable `cli` on default or on the library target.
 
+## The `cache` feature — opt-in response cache
+
+`cache` (off by default, like `cli`) compiles in the RFC 9111 response cache (`src/cache.rs`): the `http-cache`/`http-cache-semantics` stack + `cacache` (disk) + `moka` (iOS memory tier). It's gated at compile time **and** at runtime (`PqcConfig.enable_cache`, also off by default). The mobile build scripts pass `--features cache` (override with `PQC_CARGO_FEATURES=`), so release artifacts ship it; it adds ~10 MB to the iOS arm64 `.a` (measure before changing). Do **not** make it a `default` feature — the default/CI build must stay cache-free, and `--features cache` must never be combined with `cli`. The FFI surface is identical with or without it (`clear_cache`/`cache_size_bytes` are always exported, and inert when caching is off), so bindings are stable across both builds.
+
 ## Release profile / panic strategy
 
 `[profile.release]` is tuned for mobile size (`opt-level = "z"`, LTO, `codegen-units = 1`, `strip = true`). `panic = "unwind"` is intentional — `panic = "abort"` would make panicking test assertions SIGABRT and report 0 failures with non-zero exit. See comment in `Cargo.toml`.
@@ -52,7 +56,8 @@ The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `C
 - `src/lib.rs` — module wiring + `uniffi::setup_scaffolding!("pqc")`.
 - `src/android_init.rs` — JNI bridge (`Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`; the `_1` is JNI escaping for the `_` in the `sriharsha_y` package segment) that hands the Android `Application` context to `rustls-platform-verifier`. iOS has no equivalent (Apple's `Security` framework is process-wide).
 - The UniFFI API surface is defined **in Rust via proc-macros** (no `.udl` file): `#[derive(uniffi::Record)]` on the config/request/response types, `#[derive(uniffi::Enum)]` on `HttpMethod`/`RedirectPolicy`, `#[derive(uniffi::Error)]` + `#[uniffi(flat_error)]` on `PqcError`, and `#[derive(uniffi::Object)]` + `#[uniffi::export]` (with `#[uniffi::constructor]` on `new`, `async_runtime = "tokio"` on `request`) on `PqcHttpClient`. The Rust types are the source of truth for the Kotlin/Swift bindings. **NOTE: `PqcError` MUST keep `#[uniffi(flat_error)]`** — without it the generated error loses its `message` field (a silent breaking change for consumers).
-- `src/client.rs` — `PqcHttpClient`, the reqwest wrapper.
+- `src/client.rs` — `PqcHttpClient`, the reqwest wrapper. Holds an `HttpBackend` enum: `Plain(reqwest::Client)` by default, or `Cached(ClientWithMiddleware)` when the `cache` feature + `enable_cache` are on.
+- `src/cache.rs` — (`cache` feature) `PqcCacheManager`, a private (`shared = false`), byte-bounded `cacache` disk tier + iOS `moka` memory tier, plugged into the `http-cache-reqwest` middleware. Cacheability is header/status/method-driven, never file-type. See the module doc for the deliberate divergences from native LRU.
 - `src/tls.rs` — rustls + `rustls-post-quantum` + `rustls-platform-verifier` wiring; this is where the PQC group list is installed.
 - `src/pinning.rs` — SPKI SHA-256 cert pinning layered on top of platform verifier.
 - `src/config.rs`, `src/types.rs`, `src/error.rs` — `PqcConfig`, `HttpRequest`/`HttpResponse`/`HttpMethod`, `PqcError`.

@@ -23,12 +23,18 @@ export IPHONESIMULATOR_DEPLOYMENT_TARGET="${IPHONESIMULATOR_DEPLOYMENT_TARGET:-1
 
 echo "==> IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET"
 
-echo "==> Building for iOS device arm64"
-cargo build --release --target aarch64-apple-ios
+# `--features cache` ships the opt-in RFC 9111 response cache (gated further
+# at runtime by PqcConfig.enable_cache, off by default). It must NOT be
+# combined with `cli` — that's the host-only bindgen build below. Override the
+# feature set with PQC_CARGO_FEATURES=... for a lean (cache-less) build.
+CARGO_FEATURES="${PQC_CARGO_FEATURES:-cache}"
+
+echo "==> Building for iOS device arm64 (features: $CARGO_FEATURES)"
+cargo build --release --target aarch64-apple-ios --features "$CARGO_FEATURES"
 
 echo "==> Building for iOS simulator (arm64 + x86_64)"
-cargo build --release --target aarch64-apple-ios-sim
-cargo build --release --target x86_64-apple-ios
+cargo build --release --target aarch64-apple-ios-sim --features "$CARGO_FEATURES"
+cargo build --release --target x86_64-apple-ios --features "$CARGO_FEATURES"
 
 echo "==> Combining simulator slices via lipo"
 mkdir -p target/ios-sim

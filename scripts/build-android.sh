@@ -20,13 +20,19 @@ cd "$ROOT"
 OUT_DIR="target/jniLibs"
 mkdir -p "$OUT_DIR"
 
-echo "==> Cross-compiling for arm64-v8a, armeabi-v7a, x86_64"
+# `--features cache` ships the opt-in RFC 9111 response cache (gated further
+# at runtime by PqcConfig.enable_cache, off by default). It must NOT be
+# combined with `cli` — that's the host-only bindgen build below. Override the
+# feature set with PQC_CARGO_FEATURES=... for a lean (cache-less) build.
+CARGO_FEATURES="${PQC_CARGO_FEATURES:-cache}"
+
+echo "==> Cross-compiling for arm64-v8a, armeabi-v7a, x86_64 (features: $CARGO_FEATURES)"
 cargo ndk \
     -t arm64-v8a \
     -t armeabi-v7a \
     -t x86_64 \
     -o "$OUT_DIR" \
-    build --release
+    build --release --features "$CARGO_FEATURES"
 
 echo "==> Generating Kotlin bindings (via --library mode)"
 # --library reads the UniFFI metadata (all proc-macro — no .udl) from a

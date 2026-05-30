@@ -9,23 +9,31 @@ use crate::error::PqcError;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
 
-/// Default body cap (`max_body_bytes == None`). 16 MiB: generous for JSON,
-/// small enough that a decompression bomb can't OOM the app.
-const DEFAULT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
-
 /// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
 /// handover: absorbs one SYN retry, still fails fast.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Plain = bare reqwest client (default). Cached = RFC 9111 middleware wrap
+/// (only when `cache` feature + `enable_cache` are on). TLS/PQC/pinning are
+/// identical either way.
+enum HttpBackend {
+    Plain(reqwest::Client),
+    #[cfg(feature = "cache")]
+    Cached(reqwest_middleware::ClientWithMiddleware),
+}
+
 /// The HTTPS client exposed to Kotlin / Swift via UniFFI.
 ///
-/// Holds a single `reqwest::Client` with PQC TLS configured. Construct once
-/// per process (it owns the connection pool); calling `request` is cheap.
+/// Holds a single client with PQC TLS configured. Construct once per process
+/// (it owns the connection pool); calling `request` is cheap.
 #[derive(uniffi::Object)]
 pub struct PqcHttpClient {
-    inner: reqwest::Client,
+    inner: HttpBackend,
     default_timeout: Option<Duration>,
-    max_body_bytes: u64,
+    // Held alongside the middleware's copy so clear_cache / cache_size_bytes
+    // reach the same store. None when caching is off.
+    #[cfg(feature = "cache")]
+    cache_manager: Option<crate::cache::PqcCacheManager>,
 }
 
 #[uniffi::export]
@@ -94,11 +102,52 @@ impl PqcHttpClient {
         // constructor doc.
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
-        Ok(Self {
-            inner: client,
-            default_timeout: config.default_timeout_ms.map(Duration::from_millis),
-            max_body_bytes: config.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
-        })
+        let default_timeout = config.default_timeout_ms.map(Duration::from_millis);
+
+        #[cfg(feature = "cache")]
+        {
+            // `enable_cache` builds the cache layer; a missing tier (e.g.
+            // Android with no `cache_dir`) logs and falls back to no caching
+            // rather than failing the constructor.
+            let cache_manager = if config.enable_cache {
+                let m = crate::cache::PqcCacheManager::new(&config);
+                if m.is_none() {
+                    log::warn!(
+                        "pqc cache: enable_cache=true but no usable tier \
+                         (set cache_dir for a persistent cache); caching disabled"
+                    );
+                }
+                m
+            } else {
+                None
+            };
+            let inner = match &cache_manager {
+                Some(m) => {
+                    HttpBackend::Cached(crate::cache::build_cached_client(client, m.clone()))
+                }
+                None => HttpBackend::Plain(client),
+            };
+            // Tail of the function when `cache` is compiled in (the
+            // `cfg(not)` block below is stripped away).
+            Ok(Self {
+                inner,
+                default_timeout,
+                cache_manager,
+            })
+        }
+
+        #[cfg(not(feature = "cache"))]
+        {
+            // Fail loud: asking for caching in a build that didn't compile it
+            // in is a misconfiguration, not a silent no-op.
+            if config.enable_cache {
+                return Err(PqcError::InvalidRequest);
+            }
+            Ok(Self {
+                inner: HttpBackend::Plain(client),
+                default_timeout,
+            })
+        }
     }
 }
 
@@ -120,31 +169,54 @@ impl PqcHttpClient {
             HttpMethod::Options => reqwest::Method::OPTIONS,
         };
 
-        let mut builder = self.inner.request(method, &req.url);
-
-        for (k, values) in &req.headers {
-            let name = HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-            for v in values {
-                let value =
-                    HeaderValue::try_from(v.as_str()).map_err(|_| PqcError::InvalidRequest)?;
-                builder = builder.header(name.clone(), value);
-            }
-        }
-
-        if let Some(body) = req.body {
-            builder = builder.body(body);
-        }
-
         let timeout_ms = req
             .timeout_ms
             .or(self.default_timeout.map(|d| d.as_millis() as u64));
-        if let Some(t) = timeout_ms {
-            builder = builder.timeout(Duration::from_millis(t));
+        // Moved (not cloned) into whichever match arm runs — cloning would
+        // copy the entire upload on every request.
+        let body = req.body;
+
+        // The two backends share the same header/body/timeout surface but
+        // have distinct RequestBuilder types, so a macro fills both without
+        // drift.
+        macro_rules! build_request {
+            ($rb:expr) => {{
+                let mut b = $rb;
+                for (k, values) in &req.headers {
+                    let name =
+                        HeaderName::try_from(k.as_str()).map_err(|_| PqcError::InvalidRequest)?;
+                    for v in values {
+                        let value = HeaderValue::try_from(v.as_str())
+                            .map_err(|_| PqcError::InvalidRequest)?;
+                        b = b.header(name.clone(), value);
+                    }
+                }
+                if let Some(body) = body {
+                    b = b.body(body);
+                }
+                if let Some(t) = timeout_ms {
+                    b = b.timeout(Duration::from_millis(t));
+                }
+                b
+            }};
         }
 
-        let resp = builder.send().await.map_err(map_reqwest_err)?;
+        let resp = match &self.inner {
+            HttpBackend::Plain(c) => build_request!(c.request(method, &req.url))
+                .send()
+                .await
+                .map_err(map_reqwest_err)?,
+            #[cfg(feature = "cache")]
+            HttpBackend::Cached(c) => build_request!(c.request(method, &req.url))
+                .send()
+                .await
+                .map_err(map_middleware_err)?,
+        };
 
         let status = resp.status().as_u16();
+        // The URL the body actually came from (post-redirect). Captured before
+        // `resp` is consumed by the streaming loop below.
+        let final_url = resp.url().to_string();
         // Map to the ALPN id the API documents ("h2", "http/1.1"); the
         // Version Debug string ("HTTP/2.0") would break consumer equality.
         let negotiated_protocol = match resp.version() {
@@ -168,48 +240,90 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        // Stream with a hard cap so a decompression bomb (CWE-409) can't OOM
-        // the app — Content-Length is pre-decompression and easily lied
-        // about, so the only safe bound is counting decompressed bytes.
         // Mid-body errors are transport-level (handshake already done), so
-        // map to Timeout/Network, skipping the rustls classifier.
-        let cap = self.max_body_bytes;
-        let mut body = Vec::new();
-        let mut stream = resp;
-        loop {
-            let next = stream.chunk().await.map_err(|e| {
+        // map to Timeout/Network, skipping the rustls classifier. Matches the
+        // native stacks' shape: URLSession `dataTask` and OkHttp
+        // `ResponseBody.bytes()` buffer the whole body to memory with no cap
+        // — callers stream when they need to bound it.
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| {
                 if e.is_timeout() {
                     PqcError::Timeout
                 } else {
                     PqcError::Network
                 }
-            })?;
-            match next {
-                Some(chunk) => {
-                    // saturating_add so a huge chunk can't wrap the cap check.
-                    let projected = (body.len() as u64).saturating_add(chunk.len() as u64);
-                    if projected > cap {
-                        return Err(PqcError::InvalidResponse);
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                None => break,
-            }
-        }
+            })?
+            .to_vec();
 
         Ok(HttpResponse {
             status,
+            final_url,
             headers,
             body,
             negotiated_protocol,
         })
     }
+
+    /// Clear all cached responses. Best-effort and non-throwing, mirroring
+    /// `URLCache.removeAllCachedResponses` / OkHttp `Cache.evictAll`. Also the
+    /// recommended logout / session-end hook so cached responses don't outlive
+    /// a session. A no-op when caching is disabled or the `cache` feature was
+    /// not compiled in.
+    pub async fn clear_cache(&self) {
+        #[cfg(feature = "cache")]
+        if let Some(m) = &self.cache_manager {
+            m.clear().await;
+        }
+    }
+
+    /// Total bytes in the on-disk cache, for a "Clear cache (X MB)"
+    /// affordance. Returns `0` when caching is disabled or absent.
+    pub async fn cache_size_bytes(&self) -> u64 {
+        #[cfg(feature = "cache")]
+        if let Some(m) = &self.cache_manager {
+            return m.size().await;
+        }
+        0
+    }
+}
+
+/// Map a cached-backend send error to a `PqcError`. The `Middleware` arm
+/// carries http-cache's anyhow-boxed transport error, so the chain walk is
+/// required: without it, a pinning/trust failure gets downgraded to the
+/// retryable `Network`.
+#[cfg(feature = "cache")]
+fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
+    match e {
+        reqwest_middleware::Error::Reqwest(e) => map_reqwest_err(e),
+        reqwest_middleware::Error::Middleware(e) => classify_err_chain(e.chain()),
+    }
+}
+
+/// Typed-downcast classifier — a `rustls::Error` anywhere in the chain wins
+/// (pinning / trust / TLS), reqwest timeout maps to `Timeout`, else `Network`.
+#[cfg(feature = "cache")]
+fn classify_err_chain<'a>(
+    chain: impl Iterator<Item = &'a (dyn std::error::Error + 'static)>,
+) -> PqcError {
+    for cause in chain {
+        if let Some(rustls_err) = cause.downcast_ref::<rustls::Error>() {
+            return classify_rustls_error(rustls_err);
+        }
+        if let Some(req_err) = cause.downcast_ref::<reqwest::Error>() {
+            if req_err.is_timeout() {
+                return PqcError::Timeout;
+            }
+        }
+    }
+    PqcError::Network
 }
 
 /// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
-/// from a pinning/trust/TLS failure (don't retry). Pass 1 downcasts to
-/// `&rustls::Error` (authoritative, no string fragility); pass 2 is a
-/// substring fallback for our pinning marker carried as a rustls string.
+/// from a pinning/trust/TLS failure (don't retry). Pass 1 typed-downcasts to
+/// `&rustls::Error`; pass 2 is a defense-in-depth substring fallback for the
+/// pinning marker when typed access is unavailable.
 fn map_reqwest_err(e: reqwest::Error) -> PqcError {
     if e.is_timeout() {
         return PqcError::Timeout;
@@ -251,38 +365,26 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
 }
 
 /// Map a `rustls::Error` to a `PqcError`. `rustls::Error` is
-/// `#[non_exhaustive]` so the `_` arm is required — there's no compile-time
-/// exhaustiveness guarantee. Re-audit the upstream `enum Error` on every
-/// rustls minor bump: a new trust-failure variant would silently fall into
-/// `Tls` and downgrade the security signal consumers branch on.
+/// `#[non_exhaustive]`, so re-audit on every rustls minor bump — a new
+/// trust-failure variant would silently fall into `Tls` here.
 fn classify_rustls_error(e: &rustls::Error) -> PqcError {
     use rustls::Error as R;
     match e {
-        // Platform verifier rejected the chain.
         R::InvalidCertificate(_) | R::InvalidCertRevocationList(_) => PqcError::TrustVerification,
 
-        // PinningVerifier emits General("certificate pinning failure: ...")
-        // (a future stack might wrap it as Other). Check both for the marker;
-        // absent it, it's still a handshake failure → Tls.
-        R::General(msg) => {
-            if msg.to_lowercase().contains("pinning failure") {
-                PqcError::PinningFailure
-            } else {
-                PqcError::Tls
-            }
+        // PinningVerifier emits General("certificate pinning failure: ...");
+        // a future stack might wrap it as Other.
+        R::General(msg) if msg.to_lowercase().contains("pinning failure") => {
+            PqcError::PinningFailure
         }
-        R::Other(other) => {
-            let msg = other.to_string().to_lowercase();
-            if msg.contains("pinning failure") {
-                PqcError::PinningFailure
-            } else {
-                PqcError::Tls
-            }
+        R::Other(other) if other.to_string().to_lowercase().contains("pinning failure") => {
+            PqcError::PinningFailure
         }
+        R::General(_) | R::Other(_) => PqcError::Tls,
 
-        // Handshake-time TLS failures, none transient. (AlertReceived /
-        // PeerIncompatible / PeerMisbehaved lack "tls"/"handshake" in their
-        // Display, so the substring path mis-read them as Network.)
+        // Handshake-time TLS failures (AlertReceived / PeerIncompatible /
+        // PeerMisbehaved lack "tls"/"handshake" in Display, so the substring
+        // path would mis-read them as Network — keep them typed).
         R::AlertReceived(_)
         | R::PeerIncompatible(_)
         | R::PeerMisbehaved(_)
@@ -302,8 +404,6 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         | R::FailedToGetRandomBytes
         | R::InconsistentKeys(_) => PqcError::Tls,
 
-        // Unknown future variant (non_exhaustive). Conservative: Tls, not
-        // Network. Re-audit on every rustls bump (see fn doc).
         _ => PqcError::Tls,
     }
 }
@@ -395,6 +495,53 @@ mod tests {
         assert!(matches!(
             classify_rustls_error(&err),
             crate::error::PqcError::PinningFailure
+        ));
+    }
+
+    // ---- Cached-backend error classification (classify_err_chain) ----
+    // Regression guard: on the cached path, http-cache boxes the send error
+    // into a Middleware(anyhow) whose chain carries the rustls error. The
+    // chain walker must surface the security signal, NOT downgrade to Network.
+
+    /// A rustls pinning failure anywhere in the chain → PinningFailure.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_pinning_failure_not_downgraded() {
+        use super::classify_err_chain;
+        let err = rustls::Error::General(
+            "certificate pinning failure: no certificate in the chain matched any configured pin"
+                .to_string(),
+        );
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::PinningFailure
+        ));
+    }
+
+    /// A rustls invalid-certificate error in the chain → TrustVerification.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_trust_failure_not_downgraded() {
+        use super::classify_err_chain;
+        let err = rustls::Error::InvalidCertificate(rustls::CertificateError::Expired);
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::TrustVerification
+        ));
+    }
+
+    /// A non-rustls, non-timeout error still falls back to Network.
+    #[cfg(feature = "cache")]
+    #[test]
+    fn middleware_chain_other_error_is_network() {
+        use super::classify_err_chain;
+        let err = std::io::Error::other("cache write failed");
+        let chain = std::iter::once(&err as &(dyn std::error::Error + 'static));
+        assert!(matches!(
+            classify_err_chain(chain),
+            crate::error::PqcError::Network
         ));
     }
 }

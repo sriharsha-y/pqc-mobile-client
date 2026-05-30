@@ -26,15 +26,18 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
 
 private const val MP = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WC = ViewGroup.LayoutParams.WRAP_CONTENT
 
 /**
  * Dark card UI matching the React Native and SwiftUI samples: a toggle that
- * drives `enablePostQuantum`, and a result card showing the key-exchange group
- * the server saw (server-authoritative, via /cdn-cgi/trace). Auto-runs on
- * launch and on every toggle flip.
+ * switches between this library's PQC client and the Android system stack
+ * (HttpsURLConnection), and a result card showing the key-exchange group the
+ * server saw (server-authoritative, via /cdn-cgi/trace). Auto-runs on launch
+ * and on every toggle flip.
  */
 class MainActivity : Activity() {
 
@@ -89,15 +92,16 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
         }
-        labels.addView(text("Advertise post-quantum", 16f, cTitle, bold = true))
-        toggleCaption = text("X25519MLKEM768 offered", 12f, cMuted)
+        labels.addView(text("Networking stack", 16f, cTitle, bold = true))
+        toggleCaption = text("PQC client (this library)", 12f, cMuted)
         labels.addView(toggleCaption)
 
         toggle = Switch(this).apply {
             isChecked = true
             setOnCheckedChangeListener { _, checked ->
                 toggleCaption.text =
-                    if (checked) "X25519MLKEM768 offered" else "disabled (classical only)"
+                    if (checked) "PQC client (this library)"
+                    else "System HttpURLConnection (no PQC)"
                 run(checked)
             }
         }
@@ -149,8 +153,8 @@ class MainActivity : Activity() {
             )
             resultContainer.addView(
                 caption(
-                    if (pqc) "PQC offered and negotiated — confirmed by the edge."
-                    else "PQC disabled on the client — classical handshake as expected."
+                    if (pqc) "This library offered X25519MLKEM768; the edge negotiated it."
+                    else "Android system HttpURLConnection — classical handshake; no PQC."
                 )
             )
         } else {
@@ -170,12 +174,13 @@ class MainActivity : Activity() {
 
     // ---- The actual PQC request -------------------------------------------
 
-    private fun run(enablePqc: Boolean) {
+    private fun run(usePqc: Boolean) {
         toggle.isEnabled = false
         showLoading()
         scope.launch {
             try {
-                val (status, kex, alpn) = fetchTrace(enablePqc)
+                val (status, kex, alpn) =
+                    if (usePqc) fetchViaPqcClient() else fetchViaSystemStack()
                 showResult(status, kex, alpn)
             } catch (e: Exception) {
                 showError("${e::class.simpleName}: ${e.message}")
@@ -185,20 +190,24 @@ class MainActivity : Activity() {
         }
     }
 
-    private suspend fun fetchTrace(enablePqc: Boolean): Triple<UShort, String?, String> =
+    /** This library: always advertises the X25519MLKEM768 hybrid, so a
+     *  PQ-capable edge reports kex=X25519MLKEM768. */
+    private suspend fun fetchViaPqcClient(): Triple<UShort, String?, String> =
         withContext(Dispatchers.IO) {
-            // `enablePostQuantum` is what the toggle drives: false drops the
-            // X25519MLKEM768 hybrid so the edge reports kex=X25519.
             val client = PqcHttpClient(
                 PqcConfig(
                     pinnedCertSha256 = emptyList(),
-                    enablePostQuantum = enablePqc,
                     defaultTimeoutMs = 15_000uL,
                     connectTimeoutMs = null,
-                    maxBodyBytes = null,
                     enableCookies = false,
                     userAgent = "PqcNativeAndroidSample/1.0",
                     redirectPolicy = RedirectPolicy.SameOriginOnly,
+                    // Opt-in RFC 9111 response cache (off here; the trace
+                    // endpoint is uncacheable anyway). To enable, set true and
+                    // pass an app dir, e.g. cacheDir = cacheDir.absolutePath.
+                    enableCache = false,
+                    cacheDir = null,
+                    maxCacheBytes = null,
                 )
             )
             val resp = client.request(
@@ -215,6 +224,31 @@ class MainActivity : Activity() {
                 .firstOrNull { it.startsWith("kex=") }
                 ?.removePrefix("kex=")
             Triple(resp.status, kex, resp.negotiatedProtocol)
+        }
+
+    /** The Android system stack (HttpsURLConnection over Conscrypt). It does
+     *  not offer the hybrid to apps, so the same edge reports kex=X25519 — the
+     *  contrast this sample shows. The KEX is read from the server trace body,
+     *  so it's authoritative regardless of which client made the request. */
+    private suspend fun fetchViaSystemStack(): Triple<UShort, String?, String> =
+        withContext(Dispatchers.IO) {
+            val conn = (URL("https://pq.cloudflareresearch.com/cdn-cgi/trace")
+                .openConnection() as HttpsURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = 15_000
+            }
+            try {
+                val status = conn.responseCode.toUShort()
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                // HttpsURLConnection exposes no negotiated KEX/ALPN to the app.
+                val kex = body.lineSequence()
+                    .firstOrNull { it.startsWith("kex=") }
+                    ?.removePrefix("kex=")
+                Triple(status, kex, "n/a (system)")
+            } finally {
+                conn.disconnect()
+            }
         }
 
     override fun onDestroy() {

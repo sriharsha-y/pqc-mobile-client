@@ -31,7 +31,10 @@ private enum FetchState {
 }
 
 struct ContentView: View {
-    @State private var pqcEnabled = true
+    /// true = route through this library's PQC client; false = the iOS system
+    /// stack (URLSession). Both hit the same endpoint, which reports the KEX it
+    /// negotiated, so flipping this shows PQC (library) vs. classical (system).
+    @State private var usePqcClient = true
     @State private var state: FetchState = .idle
 
     private var isLoading: Bool {
@@ -61,7 +64,7 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .task { await run(pqc: pqcEnabled) }
+        .task { await run(usePqc: usePqcClient) }
     }
 
     // MARK: - Toggle card
@@ -69,21 +72,21 @@ struct ContentView: View {
     private var toggleCard: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Advertise post-quantum")
+                Text("Networking stack")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(Palette.title)
-                Text(pqcEnabled ? "X25519MLKEM768 offered"
-                                : "disabled (classical only)")
+                Text(usePqcClient ? "PQC client (this library)"
+                                  : "System URLSession (no PQC)")
                     .font(.system(size: 12))
                     .foregroundColor(Palette.muted)
             }
             Spacer()
-            Toggle("", isOn: $pqcEnabled)
+            Toggle("", isOn: $usePqcClient)
                 .labelsHidden()
                 .tint(Palette.accent)
                 .disabled(isLoading)
-                .onChange(of: pqcEnabled) { newValue in
-                    Task { await run(pqc: newValue) }
+                .onChange(of: usePqcClient) { newValue in
+                    Task { await run(usePqc: newValue) }
                 }
         }
         .padding(16)
@@ -123,8 +126,8 @@ struct ContentView: View {
                         .font(.system(size: 16, design: .monospaced))
                         .foregroundColor(pqc ? Palette.kexPqc : Palette.kexClass)
                     caption(pqc
-                        ? "PQC offered and negotiated — confirmed by the edge."
-                        : "PQC disabled on the client — classical handshake as expected.")
+                        ? "This library offered X25519MLKEM768; the edge negotiated it."
+                        : "iOS system URLSession — classical handshake; no PQC offered.")
                 } else {
                     Text("not reported")
                         .font(.system(size: 16, design: .monospaced))
@@ -167,44 +170,66 @@ struct ContentView: View {
             .padding(.top, 4)
     }
 
-    // MARK: - The actual PQC request
+    // MARK: - The request
 
     @MainActor
-    private func run(pqc: Bool) async {
+    private func run(usePqc: Bool) async {
         state = .loading
         do {
-            // The constructor throws on malformed config (e.g. a bad pin).
-            // `enablePostQuantum` is what the toggle drives: false drops the
-            // X25519MLKEM768 hybrid so the ClientHello carries classical
-            // groups only, and the edge reports kex=X25519.
-            let client = try PqcHttpClient(config: PqcConfig(
-                pinnedCertSha256: [],
-                enablePostQuantum: pqc,
-                defaultTimeoutMs: 15_000,
-                connectTimeoutMs: nil,
-                maxBodyBytes: nil,
-                enableCookies: false,
-                userAgent: "PqcNativeIosSample/1.0",
-                redirectPolicy: .sameOriginOnly
-            ))
-
-            let resp = try await client.request(req: HttpRequest(
-                method: .get,
-                url: traceUrl,
-                headers: [:],
-                body: nil,
-                timeoutMs: 5_000
-            ))
-
-            let body = String(decoding: Data(resp.body), as: UTF8.self)
-            let kex = body.split(separator: "\n")
-                .first { $0.hasPrefix("kex=") }
-                .map { String($0.dropFirst(4)) }
-
-            state = .ok(status: resp.status, kex: kex, alpn: resp.negotiatedProtocol)
+            let result = usePqc
+                ? try await fetchViaPqcClient()
+                : try await fetchViaSystemStack()
+            state = .ok(status: result.status, kex: result.kex, alpn: result.alpn)
         } catch {
             state = .error("\(error)")
         }
+    }
+
+    /// This library: always advertises the X25519MLKEM768 hybrid, so a
+    /// PQ-capable edge reports `kex=X25519MLKEM768`.
+    private func fetchViaPqcClient() async throws -> (status: UInt16, kex: String?, alpn: String) {
+        // The constructor throws on malformed config (e.g. a bad pin).
+        let client = try PqcHttpClient(config: PqcConfig(
+            pinnedCertSha256: [],
+            defaultTimeoutMs: 15_000,
+            connectTimeoutMs: nil,
+            enableCookies: false,
+            userAgent: "PqcNativeIosSample/1.0",
+            redirectPolicy: .sameOriginOnly,
+            // Opt-in RFC 9111 response cache (off here; the trace endpoint is
+            // uncacheable anyway). To enable, set enableCache: true and pass a
+            // Caches dir path. See docs/ios.md.
+            enableCache: false,
+            cacheDir: nil,
+            maxCacheBytes: nil
+        ))
+        let resp = try await client.request(req: HttpRequest(
+            method: .get,
+            url: traceUrl,
+            headers: [:],
+            body: nil,
+            timeoutMs: 5_000
+        ))
+        return (resp.status, parseKex(Data(resp.body)), resp.negotiatedProtocol)
+    }
+
+    /// The iOS system stack (URLSession). Current iOS does not offer the hybrid
+    /// group to apps, so the same edge reports `kex=X25519` — the contrast this
+    /// sample demonstrates. The KEX is read from the server's trace body, so
+    /// it's authoritative regardless of which client made the request.
+    private func fetchViaSystemStack() async throws -> (status: UInt16, kex: String?, alpn: String) {
+        guard let url = URL(string: traceUrl) else { throw URLError(.badURL) }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let status = UInt16((response as? HTTPURLResponse)?.statusCode ?? 0)
+        // URLSession exposes no negotiated KEX/ALPN to the app.
+        return (status, parseKex(data), "n/a (system)")
+    }
+
+    private func parseKex(_ data: Data) -> String? {
+        String(decoding: data, as: UTF8.self)
+            .split(separator: "\n")
+            .first { $0.hasPrefix("kex=") }
+            .map { String($0.dropFirst(4)) }
     }
 }
 

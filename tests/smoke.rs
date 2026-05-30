@@ -22,13 +22,14 @@ fn parse_kex(trace_body: &str) -> Option<String> {
 fn default_test_config() -> PqcConfig {
     PqcConfig {
         pinned_cert_sha256: vec![],
-        enable_post_quantum: true,
         default_timeout_ms: Some(15_000),
         connect_timeout_ms: None,
-        max_body_bytes: None,
         enable_cookies: false,
         user_agent: Some("pqc-client-smoke-test/0.3.1".to_string()),
         redirect_policy: RedirectPolicy::SameOriginOnly {},
+        enable_cache: false,
+        cache_dir: None,
+        max_cache_bytes: None,
     }
 }
 
@@ -92,32 +93,16 @@ async fn pq_handshake_cloudflare() {
         kex, "X25519MLKEM768",
         "Cloudflare should negotiate X25519MLKEM768 when the client offers it"
     );
+    // No redirect on /cdn-cgi/trace, so final_url should echo the request URL.
+    assert_eq!(
+        resp.final_url, "https://pq.cloudflareresearch.com/cdn-cgi/trace",
+        "final_url should report the URL the body came from"
+    );
     // ALPN must be set so the server negotiates h2; without it the http2
     // feature is silently a no-op.
     assert_eq!(
         resp.negotiated_protocol, "h2",
         "ALPN must select h2 against Cloudflare"
-    );
-}
-
-/// With PQC disabled the client offers only classical groups, so the edge
-/// negotiates X25519 — deterministic, confirmed via the same `kex=`.
-#[tokio::test]
-async fn classical_handshake_when_pq_disabled() {
-    let mut cfg = default_test_config();
-    cfg.enable_post_quantum = false;
-    let client = PqcHttpClient::new(cfg).expect("client should construct");
-    let resp = request_resilient(
-        &client,
-        get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
-    )
-    .await;
-    let body = String::from_utf8_lossy(&resp.body);
-    let kex = parse_kex(&body).expect("trace body should contain a kex= line");
-    println!("status={} kex={}", resp.status, kex);
-    assert_eq!(
-        kex, "X25519",
-        "with PQC disabled the client should negotiate classical X25519"
     );
 }
 

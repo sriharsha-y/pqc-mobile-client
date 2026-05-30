@@ -31,6 +31,22 @@ default = []
 # Enable host build of the uniffi-bindgen binary. Adds clap + goblin +
 # uniffi_bindgen to the dep tree — never wanted in mobile cross-compiles.
 cli = ["uniffi/cli"]
+# Opt-in RFC 9111 HTTP response cache (off by default). Pulls the
+# http-cache stack + cacache (disk) + moka (iOS memory tier). Gated like
+# `cli`: the runtime `PqcConfig.enable_cache` only does anything when this
+# was compiled in. Mobile release builds enable it explicitly via the build
+# scripts; the default (feature-free) build stays lean. See src/cache.rs.
+cache = [
+    "dep:http-cache-reqwest",
+    "dep:http-cache",
+    "dep:http-cache-semantics",
+    "dep:reqwest-middleware",
+    "dep:cacache",
+    "dep:moka",
+    "dep:postcard",
+    "dep:serde",
+    "dep:async-trait",
+]
 
 [dependencies]
 # Async runtime
@@ -71,6 +87,26 @@ log = "0.4"
 # uniffi-bindgen binary build opts into. See the [[bin]] section above.
 uniffi = { version = "0.29", features = ["tokio"] }
 
+# ----- Optional HTTP response cache (the `cache` feature) -----
+# Versions pinned to the highest that keep our rust-version = 1.81 floor
+# (http-cache 0.21 / http-cache-reqwest 0.16 require rustc 1.82). The RFC
+# 9111 semantics come from http-cache-semantics (the same engine the whole
+# http-cache stack is built on); we bring cacache (disk) + moka (iOS memory
+# tier) in directly and ship our own CacheManager in src/cache.rs (bounded,
+# byte-evicting, composite mem+disk) instead of the bundled managers, so
+# http-cache(-reqwest) default-features are off.
+http-cache-reqwest = { version = "0.15", default-features = false, optional = true }
+http-cache = { version = "0.20", default-features = false, optional = true }
+http-cache-semantics = { version = "2.1", features = ["serde"], optional = true }
+reqwest-middleware = { version = "0.4", optional = true }
+cacache = { version = "13", default-features = false, features = ["tokio-runtime"], optional = true }
+moka = { version = "0.12", features = ["future"], optional = true }
+# Compact serde serializer for cache records. postcard (maintained) rather than
+# bincode 1.x, which RUSTSEC-2025-0141 flags unmaintained (no patched version).
+postcard = { version = "1", default-features = false, features = ["use-std"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+async-trait = { version = "0.1", optional = true }
+
 # Android-only: rustls-platform-verifier needs a JNI handshake from the
 # app's Application.onCreate to capture the Android Context so it can
 # reach KeyStore / NetworkSecurityConfig classes at handshake time.
@@ -87,6 +123,7 @@ tokio = { version = "1", features = ["full"] }
 env_logger = "0.11"
 # Self-signed certs for pinning unit tests
 rcgen = "0.13"
+http = "1.4.1"
 
 # Release profile tuned for mobile binary size.
 #
