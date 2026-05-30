@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.4...v0.6.0) (2026-05-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* removed PqcConfig.max_body_bytes and PqcError.InvalidResponse, changing the UniFFI Record / Error shapes. Regenerate the Kotlin/Swift bindings (make android / make ios).
+* removed PqcConfig.enable_post_quantum and added HttpResponse.final_url, changing the UniFFI Record shapes. The Kotlin/ Swift bindings must be regenerated (make android / make ios).
+
+### Features
+
+* always offer PQC hybrid; harden response cache; add final_url ([c678049](https://github.com/sriharsha-y/pqc-mobile-client/commit/c6780490b31dab7c6053b6710dad8278ec861569))
+* **config:** add opt-in response-cache fields to PqcConfig ([a43e68e](https://github.com/sriharsha-y/pqc-mobile-client/commit/a43e68e906bfffd25b3283b05c614474bdc3e064))
+* drop max_body_bytes for native parity; cache + sample hardening ([ddfd5a9](https://github.com/sriharsha-y/pqc-mobile-client/commit/ddfd5a93bc33f8325125f75329a081829f944ef3))
+* opt-in RFC 9111 HTTP response cache (cache feature) ([c8c9980](https://github.com/sriharsha-y/pqc-mobile-client/commit/c8c99805a42230cfea31ee39c3f9920c1e157ee2))
+
+
+### Bug Fixes
+
+* address code-review findings on the cache branch ([63fa4dc](https://github.com/sriharsha-y/pqc-mobile-client/commit/63fa4dc20f4c7a03485e1cadf17db43d2064cde7))
+* **deps:** use postcard instead of unmaintained bincode for cache records ([d7104fb](https://github.com/sriharsha-y/pqc-mobile-client/commit/d7104fb3db49a11db50b929e1d50b3a34e0b3395))
+* **docs:** import runBlocking in README; make cache config fields optional ([43bfacd](https://github.com/sriharsha-y/pqc-mobile-client/commit/43bfacdafe6a2777e7203c409ad02fd2ecdb729a))
+* **security:** classify pinning/trust failures on the cached path ([47f5ac0](https://github.com/sriharsha-y/pqc-mobile-client/commit/47f5ac0338c98c81745027119e5d3f10acc77151))
+
 ## [0.5.4](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.3...v0.5.4) (2026-05-29)
 
 
