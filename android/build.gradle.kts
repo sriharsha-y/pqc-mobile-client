@@ -8,7 +8,7 @@ plugins {
 
 // release-please rewrites this on each release; keep the
 // `version = "X.Y.Z"` format so its updater regex matches.
-version = "0.5.4" // x-release-please-version
+version = "0.6.0" // x-release-please-version
 group = "io.github.sriharsha-y"
 
 android {
