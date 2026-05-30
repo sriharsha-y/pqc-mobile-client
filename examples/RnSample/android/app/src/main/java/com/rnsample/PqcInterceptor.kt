@@ -1,6 +1,7 @@
 package com.rnsample
 
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
@@ -68,8 +69,16 @@ class PqcInterceptor(
             ?.firstOrNull()
             ?.toMediaTypeOrNull()
 
+        // Authoritative URL for OkHttp's CookieJar / response.request.url:
+        // the post-redirect URL the body actually came from. Fall back to the
+        // original request only if the Rust core's finalUrl is unparseable
+        // (it should not be).
+        val effectiveRequest = pqcResp.finalUrl.toHttpUrlOrNull()
+            ?.let { req.newBuilder().url(it).build() }
+            ?: req
+
         val responseBuilder = Response.Builder()
-            .request(req)
+            .request(effectiveRequest)
             .protocol(parseProtocol(pqcResp.negotiatedProtocol))
             .code(pqcResp.status.toInt())
             .message(statusReasonPhrase(pqcResp.status.toInt()))

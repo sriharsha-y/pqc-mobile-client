@@ -33,10 +33,9 @@ public final class PqcURLProtocol: URLProtocol {
                 config: PqcConfig(
                     pinnedCertSha256: [],
                     defaultTimeoutMs: 15_000,
-                    // nil → built-in defaults (10s connect, 16 MiB body cap).
-                    // Set explicitly in production to survive a defaults change.
+                    // nil → 10s connect default. Set explicitly in production
+                    // to survive a defaults change.
                     connectTimeoutMs: nil,
-                    maxBodyBytes: nil,
                     // Banking clients should not auto-attach cookies.
                     enableCookies: false,
                     // Identify to bank WAFs / Akamai Bot Manager.
@@ -148,13 +147,17 @@ public final class PqcURLProtocol: URLProtocol {
 
                 let pqcResp = try await pqcClient.request(req: pqcReq)
 
+                // Authoritative URL for cookie scoping and response provenance:
+                // the post-redirect URL the body actually came from. Falling
+                // back to the request URL only if the Rust core's finalUrl is
+                // unparseable (it never should be).
+                let responseUrl = URL(string: pqcResp.finalUrl) ?? url
+
                 // Handle Set-Cookie BEFORE building the response, and keep it
                 // OUT of the response header dict. HTTPURLResponse is backed by
-                // a [String: String], so it can't hold multiple Set-Cookie
-                // values, and joining them with ", " corrupts them — a cookie's
-                // `Expires` attribute itself contains a comma. So parse each
-                // value in its OWN single-entry dict (sidestepping the comma
-                // ambiguity) into the store RN networking reads from.
+                // [String: String]; joining Set-Cookies with ", " corrupts them
+                // (the `Expires` attribute itself contains a comma), so parse
+                // each value in its OWN single-entry dict.
                 //
                 // SECURITY NOTE: this persists session cookies in
                 // HTTPCookieStorage.shared (auto-attached to later requests),
@@ -166,7 +169,7 @@ public final class PqcURLProtocol: URLProtocol {
                     for raw in values {
                         let parsed = HTTPCookie.cookies(
                             withResponseHeaderFields: ["Set-Cookie": raw],
-                            for: url
+                            for: responseUrl
                         )
                         for cookie in parsed { cookieStorage.setCookie(cookie) }
                     }
@@ -192,7 +195,7 @@ public final class PqcURLProtocol: URLProtocol {
                     }
                 }()
                 guard let response = HTTPURLResponse(
-                    url: url,
+                    url: responseUrl,
                     statusCode: Int(pqcResp.status),
                     httpVersion: httpVersion,
                     headerFields: headerFields

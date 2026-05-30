@@ -9,19 +9,13 @@ use crate::error::PqcError;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
 
-/// Default body cap (`max_body_bytes == None`). 16 MiB: generous for JSON,
-/// small enough that a decompression bomb can't OOM the app.
-const DEFAULT_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
-
 /// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
 /// handover: absorbs one SYN retry, still fails fast.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The networking backend. `Plain` is today's bare `reqwest::Client` (the
-/// default, zero overhead). `Cached` wraps it in the RFC 9111 cache middleware
-/// (only when the `cache` feature is compiled in *and* `enable_cache` is set).
-/// TLS / PQC / pinning are identical either way — the middleware wraps the
-/// already-built client.
+/// Plain = bare reqwest client (default). Cached = RFC 9111 middleware wrap
+/// (only when `cache` feature + `enable_cache` are on). TLS/PQC/pinning are
+/// identical either way.
 enum HttpBackend {
     Plain(reqwest::Client),
     #[cfg(feature = "cache")]
@@ -36,10 +30,8 @@ enum HttpBackend {
 pub struct PqcHttpClient {
     inner: HttpBackend,
     default_timeout: Option<Duration>,
-    max_body_bytes: u64,
-    // Kept (separately from the middleware's copy) so `clear_cache` /
-    // `cache_size_bytes` can reach the store directly. `None` when caching is
-    // off. Cloneable handle — shares the underlying store with the middleware.
+    // Held alongside the middleware's copy so clear_cache / cache_size_bytes
+    // reach the same store. None when caching is off.
     #[cfg(feature = "cache")]
     cache_manager: Option<crate::cache::PqcCacheManager>,
 }
@@ -111,7 +103,6 @@ impl PqcHttpClient {
         let client = builder.build().map_err(|_| PqcError::InvalidRequest)?;
 
         let default_timeout = config.default_timeout_ms.map(Duration::from_millis);
-        let max_body_bytes = config.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES);
 
         #[cfg(feature = "cache")]
         {
@@ -141,7 +132,6 @@ impl PqcHttpClient {
             Ok(Self {
                 inner,
                 default_timeout,
-                max_body_bytes,
                 cache_manager,
             })
         }
@@ -156,7 +146,6 @@ impl PqcHttpClient {
             Ok(Self {
                 inner: HttpBackend::Plain(client),
                 default_timeout,
-                max_body_bytes,
             })
         }
     }
@@ -183,16 +172,13 @@ impl PqcHttpClient {
         let timeout_ms = req
             .timeout_ms
             .or(self.default_timeout.map(|d| d.as_millis() as u64));
-        // Move the body out once rather than cloning it: each match arm below
-        // consumes it, but the arms are mutually exclusive so the borrow
-        // checker allows the move. Cloning here would copy the entire upload
-        // payload on every request, including the default (non-cache) path.
+        // Moved (not cloned) into whichever match arm runs — cloning would
+        // copy the entire upload on every request.
         let body = req.body;
 
-        // `reqwest::RequestBuilder` and `reqwest_middleware::RequestBuilder`
-        // share the same header/body/timeout/send surface, so one macro fills
-        // both backends without drift. (`method`/`body` are moved in each match
-        // arm — fine, the arms are mutually exclusive.)
+        // The two backends share the same header/body/timeout surface but
+        // have distinct RequestBuilder types, so a macro fills both without
+        // drift.
         macro_rules! build_request {
             ($rb:expr) => {{
                 let mut b = $rb;
@@ -254,34 +240,22 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        // Stream with a hard cap so a decompression bomb (CWE-409) can't OOM
-        // the app — Content-Length is pre-decompression and easily lied
-        // about, so the only safe bound is counting decompressed bytes.
         // Mid-body errors are transport-level (handshake already done), so
-        // map to Timeout/Network, skipping the rustls classifier.
-        let cap = self.max_body_bytes;
-        let mut body = Vec::new();
-        let mut stream = resp;
-        loop {
-            let next = stream.chunk().await.map_err(|e| {
+        // map to Timeout/Network, skipping the rustls classifier. Matches the
+        // native stacks' shape: URLSession `dataTask` and OkHttp
+        // `ResponseBody.bytes()` buffer the whole body to memory with no cap
+        // — callers stream when they need to bound it.
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| {
                 if e.is_timeout() {
                     PqcError::Timeout
                 } else {
                     PqcError::Network
                 }
-            })?;
-            match next {
-                Some(chunk) => {
-                    // saturating_add so a huge chunk can't wrap the cap check.
-                    let projected = (body.len() as u64).saturating_add(chunk.len() as u64);
-                    if projected > cap {
-                        return Err(PqcError::InvalidResponse);
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                None => break,
-            }
-        }
+            })?
+            .to_vec();
 
         Ok(HttpResponse {
             status,
@@ -315,14 +289,10 @@ impl PqcHttpClient {
     }
 }
 
-/// Map a `reqwest_middleware::Error` (the cached backend's send error) to a
-/// `PqcError`. A plain transport/TLS failure arrives as `Reqwest` and reuses
-/// the full classifier. `Middleware` is trickier: on a cacheable GET/HEAD the
-/// http-cache middleware boxes the real send error into an `anyhow` error, so
-/// a rustls **pinning / trust** failure is buried in its source chain rather
-/// than the `Reqwest` arm. We MUST walk that chain and classify it — otherwise
-/// a MITM / pinning failure would be silently downgraded to a benign
-/// (retryable) `Network`, defeating the signal consumers branch on.
+/// Map a cached-backend send error to a `PqcError`. The `Middleware` arm
+/// carries http-cache's anyhow-boxed transport error, so the chain walk is
+/// required: without it, a pinning/trust failure gets downgraded to the
+/// retryable `Network`.
 #[cfg(feature = "cache")]
 fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
     match e {
@@ -331,10 +301,8 @@ fn map_middleware_err(e: reqwest_middleware::Error) -> PqcError {
     }
 }
 
-/// Classify an error source chain by typed downcast — authoritative, no string
-/// fragility (so it can't be contaminated by a URL in an error's `Display`).
-/// A `rustls::Error` anywhere in the chain wins (pinning / trust / TLS); a
-/// reqwest timeout maps to `Timeout`; anything else is `Network`.
+/// Typed-downcast classifier — a `rustls::Error` anywhere in the chain wins
+/// (pinning / trust / TLS), reqwest timeout maps to `Timeout`, else `Network`.
 #[cfg(feature = "cache")]
 fn classify_err_chain<'a>(
     chain: impl Iterator<Item = &'a (dyn std::error::Error + 'static)>,
@@ -353,9 +321,9 @@ fn classify_err_chain<'a>(
 }
 
 /// Classify a `reqwest::Error` so callers can tell a transient blip (retry)
-/// from a pinning/trust/TLS failure (don't retry). Pass 1 downcasts to
-/// `&rustls::Error` (authoritative, no string fragility); pass 2 is a
-/// substring fallback for our pinning marker carried as a rustls string.
+/// from a pinning/trust/TLS failure (don't retry). Pass 1 typed-downcasts to
+/// `&rustls::Error`; pass 2 is a defense-in-depth substring fallback for the
+/// pinning marker when typed access is unavailable.
 fn map_reqwest_err(e: reqwest::Error) -> PqcError {
     if e.is_timeout() {
         return PqcError::Timeout;
@@ -397,38 +365,26 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
 }
 
 /// Map a `rustls::Error` to a `PqcError`. `rustls::Error` is
-/// `#[non_exhaustive]` so the `_` arm is required — there's no compile-time
-/// exhaustiveness guarantee. Re-audit the upstream `enum Error` on every
-/// rustls minor bump: a new trust-failure variant would silently fall into
-/// `Tls` and downgrade the security signal consumers branch on.
+/// `#[non_exhaustive]`, so re-audit on every rustls minor bump — a new
+/// trust-failure variant would silently fall into `Tls` here.
 fn classify_rustls_error(e: &rustls::Error) -> PqcError {
     use rustls::Error as R;
     match e {
-        // Platform verifier rejected the chain.
         R::InvalidCertificate(_) | R::InvalidCertRevocationList(_) => PqcError::TrustVerification,
 
-        // PinningVerifier emits General("certificate pinning failure: ...")
-        // (a future stack might wrap it as Other). Check both for the marker;
-        // absent it, it's still a handshake failure → Tls.
-        R::General(msg) => {
-            if msg.to_lowercase().contains("pinning failure") {
-                PqcError::PinningFailure
-            } else {
-                PqcError::Tls
-            }
+        // PinningVerifier emits General("certificate pinning failure: ...");
+        // a future stack might wrap it as Other.
+        R::General(msg) if msg.to_lowercase().contains("pinning failure") => {
+            PqcError::PinningFailure
         }
-        R::Other(other) => {
-            let msg = other.to_string().to_lowercase();
-            if msg.contains("pinning failure") {
-                PqcError::PinningFailure
-            } else {
-                PqcError::Tls
-            }
+        R::Other(other) if other.to_string().to_lowercase().contains("pinning failure") => {
+            PqcError::PinningFailure
         }
+        R::General(_) | R::Other(_) => PqcError::Tls,
 
-        // Handshake-time TLS failures, none transient. (AlertReceived /
-        // PeerIncompatible / PeerMisbehaved lack "tls"/"handshake" in their
-        // Display, so the substring path mis-read them as Network.)
+        // Handshake-time TLS failures (AlertReceived / PeerIncompatible /
+        // PeerMisbehaved lack "tls"/"handshake" in Display, so the substring
+        // path would mis-read them as Network — keep them typed).
         R::AlertReceived(_)
         | R::PeerIncompatible(_)
         | R::PeerMisbehaved(_)
@@ -448,8 +404,6 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         | R::FailedToGetRandomBytes
         | R::InconsistentKeys(_) => PqcError::Tls,
 
-        // Unknown future variant (non_exhaustive). Conservative: Tls, not
-        // Network. Re-audit on every rustls bump (see fn doc).
         _ => PqcError::Tls,
     }
 }

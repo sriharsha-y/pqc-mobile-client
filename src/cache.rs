@@ -10,12 +10,9 @@
 //! a `moka` in-memory tier on iOS (mirroring `URLCache`'s mem+disk; Android is
 //! disk-only like OkHttp).
 //!
-//! Two intentional divergences from a strict native LRU: disk eviction is by
+//! One intentional divergence from a strict native LRU: disk eviction is by
 //! insertion time, not access time (cacache exposes no access time; the iOS
-//! memory tier is true LRU); and `max_body_bytes` does not bound the
-//! middleware's internal buffering of a cacheable GET/HEAD (matches OkHttp,
-//! which has no such cap — the client still caps the body it returns and the
-//! manager refuses to *store* entries larger than the disk budget).
+//! memory tier is true LRU).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,15 +42,10 @@ struct Store {
     policy: CachePolicy,
 }
 
-/// Persistent byte-bounded disk tier.
-///
-/// `bytes` is a running count of the on-disk logical size (sum of per-key
-/// record sizes), kept in memory so the hot put/size path never re-scans the
-/// store — the same trick OkHttp's `DiskLruCache` uses (it tracks `size`
-/// incrementally rather than walking the directory per write). `evict_lock`
-/// serializes eviction so concurrent puts can't each launch a full scan and
-/// over-evict. Both are `Arc` so every clone of the manager (the middleware's
-/// copy and the client's copy) shares one counter and one lock.
+/// Persistent byte-bounded disk tier. `bytes` is a running logical-size
+/// counter (OkHttp `DiskLruCache`-style) so put/size stay O(1); `evict_lock`
+/// serializes both eviction and `clear` so concurrent puts can't race a full
+/// rescan. All `Arc` so clones share one ledger.
 #[derive(Clone)]
 struct DiskTier {
     path: PathBuf,
@@ -62,37 +54,31 @@ struct DiskTier {
     evict_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// Our [`CacheManager`]: a byte-bounded cacache disk tier, optionally fronted
-/// by a moka in-memory tier (iOS). Cheap to clone (the path is a handle, moka
-/// is `Arc`-backed); clones share the same underlying stores, so the copy held
-/// by the middleware and the copy the client keeps for `clear`/`size` operate
-/// on one cache.
 #[derive(Clone)]
 pub struct PqcCacheManager {
     disk: Option<DiskTier>,
-    /// Present (and used) only on iOS. `None` elsewhere, giving Android the
-    /// disk-only behavior of OkHttp's `Cache`.
+    /// Used only on iOS; `None` elsewhere (Android = disk-only like OkHttp).
     mem: Option<moka::future::Cache<String, Arc<Vec<u8>>>>,
+    /// Per-entry size cap. Equals `disk.max_bytes` when disk is present;
+    /// otherwise the mem tier's capacity. Guards both tiers symmetrically so a
+    /// single oversized response can't evict the entire mem-only cache.
+    entry_max_bytes: u64,
 }
 
 impl PqcCacheManager {
-    /// Build a manager from config, or `None` if no tier is available (e.g.
-    /// Android with no `cache_dir` — there is nowhere to cache).
     pub fn new(config: &PqcConfig) -> Option<Self> {
         let disk = config.cache_dir.as_ref().map(|d| {
             let path = PathBuf::from(d);
-            // Seed the running counter once from whatever a previous process
-            // run left on disk (cacache's listing is blocking, but this is
-            // one-time construction, not the hot path). Thereafter the counter
-            // is maintained incrementally and self-heals on every eviction.
-            let initial: u64 = cacache::list_sync(&path)
-                .filter_map(|r| r.ok())
-                .map(|m| m.size as u64)
-                .sum();
+            let bytes = Arc::new(AtomicU64::new(0));
+            // Seed the counter off the constructor thread so a populated cache
+            // (after weeks of use) doesn't block the UI thread on app launch.
+            // Counter starts at 0; eviction self-heals on the first over-budget
+            // put if the seed thread hasn't finished by then.
+            seed_byte_counter_async(path.clone(), Arc::clone(&bytes));
             DiskTier {
                 path,
                 max_bytes: config.max_cache_bytes.unwrap_or(DEFAULT_MAX_CACHE_BYTES),
-                bytes: Arc::new(AtomicU64::new(initial)),
+                bytes,
                 evict_lock: Arc::new(tokio::sync::Mutex::new(())),
             }
         });
@@ -101,7 +87,16 @@ impl PqcCacheManager {
         if disk.is_none() && mem.is_none() {
             return None;
         }
-        Some(Self { disk, mem })
+        let entry_max_bytes = match (&disk, &mem) {
+            (Some(d), _) => d.max_bytes,
+            (None, Some(_)) => mem_tier_capacity(),
+            (None, None) => unreachable!(),
+        };
+        Some(Self {
+            disk,
+            mem,
+            entry_max_bytes,
+        })
     }
 
     /// Clear all cached responses (best-effort; mirrors the non-throwing
@@ -112,17 +107,31 @@ impl PqcCacheManager {
             mem.run_pending_tasks().await;
         }
         if let Some(disk) = &self.disk {
+            // Serialize against eviction and re-seed the counter from disk
+            // after the wipe — `cacache::clear` then re-scan inside one
+            // critical section. A put racing with clear can still write to
+            // disk between the two cacache calls, but its record is then
+            // counted by the re-scan, so the counter never undercounts what's
+            // actually on disk.
+            let _guard = disk.evict_lock.lock().await;
             if let Err(e) = cacache::clear(&disk.path).await {
                 log::warn!("pqc cache: clear failed: {e}");
             }
-            disk.bytes.store(0, Ordering::Relaxed);
+            let path = disk.path.clone();
+            let remaining = tokio::task::spawn_blocking(move || -> u64 {
+                cacache::list_sync(&path)
+                    .filter_map(|r| r.ok())
+                    .map(|m| m.size as u64)
+                    .sum()
+            })
+            .await
+            .unwrap_or(0);
+            disk.bytes.store(remaining, Ordering::Relaxed);
         }
     }
 
-    /// Total bytes currently indexed in the on-disk tier (the persistent,
-    /// native-meaningful figure; the memory tier is a hot subset). `0` when
-    /// there is no disk tier. O(1): reads the running counter rather than
-    /// re-walking the store.
+    /// Total bytes indexed in the on-disk tier (the persistent figure; mem is
+    /// a hot subset). `0` when there is no disk tier. O(1).
     pub async fn size(&self) -> u64 {
         self.disk
             .as_ref()
@@ -130,21 +139,14 @@ impl PqcCacheManager {
     }
 
     /// Evict oldest-first until the disk tier is back under its byte budget.
-    /// Reclaims both the index entry and its content blob.
-    ///
-    /// Cheap fast-path: if the running counter is already under budget, return
-    /// without touching disk. Otherwise take `evict_lock` so only one pass runs
-    /// at a time (concurrent puts would otherwise each scan the whole store and
-    /// over-evict). The pass recomputes the true total from disk and writes it
-    /// back to the counter, so any drift the incremental accounting accumulated
-    /// (e.g. from cacache's content dedup) self-heals here.
+    /// Serialized by `evict_lock` so concurrent puts don't each rescan; the
+    /// pass recomputes the true total from disk, so incremental-accounting
+    /// drift self-heals here.
     async fn evict_disk_if_needed(&self, disk: &DiskTier) {
         if disk.bytes.load(Ordering::Relaxed) <= disk.max_bytes {
             return;
         }
         let _guard = disk.evict_lock.lock().await;
-        // Re-check under the lock: a pass we were queued behind may have
-        // already brought us under budget.
         if disk.bytes.load(Ordering::Relaxed) <= disk.max_bytes {
             return;
         }
@@ -158,20 +160,18 @@ impl PqcCacheManager {
             if total <= max_bytes {
                 return total;
             }
-            // Oldest insertion time first (cacache has no access time, so this
-            // is FIFO — a documented approximation of the native LRU).
+            // Oldest insertion time first (cacache has no access time → FIFO,
+            // a documented approximation of the native LRU).
             entries.sort_by_key(|m| m.time);
             for m in entries {
                 if total <= max_bytes {
                     break;
                 }
                 if cacache::remove_sync(&path, &m.key).is_ok() {
-                    // Reclaim the content blob too; remove_sync only drops the
-                    // index entry. cacache dedups content by hash, so in the
-                    // rare case two keys share a blob (e.g. distinct URLs that
-                    // redirect to the same canonical body) this invalidates the
-                    // co-referencing entry — a safe degradation (its next read
-                    // misses and refetches), not corruption.
+                    // Drop the content blob too; remove_sync only drops the
+                    // index entry. cacache content-dedups by hash, so the rare
+                    // shared-blob case downgrades a co-referencing entry to a
+                    // refetch — not corruption.
                     let _ = cacache::remove_hash_sync(&path, &m.integrity);
                     total = total.saturating_sub(m.size as u64);
                 }
@@ -179,36 +179,57 @@ impl PqcCacheManager {
             total
         })
         .await
-        // spawn_blocking only fails if the closure panicked; keep the old
-        // counter value rather than lying about the size.
         .unwrap_or_else(|_| disk.bytes.load(Ordering::Relaxed));
 
         disk.bytes.store(remaining, Ordering::Relaxed);
     }
 }
 
-/// Atomically subtract `n` from a counter without underflowing past zero.
-fn sub_saturating(counter: &AtomicU64, n: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-        Some(v.saturating_sub(n))
-    });
+/// Seed the running byte counter in a background thread so PqcHttpClient::new
+/// returns immediately — `cacache::list_sync` is blocking and a populated
+/// cache (after weeks of use) can stall it for hundreds of ms.
+fn seed_byte_counter_async(path: PathBuf, bytes: Arc<AtomicU64>) {
+    std::thread::Builder::new()
+        .name("pqc-cache-seed".into())
+        .spawn(move || {
+            let total: u64 = cacache::list_sync(&path)
+                .filter_map(|r| r.ok())
+                .map(|m| m.size as u64)
+                .sum();
+            // fetch_add (not store) so any puts that landed while we were
+            // scanning are not erased — we add what we found on disk on top of
+            // whatever the live put already accounted for.
+            bytes.fetch_add(total, Ordering::Relaxed);
+        })
+        .ok();
 }
 
-/// iOS: a byte-bounded moka tier mirroring `URLCache`'s memory tier.
-#[cfg(target_os = "ios")]
 fn build_mem_tier() -> Option<moka::future::Cache<String, Arc<Vec<u8>>>> {
-    Some(
-        moka::future::Cache::builder()
-            .max_capacity(DEFAULT_MEM_CACHE_BYTES)
-            .weigher(|_k: &String, v: &Arc<Vec<u8>>| v.len().try_into().unwrap_or(u32::MAX))
-            .build(),
-    )
+    #[cfg(target_os = "ios")]
+    {
+        Some(
+            moka::future::Cache::builder()
+                .max_capacity(DEFAULT_MEM_CACHE_BYTES)
+                .weigher(|_k: &String, v: &Arc<Vec<u8>>| v.len().try_into().unwrap_or(u32::MAX))
+                .build(),
+        )
+    }
+    // Non-iOS (Android, host): disk-only, like OkHttp's `Cache`.
+    #[cfg(not(target_os = "ios"))]
+    {
+        None
+    }
 }
 
-/// Non-iOS (Android, host): disk-only, like OkHttp's `Cache`.
-#[cfg(not(target_os = "ios"))]
-fn build_mem_tier() -> Option<moka::future::Cache<String, Arc<Vec<u8>>>> {
-    None
+fn mem_tier_capacity() -> u64 {
+    #[cfg(target_os = "ios")]
+    {
+        DEFAULT_MEM_CACHE_BYTES
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        0
+    }
 }
 
 #[async_trait::async_trait]
@@ -249,38 +270,37 @@ impl CacheManager for PqcCacheManager {
             response: response.clone(),
             policy,
         };
-        // A serialization failure must not fail the request — just don't cache.
+        // Serialization failure must not fail the request — just don't cache.
         let bytes = match postcard::to_allocvec(&store) {
             Ok(b) => b,
             Err(_) => return Ok(response),
         };
         let new_len = bytes.len() as u64;
 
-        // Refuse to store an entry larger than the whole disk budget — it would
-        // only thrash eviction, and storing it in the memory tier alone would
-        // contradict the "won't exceed max_cache_bytes" contract. When there is
-        // no disk tier (memory-only iOS), the moka weigher bounds the mem tier,
-        // so there's nothing to refuse here.
+        // Refuse oversized entries from BOTH tiers: on disk-only it would
+        // thrash eviction; on mem-only (iOS, no cache_dir) admitting one
+        // near-cap entry would evict the entire hot set, contradicting the
+        // "won't exceed max_cache_bytes" contract.
+        if new_len > self.entry_max_bytes {
+            return Ok(response);
+        }
+
         if let Some(disk) = &self.disk {
-            if new_len > disk.max_bytes {
-                return Ok(response);
-            }
-            // cacache keeps the previous content blob when a key is overwritten
-            // (e.g. on revalidation), so reclaim it to avoid unbounded orphan
-            // growth — unless the new content is byte-identical (same integrity
+            // cacache keeps the previous content blob on overwrite (e.g.
+            // revalidation); reclaim it unless byte-identical (same integrity
             // → same shared blob).
             let prev = cacache::metadata(&disk.path, &cache_key)
                 .await
                 .ok()
                 .flatten();
             if let Ok(new_sri) = cacache::write(&disk.path, &cache_key, &bytes).await {
-                // Maintain the running counter incrementally: add the new
-                // record, drop the size of the entry it replaced (if any). The
-                // logical sum mirrors what size()/eviction count (per-key
-                // sizes), and eviction self-heals any drift.
                 disk.bytes.fetch_add(new_len, Ordering::Relaxed);
                 if let Some(prev) = prev {
-                    sub_saturating(&disk.bytes, prev.size as u64);
+                    let _ = disk
+                        .bytes
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                            Some(v.saturating_sub(prev.size as u64))
+                        });
                     if prev.integrity != new_sri {
                         let _ = cacache::remove_hash(&disk.path, &prev.integrity).await;
                     }
@@ -299,19 +319,20 @@ impl CacheManager for PqcCacheManager {
             mem.invalidate(cache_key).await;
         }
         if let Some(disk) = &self.disk {
-            // Reclaim the content blob, not just the index entry — otherwise
-            // the blob orphans (invisible to size()/eviction) and disk usage
-            // creeps past max_cache_bytes. http-cache calls delete() on every
-            // non-cacheable request that has a matching cached GET (RFC
-            // invalidation), so this happens routinely. Same rare shared-blob
-            // caveat as eviction applies.
+            // Reclaim the content blob too — http-cache calls delete() on
+            // every non-cacheable request with a matching cached GET (RFC
+            // invalidation), so orphan blobs would creep past max_cache_bytes.
             let meta = cacache::metadata(&disk.path, cache_key)
                 .await
                 .ok()
                 .flatten();
             let _ = cacache::remove(&disk.path, cache_key).await;
             if let Some(m) = meta {
-                sub_saturating(&disk.bytes, m.size as u64);
+                let _ = disk
+                    .bytes
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                        Some(v.saturating_sub(m.size as u64))
+                    });
                 let _ = cacache::remove_hash(&disk.path, &m.integrity).await;
             }
         }
@@ -366,8 +387,8 @@ mod tests {
     }
 
     fn disk_mgr(dir: &Path, max_bytes: u64) -> PqcCacheManager {
-        // Tests use fresh, empty temp dirs, so the counter seeds at 0 here
-        // (the real `new()` seeds it from `list_sync`).
+        // Fresh temp dirs → counter starts at 0; the real `new()` would seed
+        // it asynchronously from disk.
         PqcCacheManager {
             disk: Some(DiskTier {
                 path: dir.to_path_buf(),
@@ -376,6 +397,7 @@ mod tests {
                 evict_lock: Arc::new(tokio::sync::Mutex::new(())),
             }),
             mem: None,
+            entry_max_bytes: max_bytes,
         }
     }
 

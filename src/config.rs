@@ -10,13 +10,6 @@ pub struct PqcConfig {
     /// public root. See `src/pinning.rs`.
     pub pinned_cert_sha256: Vec<String>,
 
-    // NOTE: there is no "enable post-quantum" toggle. This client *always*
-    // advertises the X25519MLKEM768 hybrid (IANA 0x11EC) alongside classical
-    // X25519 — offering the hybrid is the entire purpose of the crate. A
-    // PQ-capable peer negotiates it; any other peer transparently falls back
-    // to classical. To compare PQC vs. classical, point the example apps at
-    // this client vs. the platform network stack rather than flipping a flag.
-
     // ----- Timeouts -----
     /// Total request budget (handshake + headers + body); on expiry the
     /// request aborts with `PqcError::Timeout`. `None` means no total cap —
@@ -27,13 +20,6 @@ pub struct PqcConfig {
     /// `default_timeout_ms` so a stalled connect (e.g. cellular handover)
     /// fails fast instead of burning the whole request budget. `None` = 10s.
     pub connect_timeout_ms: Option<u64>,
-
-    // ----- Body protection -----
-    /// Hard ceiling on a response body (post-decompression); exceeding it
-    /// trips `PqcError::InvalidResponse`. Guards against decompression bombs
-    /// (CWE-409) — gzip/brotli are on, so without a cap a tiny stream can
-    /// expand to GBs and OOM the app. `None` defaults to 16 MiB.
-    pub max_body_bytes: Option<u64>,
 
     // ----- Cookies -----
     /// Off by default: no cookie jar, so callers round-trip

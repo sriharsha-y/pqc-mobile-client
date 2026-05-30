@@ -99,7 +99,6 @@ final class PqcURLProtocol: URLProtocol {
                 pinnedCertSha256: CertPins.spkiSha256,
                 defaultTimeoutMs: 15_000,
                 connectTimeoutMs: nil,           // 10s default
-                maxBodyBytes: nil,               // 16 MiB default
                 enableCookies: false,            // banking: no auto cookie jar
                 userAgent: "MyApp/1.0",          // identify to bank WAF / Akamai
                 redirectPolicy: .sameOriginOnly  // refuse cross-origin 3xx
@@ -246,7 +245,6 @@ let pqc = try PqcHttpClient(
         pinnedCertSha256: [],
         defaultTimeoutMs: 10_000,
         connectTimeoutMs: nil,           // 10s default
-        maxBodyBytes: nil,               // 16 MiB default
         enableCookies: false,
         userAgent: "MyApp/1.0",
         redirectPolicy: .sameOriginOnly

@@ -11,8 +11,6 @@ pub enum PqcError {
     Timeout,
     #[error("invalid request")]
     InvalidRequest,
-    #[error("invalid response")]
-    InvalidResponse,
     #[error("certificate pinning failure")]
     PinningFailure,
     #[error("trust verification failure")]

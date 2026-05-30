@@ -193,7 +193,6 @@ struct ContentView: View {
             pinnedCertSha256: [],
             defaultTimeoutMs: 15_000,
             connectTimeoutMs: nil,
-            maxBodyBytes: nil,
             enableCookies: false,
             userAgent: "PqcNativeIosSample/1.0",
             redirectPolicy: .sameOriginOnly,

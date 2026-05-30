@@ -71,10 +71,9 @@ class MainApplication : Application(), ReactApplication {
       // base64(SHA-256(SPKI)) for the production cert + at least one backup.
       pinnedCertSha256 = emptyList(),
       defaultTimeoutMs = 15_000UL,
-      // null = built-in defaults (10s connect, 16 MiB body cap). Set these
-      // explicitly in production so they survive a defaults change.
+      // null = 10s connect default. Set explicitly in production so it
+      // survives a defaults change.
       connectTimeoutMs = null,
-      maxBodyBytes = null,
       // Banking clients should NOT auto-attach Set-Cookie across endpoints
       // (session-leak vector); round-trip cookies via headers when needed.
       enableCookies = false,

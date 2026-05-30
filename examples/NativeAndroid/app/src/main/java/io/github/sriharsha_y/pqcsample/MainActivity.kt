@@ -199,7 +199,6 @@ class MainActivity : Activity() {
                     pinnedCertSha256 = emptyList(),
                     defaultTimeoutMs = 15_000uL,
                     connectTimeoutMs = null,
-                    maxBodyBytes = null,
                     enableCookies = false,
                     userAgent = "PqcNativeAndroidSample/1.0",
                     redirectPolicy = RedirectPolicy.SameOriginOnly,
