@@ -158,6 +158,8 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 | Cookies | ✅ Opt-in via `enableCookies`; off by default |
 | gzip / brotli | ✅ Transparent decoding via reqwest (no cap — matches `URLSession` / `OkHttp`) |
 | Redirects | ✅ `SameOriginOnly` default; also `NoRedirects` / `Limited(max)` |
+| Post-redirect URL on `HttpResponse` | ✅ `finalUrl` mirrors `URLResponse.url` / OkHttp `response.request.url` |
+| RFC 9111 response cache (opt-in) | ✅ Disk on Android, mem+disk on iOS — like `OkHttp Cache` / `URLCache`; `clearCache()` + `cacheSizeBytes()` |
 | Timeouts (connect / total) | ✅ Separated so connect fails fast on cell handover |
 | Connection pooling | ✅ |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
@@ -170,7 +172,19 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 - **WebViews** (`WKWebView`, system WebView) — use the system network stack, not interceptable.
 - **iOS background `URLSession`** — the OS daemon owns the socket.
 - **RN image loaders / 3rd-party native SDKs** (Fresco, SDWebImage, Firebase, Sentry, …) — bundle their own HTTP clients.
-- **Streaming bodies larger than a few MB** — possible but needs extra FFI plumbing; not in scope.
+- **Streaming bodies** — the response body is fully buffered in memory (matches `URLSession.dataTask` / OkHttp `ResponseBody.bytes()`). A streaming surface is possible but not yet exposed across the FFI.
+
+## App size impact
+
+Measured on the current release profile (`opt-level=z`, LTO, `strip=true`), with the response cache feature enabled. The Android `.so` is dynamically linked so what's in the file is what installs; on iOS the XCFramework's static archive is much larger than the shipped binary because `clang -dead_strip` discards unused symbols and embedded bitcode metadata at link time.
+
+| Platform | Per-user install delta (App Store / Play "App size") |
+|---|---|
+| **Android arm64-v8a** (modern devices) | **~5.5 MiB** |
+| Android armeabi-v7a (old 32-bit) | ~3.2 MiB |
+| **iOS arm64** (App Store device build) | **~6.0 MiB** |
+
+The cache feature is responsible for ~1 MiB of that on both platforms; building with `PQC_CARGO_FEATURES=""` (no cache) drops the delta to ~4.7 MiB on Android arm64 and ~5.0 MiB on iOS. See [`docs/android.md` §1](docs/android.md) and [`docs/ios.md` §1](docs/ios.md) for the build-output sizes and how to re-measure.
 
 ## Building from source
 
@@ -190,6 +204,8 @@ Automated by [release-please](https://github.com/googleapis/release-please) from
 
 ## Dependencies
 
+### Core (always linked)
+
 | Crate | Purpose |
 |---|---|
 | `reqwest` | HTTP client (redirects, cookies, gzip/brotli, pooling, HTTP/2) |
@@ -200,6 +216,21 @@ Automated by [release-please](https://github.com/googleapis/release-please) from
 | `x509-parser` | Extract SPKI bytes from the server cert for pinning |
 | `tokio` | Async runtime |
 | `uniffi` | Generates the Kotlin + Swift bindings |
+| `thiserror`, `log` | Typed errors, logging facade |
+| `jni` (Android only) | One-shot JNI handshake handing the `Application` context to `rustls-platform-verifier` |
+
+### Optional — `cache` feature
+
+Pulled in only when built with `--features cache` (the official mobile artifacts do; the default `cargo build` does not):
+
+| Crate | Purpose |
+|---|---|
+| `http-cache` / `http-cache-semantics` / `http-cache-reqwest` | RFC 9111 cacheability, freshness, revalidation, `Vary`; reqwest middleware glue |
+| `reqwest-middleware` | The middleware ClientWithMiddleware that wraps the cached path |
+| `cacache` | Byte-bounded persistent disk tier |
+| `moka` | In-memory hot tier (iOS only) |
+| `postcard` | Compact serde format for the on-disk cache record (replaces unmaintained `bincode 1.x`) |
+| `serde`, `async-trait` | Trait wiring for the above |
 
 ## License
 

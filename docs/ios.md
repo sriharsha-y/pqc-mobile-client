@@ -22,14 +22,31 @@ After `make ios` at the repo root:
 
 ```
 generated/
-├── PqcCore.xcframework         (arm64 device + arm64/x86_64 simulator)
+├── PqcCore.xcframework
+│   ├── ios-arm64/libpqc_client.a                      # ~68 MiB (--features cache)
+│   └── ios-arm64_x86_64-simulator/libpqc_client.a     # ~140 MiB (dev only)
 └── swift/
     ├── pqc.swift               (UniFFI-generated Swift bindings)
     ├── pqcFFI.h
     └── module.modulemap
 ```
 
-Binary footprint per arch: ~5–8 MB in the device IPA after App Store thinning.
+The `.a` file size is **not** the shipped cost — it's a static archive,
+and `clang -dead_strip` + LTO discard the unused symbols and embedded
+bitcode metadata at link time. The actual delta to the app's main
+executable, measured by linking a stub with App Store flags
+(`-Os -Wl,-dead_strip` + `strip -x -S`):
+
+| Build | Static archive (.a) | Linked binary delta in `.app` |
+|---|---|---|
+| `--features cache` (release default) | ~68 MiB | **~6.0 MiB** |
+| no cache (`PQC_CARGO_FEATURES=""`) | ~59 MiB | ~5.0 MiB |
+
+App Store thinning + IPA compression mean the **download** is smaller
+(the Mach-O compresses to ~3–3.5 MiB inside the zipped IPA), but the
+"App Size" the App Store shows users — and the install footprint — is
+the linked-binary number above. The simulator slice is dev-only and
+never ships.
 
 ## 2. Packaging
 

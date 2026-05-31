@@ -39,13 +39,13 @@ cargo test --release --test smoke -- --nocapture <test_name>
 
 The `uniffi-bindgen` binary is declared with `required-features = ["cli"]` in `Cargo.toml`. This is load-bearing:
 
-- Mobile cross-compiles (`cargo build --target aarch64-apple-ios`, `cargo ndk ...`) must run **without** `--features cli`. Otherwise `clap`, `goblin`, and the full `uniffi_bindgen` tree get linked into `libpqc_client.a` / `.so`, ballooning the iOS arm64 archive from ~50 MB to ~90 MB.
+- Mobile cross-compiles (`cargo build --target aarch64-apple-ios`, `cargo ndk ...`) must run **without** `--features cli`. Otherwise `clap`, `goblin`, and the full `uniffi_bindgen` tree get linked into `libpqc_client.a` / `.so`, ballooning the iOS arm64 archive (today ~71 MiB with `cache`) and bloating the Android arm64-v8a `.so` (today ~5.5 MiB with `cache`).
 - Generating bindings always uses `cargo run --release --features cli --bin uniffi-bindgen -- generate ...` on the **host**.
 - When adding new code paths or examples, do not enable `cli` on default or on the library target.
 
 ## The `cache` feature — opt-in response cache
 
-`cache` (off by default, like `cli`) compiles in the RFC 9111 response cache (`src/cache.rs`): the `http-cache`/`http-cache-semantics` stack + `cacache` (disk) + `moka` (iOS memory tier). It's gated at compile time **and** at runtime (`PqcConfig.enable_cache`, also off by default). The mobile build scripts pass `--features cache` (override with `PQC_CARGO_FEATURES=`), so release artifacts ship it; it adds ~10 MB to the iOS arm64 `.a` (measure before changing). Do **not** make it a `default` feature — the default/CI build must stay cache-free, and `--features cache` must never be combined with `cli`. The FFI surface is identical with or without it (`clear_cache`/`cache_size_bytes` are always exported, and inert when caching is off), so bindings are stable across both builds.
+`cache` (off by default, like `cli`) compiles in the RFC 9111 response cache (`src/cache.rs`): the `http-cache`/`http-cache-semantics` stack + `cacache` (disk) + `moka` (iOS memory tier) + `postcard` (record serde). It's gated at compile time **and** at runtime (`PqcConfig.enable_cache`, also off by default). The mobile build scripts pass `--features cache` (override with `PQC_CARGO_FEATURES=`), so release artifacts ship it. Measured cost (release profile, `strip=true`, LTO): adds ~9 MiB to the iOS arm64 `.a` (61 → 71 MiB) but only ~1 MiB to the **linked** binary delta after `clang -dead_strip` (5.0 → 6.0 MiB) — the .a is bloated by bitcode metadata the linker discards. Android arm64-v8a `.so` grows ~0.8 MiB (4.7 → 5.5 MiB). Do **not** make it a `default` feature — the default/CI build must stay cache-free, and `--features cache` must never be combined with `cli`. The FFI surface is identical with or without it (`clear_cache`/`cache_size_bytes` are always exported, and inert when caching is off), so bindings are stable across both builds.
 
 ## Release profile / panic strategy
 
