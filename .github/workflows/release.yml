@@ -90,19 +90,27 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
-          # Stage the hand-written Kotlin wrappers next to the generated
-          # bindings so the tarball ships one self-contained kotlin/ tree.
+          # Stage the tarball's kotlin/ tree in a temp dir — DO NOT mutate
+          # generated/kotlin/ in place, because the downstream publish-maven
+          # job reuses it (via the pqc-android-native artifact) and would
+          # see PqcConfigDefaults.kt / PqcInterceptor.kt in both
+          # generated/kotlin/ AND src/main/kotlin/ → duplicate declarations,
+          # AAR compileReleaseKotlin fails.
+          STAGE="dist/_android_stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R generated/kotlin "$STAGE/kotlin"
           cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt \
-             generated/kotlin/io/github/sriharsha_y/pqc/
+             "$STAGE/kotlin/io/github/sriharsha_y/pqc/"
           cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcInterceptor.kt \
-             generated/kotlin/io/github/sriharsha_y/pqc/
+             "$STAGE/kotlin/io/github/sriharsha_y/pqc/"
           # Include android/libs/ (the rustls-platform-verifier glue jar):
           # tarball consumers need it on their classpath or the first
           # handshake hits NoClassDefFoundError: CertificateVerifier.
           tar -czf "dist/${ARCHIVE}" \
               -C target jniLibs \
-              -C ../generated kotlin \
-              -C ../android libs
+              -C "../$STAGE" kotlin \
+              -C ../../android libs
+          rm -rf "$STAGE"
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
