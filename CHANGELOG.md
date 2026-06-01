@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.6.0...v0.7.0) (2026-06-01)
+
+
+### Features
+
+* PqcURLProtocol + PqcInterceptor base classes + platformDefault factories ([2dd7431](https://github.com/sriharsha-y/pqc-mobile-client/commit/2dd74319e65366d8343757bf740ae5e936e73c76))
+* PqcURLProtocol + PqcInterceptor base classes + platformDefault factories ([31a1f17](https://github.com/sriharsha-y/pqc-mobile-client/commit/31a1f17c410b7b5a29b467aefbe7e9d1f46bdad6))
+
 ## [0.6.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.5.4...v0.6.0) (2026-05-30)
 
 
