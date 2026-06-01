@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.7.0...v0.7.1) (2026-06-01)
+
+
+### Bug Fixes
+
+* **release:** stage Android tarball wrappers in a temp dir, not in generated/kotlin ([e5cd8c0](https://github.com/sriharsha-y/pqc-mobile-client/commit/e5cd8c05d64b9c001f52e4f06e51161ecc7701f0))
+* **release:** stage Android tarball wrappers in temp dir, unblock publish-maven ([f4a0a76](https://github.com/sriharsha-y/pqc-mobile-client/commit/f4a0a7660aa8d783a8ef8e87a161f60cb9dabc39))
+
 ## [0.7.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.6.0...v0.7.0) (2026-06-01)
 
 
