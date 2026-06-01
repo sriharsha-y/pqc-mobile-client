@@ -59,12 +59,12 @@ import kotlinx.coroutines.runBlocking   // request() is a suspend fun; call it f
 // Once, in Application.onCreate, before constructing any client:
 PqcAndroidInit.init(this)
 
-// Constructor throws PqcException on bad config (e.g. a malformed pin):
-val client = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = emptyList(),   // SPKI pins; empty = platform trust only
-    defaultTimeoutMs = 15_000UL,
-    connectTimeoutMs = null,          // 10s default
-    enableCookies = false,
+// `PqcConfig.platformDefault(context)` matches OkHttp's defaults — override
+// just the fields you care about. Constructor throws PqcException on bad
+// config (e.g. a malformed pin).
+val client = PqcHttpClient(PqcConfig.platformDefault(
+    context = applicationContext,
+    pinnedCertSha256 = listOf("base64-spki-hash"),  // see docs/android.md §10
     userAgent = "MyApp/1.0",
     redirectPolicy = RedirectPolicy.SameOriginOnly,
 ))
@@ -86,13 +86,13 @@ println("status=${resp.status} alpn=${resp.negotiatedProtocol}")
 ```swift
 import PqcCore
 
-let client = try PqcHttpClient(config: PqcConfig(
-    pinnedCertSha256: [],
-    defaultTimeoutMs: 15_000,
-    connectTimeoutMs: nil,
-    enableCookies: false,
+// `PqcConfig.platformDefault()` matches URLSessionConfiguration.default —
+// override just the fields you care about.
+let client = try PqcHttpClient(config: .platformDefault(
+    pinnedCertSha256: ["base64-spki-hash"],  // see docs/ios.md §10
     userAgent: "MyApp/1.0",
-    redirectPolicy: .sameOriginOnly))
+    redirectPolicy: .sameOriginOnly
+))
 
 let resp = try await client.request(req: HttpRequest(
     method: .get, url: "https://example.com",
@@ -139,10 +139,10 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 
 | Consumer | Integration pattern | Guide |
 |---|---|---|
-| Native Android (OkHttp / Retrofit / Ktor) | Custom `Interceptor` delegating to `PqcHttpClient` | [`docs/android.md`](docs/android.md) §3 |
-| Native Android (`HttpURLConnection` / no framework) | Call `PqcHttpClient` directly | [`docs/android.md`](docs/android.md) §6 |
+| Native Android (OkHttp / Retrofit / Ktor) | Subclass the bundled `PqcInterceptor` and override `makeConfig()` | [`docs/android.md`](docs/android.md) §3 |
+| Native Android (`HttpURLConnection` / no framework) | Call `PqcHttpClient` directly with `PqcConfig.platformDefault(context, …)` | [`docs/android.md`](docs/android.md) §6 |
 | React Native Android | Same `Interceptor` via `OkHttpClientProvider` | [`docs/android.md`](docs/android.md) §5 |
-| Native iOS (`URLSession`) | Register `PqcURLProtocol` on the session config | [`docs/ios.md`](docs/ios.md) §3 |
+| Native iOS (`URLSession`) | Subclass the bundled `PqcURLProtocol`, register via `registerIfNeeded(into:)` | [`docs/ios.md`](docs/ios.md) §3 |
 | Native iOS (custom HTTP client) | Call `PqcHttpClient` directly | [`docs/ios.md`](docs/ios.md) §5 |
 | React Native iOS | `PqcURLProtocol` via `RCTSetCustomNSURLSessionConfigurationProvider` | [`docs/ios.md`](docs/ios.md) §6 |
 

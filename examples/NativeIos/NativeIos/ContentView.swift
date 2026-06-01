@@ -188,20 +188,15 @@ struct ContentView: View {
     /// This library: always advertises the X25519MLKEM768 hybrid, so a
     /// PQ-capable edge reports `kex=X25519MLKEM768`.
     private func fetchViaPqcClient() async throws -> (status: UInt16, kex: String?, alpn: String) {
-        // The constructor throws on malformed config (e.g. a bad pin).
-        let client = try PqcHttpClient(config: PqcConfig(
-            pinnedCertSha256: [],
+        // `PqcConfig.platformDefault()` reflects URLSession's defaults at the
+        // PQC-client layer; override just the banking-style knobs we care
+        // about for this sample. The constructor throws on malformed config.
+        let client = try PqcHttpClient(config: .platformDefault(
             defaultTimeoutMs: 15_000,
-            connectTimeoutMs: nil,
             enableCookies: false,
             userAgent: "PqcNativeIosSample/1.0",
             redirectPolicy: .sameOriginOnly,
-            // Opt-in RFC 9111 response cache (off here; the trace endpoint is
-            // uncacheable anyway). To enable, set enableCache: true and pass a
-            // Caches dir path. See docs/ios.md.
-            enableCache: false,
-            cacheDir: nil,
-            maxCacheBytes: nil
+            enableCache: false
         ))
         let resp = try await client.request(req: HttpRequest(
             method: .get,

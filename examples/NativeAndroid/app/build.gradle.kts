@@ -60,6 +60,13 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // OkHttp powers Android's de-facto HTTP stack (it's also what backs
+    // java.net.HttpURLConnection on the platform since KitKat). PqcInterceptor
+    // adapts the Rust PqcHttpClient to OkHttp; this sample demonstrates the
+    // realistic integration. The published AAR declares OkHttp as
+    // compileOnly, so consumers using PqcInterceptor must add it themselves.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     // rustls-platform-verifier's Kotlin glue (org.rustls.platformverifier.*),
     // extracted into android/libs/ by scripts/build-android.sh. Without it the
     // first TLS handshake throws NoClassDefFoundError: CertificateVerifier.

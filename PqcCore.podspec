@@ -30,7 +30,7 @@ Pod::Spec.new do |s|
   #
   # preserve_paths defensively keeps CocoaPods from stripping XCFramework
   # slices on :http sources (a 1.10+ edge case for some zip layouts).
-  s.source_files      = 'pqc.swift'
+  s.source_files      = 'pqc.swift', 'PqcConfig+Defaults.swift', 'PqcURLProtocol.swift'
   s.vendored_frameworks = 'PqcCore.xcframework'
   s.preserve_paths    = 'PqcCore.xcframework'
 

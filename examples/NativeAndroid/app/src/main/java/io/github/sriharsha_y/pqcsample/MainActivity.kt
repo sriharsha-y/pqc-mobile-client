@@ -15,11 +15,13 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
-import io.github.sriharsha_y.pqc.HttpMethod
-import io.github.sriharsha_y.pqc.HttpRequest
+import android.content.Context
 import io.github.sriharsha_y.pqc.PqcConfig
-import io.github.sriharsha_y.pqc.PqcHttpClient
+import io.github.sriharsha_y.pqc.PqcInterceptor
 import io.github.sriharsha_y.pqc.RedirectPolicy
+import io.github.sriharsha_y.pqc.platformDefault
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -190,40 +192,36 @@ class MainActivity : Activity() {
         }
     }
 
-    /** This library: always advertises the X25519MLKEM768 hybrid, so a
-     *  PQ-capable edge reports kex=X25519MLKEM768. */
+    /** This library: routes the call through OkHttp + `PqcInterceptor`,
+     *  which is the realistic Android integration pattern (Retrofit, Ktor,
+     *  RN all sit on OkHttp). The interceptor swaps OkHttp's TLS for the
+     *  Rust PQC client, so a PQ-capable edge reports kex=X25519MLKEM768. */
     private suspend fun fetchViaPqcClient(): Triple<UShort, String?, String> =
         withContext(Dispatchers.IO) {
-            val client = PqcHttpClient(
-                PqcConfig(
-                    pinnedCertSha256 = emptyList(),
-                    defaultTimeoutMs = 15_000uL,
-                    connectTimeoutMs = null,
-                    enableCookies = false,
-                    userAgent = "PqcNativeAndroidSample/1.0",
-                    redirectPolicy = RedirectPolicy.SameOriginOnly,
-                    // Opt-in RFC 9111 response cache (off here; the trace
-                    // endpoint is uncacheable anyway). To enable, set true and
-                    // pass an app dir, e.g. cacheDir = cacheDir.absolutePath.
-                    enableCache = false,
-                    cacheDir = null,
-                    maxCacheBytes = null,
-                )
-            )
-            val resp = client.request(
-                HttpRequest(
-                    method = HttpMethod.GET,
-                    url = "https://pq.cloudflareresearch.com/cdn-cgi/trace",
-                    headers = emptyMap(),
-                    body = null,
-                    timeoutMs = 5_000uL,
-                )
-            )
-            val kex = String(resp.body, Charsets.UTF_8)
-                .lineSequence()
-                .firstOrNull { it.startsWith("kex=") }
-                ?.removePrefix("kex=")
-            Triple(resp.status, kex, resp.negotiatedProtocol)
+            // Subclass `PqcInterceptor` to override `makeConfig` with the
+            // sample's banking-style knobs on top of `platformDefault`.
+            val pqcInterceptor = object : PqcInterceptor(applicationContext) {
+                override fun makeConfig(context: Context): PqcConfig =
+                    PqcConfig.platformDefault(
+                        context = context,
+                        defaultTimeoutMs = 15_000uL,
+                        userAgent = "PqcNativeAndroidSample/1.0",
+                        redirectPolicy = RedirectPolicy.SameOriginOnly,
+                    )
+            }
+            val http = OkHttpClient.Builder()
+                .addInterceptor(pqcInterceptor)    // MUST be last
+                .build()
+            val request = Request.Builder()
+                .url("https://pq.cloudflareresearch.com/cdn-cgi/trace")
+                .build()
+            http.newCall(request).execute().use { resp ->
+                val body = resp.body?.string() ?: ""
+                val kex = body.lineSequence()
+                    .firstOrNull { it.startsWith("kex=") }
+                    ?.removePrefix("kex=")
+                Triple(resp.code.toUShort(), kex, resp.protocol.toString())
+            }
         }
 
     /** The Android system stack (HttpsURLConnection over Conscrypt). It does

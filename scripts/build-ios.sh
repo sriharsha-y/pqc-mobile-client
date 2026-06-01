@@ -89,14 +89,20 @@ xcodebuild -create-xcframework \
     -output generated/PqcCore.xcframework
 
 # PqcCore.podspec references bare `pqc.swift` / `PqcCore.xcframework` (the
-# release-zip layout). For the sample's `:path => '../../../'` Pod, the Pod
-# root is the repo root, so symlink the bare names to generated/ (gitignored).
+# release-zip layout) plus the hand-written wrappers in Sources/PqcCore/.
+# For the sample's `:path => '../../../'` Pod, the Pod root is the repo
+# root, so symlink the bare names to their real locations.
 ln -sfn generated/swift/pqc.swift pqc.swift
 ln -sfn generated/PqcCore.xcframework PqcCore.xcframework
+# Hand-written wrappers live in Sources/PqcCore/ (committed). Bare-name
+# symlinks at the repo root match the layout the release zip ships.
+ln -sfn "Sources/PqcCore/PqcConfig+Defaults.swift" "PqcConfig+Defaults.swift"
+ln -sfn "Sources/PqcCore/PqcURLProtocol.swift"   "PqcURLProtocol.swift"
 
 echo
 echo "iOS build complete:"
 echo "  XCFramework:    generated/PqcCore.xcframework  (symlinked at ./PqcCore.xcframework)"
 echo "  Swift binding:  generated/swift/pqc.swift      (symlinked at ./pqc.swift)"
+echo "  Wrappers:       Sources/PqcCore/Pqc*.swift     (symlinked at ./Pqc*.swift)"
 echo
 echo "Next: consume from a CocoaPod or SPM package (see docs/ios.md)."

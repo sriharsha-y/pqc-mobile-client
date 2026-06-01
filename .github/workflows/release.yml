@@ -90,6 +90,12 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
+          # Stage the hand-written Kotlin wrappers next to the generated
+          # bindings so the tarball ships one self-contained kotlin/ tree.
+          cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt \
+             generated/kotlin/io/github/sriharsha_y/pqc/
+          cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcInterceptor.kt \
+             generated/kotlin/io/github/sriharsha_y/pqc/
           # Include android/libs/ (the rustls-platform-verifier glue jar):
           # tarball consumers need it on their classpath or the first
           # handshake hits NoClassDefFoundError: CertificateVerifier.
@@ -189,9 +195,12 @@ jobs:
           VERSION="${{ needs.release-please.outputs.version }}"
           mkdir -p dist
 
-          # One zip (xcframework + pqc.swift + LICENSE) serves both CocoaPods
-          # (PqcCore.podspec :http source) and SPM (binaryTarget finds the
-          # .xcframework at the root and ignores the siblings).
+          # One zip (xcframework + pqc.swift + hand-written wrappers + LICENSE)
+          # serves both CocoaPods (PqcCore.podspec :http source) and SPM
+          # (binaryTarget finds the .xcframework at the root and ignores the
+          # siblings). The wrappers (PqcConfig+Defaults.swift, PqcURLProtocol.swift)
+          # ship at the zip root so PqcCore.podspec's bare source_files resolve,
+          # and the publish-swiftpm job extracts them into Sources/PqcCore/.
           ARCHIVE="PqcCore-${VERSION}.zip"
 
           # TZ=UTC + zip -X strip timestamps so the zip layer's SHA256 is
@@ -201,8 +210,15 @@ jobs:
           rm -rf "$STAGE" && mkdir -p "$STAGE"
           cp -R generated/PqcCore.xcframework "$STAGE/"
           cp generated/swift/pqc.swift "$STAGE/"
+          cp "Sources/PqcCore/PqcConfig+Defaults.swift" "$STAGE/"
+          cp "Sources/PqcCore/PqcURLProtocol.swift" "$STAGE/"
           cp LICENSE "$STAGE/"
-          (cd "$STAGE" && TZ=UTC zip -X -r "../${ARCHIVE}" PqcCore.xcframework pqc.swift LICENSE)
+          (cd "$STAGE" && TZ=UTC zip -X -r "../${ARCHIVE}" \
+              PqcCore.xcframework \
+              pqc.swift \
+              "PqcConfig+Defaults.swift" \
+              PqcURLProtocol.swift \
+              LICENSE)
           rm -rf "$STAGE"
 
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
