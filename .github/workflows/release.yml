@@ -85,24 +85,83 @@ jobs:
       - name: Build
         run: make android
 
+      # Set up Java + Gradle BEFORE assembling the AAR, so AAR contract
+      # assertions can run here rather than at publish-maven time. Any
+      # failure here aborts the workflow BEFORE the tarball is uploaded
+      # and BEFORE publish-maven / publish-cocoapods / publish-swiftpm
+      # touch their downstream registries.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Run the same AAR build publish-maven will run, but here, so a
+      # broken AAR fails the release BEFORE any registry is touched.
+      # Catches: duplicate-source kotlinc errors (the v0.7.0 publish-maven
+      # failure), missing rustls-pv glue, missing UniFFI bindings, missing
+      # consumer ProGuard rules.
+      - name: Assemble AAR + assert contract
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease --no-daemon
+          AAR=build/outputs/aar/pqc-mobile-client-release.aar
+          if [ ! -f "$AAR" ]; then
+            echo "::error::Expected AAR at android/$AAR"
+            exit 1
+          fi
+          unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
+          for cls in \
+              io/github/sriharsha_y/pqc/PqcHttpClient.class \
+              io/github/sriharsha_y/pqc/PqcInterceptor.class \
+              io/github/sriharsha_y/pqc/PqcConfigDefaultsKt.class
+          do
+            if ! unzip -l /tmp/aar-classes.jar | grep -q "$cls"; then
+              echo "::error::$AAR is missing $cls."
+              echo "::error::This is what publish-maven would have caught later — fix in build-android."
+              unzip -l /tmp/aar-classes.jar
+              exit 1
+            fi
+          done
+          if ! unzip -l "$AAR" | grep -qE 'libs/rustls-platform-verifier-[0-9.]+\.jar'; then
+            echo "::error::$AAR is missing libs/rustls-platform-verifier-*.jar."
+            echo "::error::Audit android/build.gradle.kts api(fileTree(\"libs\")) and scripts/build-android.sh extract step."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          if ! unzip -l "$AAR" | grep -q 'proguard.txt'; then
+            echo "::error::$AAR is missing proguard.txt (consumer R8 rules)."
+            echo "::error::Audit consumerProguardFiles in android/build.gradle.kts."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          echo "OK: AAR contract holds — bindings + PqcInterceptor + rustls-pv glue + ProGuard rules all present."
+
       - name: Package
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
           ARCHIVE="pqc-mobile-client-${VERSION}-android.tar.gz"
           mkdir -p dist
-          # Stage the hand-written Kotlin wrappers next to the generated
-          # bindings so the tarball ships one self-contained kotlin/ tree.
+          # Stage the tarball's kotlin/ tree in a temp dir — DO NOT mutate
+          # generated/kotlin/ in place, because the downstream publish-maven
+          # job reuses it (via the pqc-android-native artifact) and would
+          # see PqcConfigDefaults.kt / PqcInterceptor.kt in both
+          # generated/kotlin/ AND src/main/kotlin/ → duplicate declarations,
+          # AAR compileReleaseKotlin fails.
+          STAGE="dist/_android_stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R generated/kotlin "$STAGE/kotlin"
           cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt \
-             generated/kotlin/io/github/sriharsha_y/pqc/
+             "$STAGE/kotlin/io/github/sriharsha_y/pqc/"
           cp android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcInterceptor.kt \
-             generated/kotlin/io/github/sriharsha_y/pqc/
+             "$STAGE/kotlin/io/github/sriharsha_y/pqc/"
           # Include android/libs/ (the rustls-platform-verifier glue jar):
           # tarball consumers need it on their classpath or the first
           # handshake hits NoClassDefFoundError: CertificateVerifier.
           tar -czf "dist/${ARCHIVE}" \
               -C target jniLibs \
-              -C ../generated kotlin \
-              -C ../android libs
+              -C "../$STAGE" kotlin \
+              -C ../../android libs
+          rm -rf "$STAGE"
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Upload artifact
@@ -429,6 +488,10 @@ jobs:
       # PqcConfig) that no other check caught. This guards the exact
       # artifact about to be published; assembleRelease here primes the
       # build the publish task reuses, so it is not wasted work.
+      # build-android already gates the full AAR contract. This minimal
+      # last-line-of-defense check guards specifically against uniffi-rs#2520
+      # (silent empty-API AAR from a stripped host dylib) — a bug class that
+      # shipped multiple empty-API AARs before we put it under guard.
       - name: Assert AAR carries the UniFFI Kotlin bindings before publishing
         working-directory: android
         run: |
@@ -436,9 +499,7 @@ jobs:
           AAR=build/outputs/aar/pqc-mobile-client-release.aar
           unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
           if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
-            echo "::error::$AAR is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
-            echo "::error::Refusing to publish an empty-API AAR (uniffi-rs#2520). Audit"
-            echo "::error::scripts/build-android.sh's host-dylib strip override + binding guard."
+            echo "::error::$AAR is missing io/github/sriharsha_y/pqc/PqcHttpClient.class (uniffi-rs#2520)."
             unzip -l /tmp/aar-classes.jar
             exit 1
           fi

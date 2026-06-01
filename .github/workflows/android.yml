@@ -83,17 +83,26 @@ jobs:
       # zero bindings on Linux silently, shipping an AAR with no
       # PqcHttpClient/PqcConfig — unusable by consumers yet passing every
       # other check. See scripts/build-android.sh's strip note + guard.
-      - name: Assert AAR contains the UniFFI Kotlin bindings
+      - name: Assert AAR contains the UniFFI Kotlin bindings + wrappers
         run: |
           AAR=android/build/outputs/aar/pqc-mobile-client-release.aar
           unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
-          if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
-            echo "::error::$AAR classes.jar is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
-            echo "::error::uniffi-bindgen generated zero bindings — see the uniffi-rs#2520 strip note in scripts/build-android.sh."
-            unzip -l /tmp/aar-classes.jar
-            exit 1
-          fi
-          echo "OK: AAR classes.jar carries the UniFFI Kotlin bindings."
+          for cls in \
+              io/github/sriharsha_y/pqc/PqcHttpClient.class \
+              io/github/sriharsha_y/pqc/PqcInterceptor.class \
+              io/github/sriharsha_y/pqc/PqcConfigDefaultsKt.class
+          do
+            if ! unzip -l /tmp/aar-classes.jar | grep -q "$cls"; then
+              echo "::error::$AAR classes.jar is missing $cls."
+              echo "::error::PqcHttpClient missing → uniffi-bindgen produced zero bindings"
+              echo "::error::  (uniffi-rs#2520 strip note in scripts/build-android.sh)."
+              echo "::error::PqcInterceptor / PqcConfigDefaultsKt missing → audit"
+              echo "::error::  android/build.gradle.kts sourceSets and android/src/main/kotlin/."
+              unzip -l /tmp/aar-classes.jar
+              exit 1
+            fi
+          done
+          echo "OK: AAR classes.jar carries the UniFFI Kotlin bindings + hand-written wrappers."
 
       # Consumer R8 rules must be packaged into the AAR (as proguard.txt) or
       # apps with minifyEnabled=true fail the build (JNA java.awt) / crash at
