@@ -37,9 +37,13 @@ xcuserdata/
 
 # Repo-root symlinks created by scripts/build-ios.sh so the local
 # PqcCore.podspec :path consumption finds the bare names the published
-# podspec uses. Pure build artefacts; the real files live under generated/.
+# podspec uses. Pure build artefacts; the real files live under generated/
+# (for pqc.swift / PqcCore.xcframework) or Sources/PqcCore/ (for the
+# hand-written wrappers).
 /PqcCore.xcframework
 /pqc.swift
+/PqcConfig+Defaults.swift
+/PqcURLProtocol.swift
 
 # Logs / scratch
 *.log

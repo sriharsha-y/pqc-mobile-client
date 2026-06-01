@@ -60,6 +60,11 @@ dependencies {
 
 That pulls the AAR (with `arm64-v8a`, `armeabi-v7a`, `x86_64` slices), the Kotlin bindings, and the JNA + kotlinx-coroutines transitive dependencies in one declaration. No local cargo build, no manual `.so` vendoring.
 
+> **If you use `PqcInterceptor`** (Section 3), declare OkHttp in your own dependencies — the AAR declares OkHttp as `compileOnly`, so it doesn't propagate transitively. Almost every Android consumer already has OkHttp (directly or via Retrofit / Ktor), but pure `HttpURLConnection` consumers who later add `PqcInterceptor` need to add:
+> ```kotlin
+> implementation("com.squareup.okhttp3:okhttp:4.9.0")  // or higher; 4.0+ supported
+> ```
+
 The published AAR is **self-contained**: it bundles the `rustls-platform-verifier` Kotlin glue (`org.rustls.platformverifier.*`) under its own `libs/` entry. Consumers do **not** need to add a separate Maven repository for it. Upstream ships those classes only as a vendored AAR inside the Cargo registry — `scripts/build-android.sh` extracts that jar and AGP embeds it into our AAR at publish time.
 
 ### B — Tarball from the GitHub Release (no Maven access)
@@ -67,10 +72,10 @@ The published AAR is **self-contained**: it bundles the `rustls-platform-verifie
 For consumers behind corporate proxies that block Maven Central, or for early integration before Maven Central publication is ready, download `pqc-mobile-client-X.Y.Z-android.tar.gz` from the release page and unpack:
 
 - `jniLibs/*` → `app/src/main/jniLibs/`
-- `kotlin/io/github/sriharsha_y/pqc/pqc.kt` → `app/src/main/java/io/github/sriharsha_y/pqc/pqc.kt`
+- `kotlin/io/github/sriharsha_y/pqc/*.kt` → `app/src/main/java/io/github/sriharsha_y/pqc/` (the generated `pqc.kt` plus the hand-written `PqcConfigDefaults.kt` and `PqcInterceptor.kt`)
 - `libs/rustls-platform-verifier-*.jar` → `app/libs/`  (vendored Kotlin glue; without it the first TLS handshake throws `NoClassDefFoundError: org.rustls.platformverifier.CertificateVerifier`)
 
-Add the JNA + coroutines deps to the consumer's `build.gradle` manually, plus `implementation(fileTree("libs") { include("*.jar") })` so AGP picks up the platform-verifier jar. Works but won't survive an Expo `prebuild`.
+Add the JNA + coroutines deps to the consumer's `build.gradle` manually, plus `implementation(fileTree("libs") { include("*.jar") })` so AGP picks up the platform-verifier jar. If you use `PqcInterceptor`, add OkHttp too (see the note in Section 2A). Works but won't survive an Expo `prebuild`.
 
 ### C — Local Gradle module (development)
 
@@ -85,61 +90,35 @@ The AAR lands at `android/build/outputs/aar/pqc-mobile-client-release.aar`. Refe
 
 ## 3. Native Android — OkHttp / Retrofit / Ktor
 
-OkHttp's `Interceptor` is the universal hook. Anything built on OkHttp (Retrofit, Ktor with the OkHttp engine, Apollo with OkHttp) inherits the swap.
+OkHttp's `Interceptor` is the universal hook. The AAR ships an `open` base class `PqcInterceptor` whose defaults align with `OkHttpClient.Builder()` (10 s timeouts, no cache, 20-redirect cap) — with one deliberate divergence: cookies are managed by the Rust client (matching iOS), since OkHttp's own `cookieJar` is bypassed by the interceptor chain anyway. Subclass `PqcInterceptor` to customise the knobs you care about; the rest of the OkHttp pipeline — Retrofit, Ktor with the OkHttp engine, Apollo — inherits the swap unchanged.
 
 ```kotlin
-import okhttp3.Interceptor
-import okhttp3.Response
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.ResponseBody.Companion.toResponseBody
-import kotlinx.coroutines.runBlocking
-import io.github.sriharsha_y.pqc.*
+import android.content.Context
+import io.github.sriharsha_y.pqc.PqcConfig
+import io.github.sriharsha_y.pqc.PqcInterceptor
+import io.github.sriharsha_y.pqc.RedirectPolicy
+import io.github.sriharsha_y.pqc.platformDefault
 
-class PqcInterceptor(private val client: PqcHttpClient) : Interceptor {
-    override fun intercept(chain: Interceptor.Chain): Response {
-        val req = chain.request()
-        val pqcReq = HttpRequest(
-            method = req.method.toPqcMethod(),
-            url = req.url.toString(),
-            headers = req.headers.toMultimap(),
-            body = req.body?.let { okio.Buffer().also { b -> it.writeTo(b) }.readByteArray() },
-            timeoutMs = null,
+class AppPqcInterceptor(context: Context) : PqcInterceptor(context) {
+    override fun makeConfig(context: Context): PqcConfig =
+        PqcConfig.platformDefault(
+            context = context,
+            pinnedCertSha256 = CertPins.SPKI_SHA256,    // see §10
+            defaultTimeoutMs = 15_000UL,
+            userAgent = "MyApp/1.0",                    // identify to bank WAF / Akamai
+            redirectPolicy = RedirectPolicy.SameOriginOnly,
         )
-        val pqcResp = runBlocking { client.request(pqcReq) }
-        val ct = pqcResp.headers["content-type"]?.firstOrNull()?.toMediaTypeOrNull()
-        val builder = Response.Builder()
-            .request(req)
-            .protocol(okhttp3.Protocol.HTTP_2)
-            .code(pqcResp.status.toInt())
-            .message("")
-            .body(pqcResp.body.toResponseBody(ct))
-        pqcResp.headers.forEach { (k, vs) -> vs.forEach { builder.addHeader(k, it) } }
-        return builder.build()
-    }
-
-    private fun String.toPqcMethod() = when (uppercase()) {
-        "GET" -> HttpMethod.GET; "POST" -> HttpMethod.POST; "PUT" -> HttpMethod.PUT
-        "DELETE" -> HttpMethod.DELETE; "PATCH" -> HttpMethod.PATCH
-        "HEAD" -> HttpMethod.HEAD; "OPTIONS" -> HttpMethod.OPTIONS
-        else -> error("unsupported HTTP method: $this")
-    }
 }
 
-// Installation. The PqcHttpClient constructor throws on malformed config
-// (e.g. bad base64 in pinnedCertSha256) — wrap in try/catch in production.
-val pqc = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = CertPins.SPKI_SHA256,   // see Section 10 for how to compute
-    defaultTimeoutMs = 15_000UL,
-    connectTimeoutMs = null,                   // 10s default
-    enableCookies = false,                     // banking: no auto cookie jar
-    userAgent = "MyApp/1.0",                   // identify to bank WAF / Akamai
-    redirectPolicy = RedirectPolicy.SameOriginOnly,
-))
-
+// Install. Call prewarm() at app start to surface PqcHttpClient
+// construction failures (bad pin, missing native library) here instead of
+// on the first user request — wrap in try/catch to fall back to default
+// OkHttp on failure if you want graceful degradation.
+val pqc = AppPqcInterceptor(context).also { it.prewarm() }
 val okHttp = OkHttpClient.Builder()
     .addInterceptor(authHeaderInterceptor)        // runs first
     .addInterceptor(observabilityInterceptor)
-    .addInterceptor(PqcInterceptor(pqc))          // MUST be last
+    .addInterceptor(pqc)                          // MUST be last — no chain.proceed()
     .build()
 
 // Retrofit / Ktor / Apollo sit on top of okHttp unchanged.
@@ -149,6 +128,12 @@ val retrofit = Retrofit.Builder()
     .addConverterFactory(MoshiConverterFactory.create())
     .build()
 ```
+
+That is the entire interceptor — no body-drain, no header conversion, no `parseProtocol`/`statusReasonPhrase` to maintain. The base class also:
+
+- strips any inbound `Cookie:` header so the Rust client's jar is the only source of truth — OkHttp's `BridgeInterceptor` (the cookie-injection layer) runs *after* application interceptors and is bypassed when the chain short-circuits, so without this you'd get inconsistent cookie state across consumers.
+- wraps `PqcException` in `IOException` so callers can catch the standard OkHttp error type.
+- defaults to `enableCookies = true` (Rust client manages cookies — matches iOS and keeps session-based flows working through OkHttp interceptors) and `enableCache = false` (matches OkHttp's `cache = null`). Flip `enableCache` on in `makeConfig` to enable the Rust RFC 9111 cache; set `enableCookies = false` if you explicitly do not want any cookie state.
 
 ## 4. Native Android — `HttpURLConnection` or no framework
 
@@ -163,22 +148,15 @@ The RN networking module reads its `OkHttpClient` from `OkHttpClientProvider`. T
 import com.facebook.react.modules.network.OkHttpClientProvider
 import com.facebook.react.modules.network.OkHttpClientFactory
 import com.facebook.react.modules.network.ReactCookieJarContainer
-import io.github.sriharsha_y.pqc.*
+import io.github.sriharsha_y.pqc.android.PqcAndroidInit
 import java.util.concurrent.TimeUnit
 
 class MainApplication : Application(), ReactApplication {
-    private val pqc by lazy {
-        PqcHttpClient(PqcConfig(
-            pinnedCertSha256 = CertPins.SPKI_SHA256,
-            defaultTimeoutMs = 15_000UL,
-            connectTimeoutMs = null,
-            enableCookies = false,
-            userAgent = "MyApp/1.0",
-            redirectPolicy = RedirectPolicy.SameOriginOnly,
-        ))
-    }
-
     override fun onCreate() {
+        // Install BEFORE super.onCreate(), or NetworkingModule may already
+        // have built its client (react-native#34789 — silent no-op).
+        PqcAndroidInit.init(this)
+        val pqcInterceptor = AppPqcInterceptor(applicationContext)
         OkHttpClientProvider.setOkHttpClientFactory(OkHttpClientFactory {
             OkHttpClient.Builder()
                 .connectTimeout(0, TimeUnit.MILLISECONDS)
@@ -187,7 +165,7 @@ class MainApplication : Application(), ReactApplication {
                 .cookieJar(ReactCookieJarContainer())
                 .addInterceptor(authHeaderInterceptor)
                 .addInterceptor(observabilityInterceptor)
-                .addInterceptor(PqcInterceptor(pqc))      // MUST be last
+                .addInterceptor(pqcInterceptor)             // MUST be last
                 .build()
         })
         super.onCreate()
@@ -197,24 +175,24 @@ class MainApplication : Application(), ReactApplication {
 }
 ```
 
-The `PqcInterceptor` class is identical to the native case (Section 3).
+The `AppPqcInterceptor` class is the subclass defined in Section 3.
 
 ## 6. Direct use — no HTTP framework
 
-For new code paths that don't have an existing HTTP client to swap, use `PqcHttpClient` directly:
+For new code paths that don't have an existing HTTP client to swap, use `PqcHttpClient` directly. `PqcConfig.platformDefault(context, ...)` gives you OkHttp-aligned defaults so you only have to specify what's different.
 
 ```kotlin
 import io.github.sriharsha_y.pqc.*
 import kotlinx.coroutines.runBlocking
 
-val pqc = PqcHttpClient(PqcConfig(
-    pinnedCertSha256 = emptyList(),
-    defaultTimeoutMs = 10_000UL,
-    connectTimeoutMs = null,
-    enableCookies = false,
-    userAgent = "MyApp/1.0",
-    redirectPolicy = RedirectPolicy.SameOriginOnly,
-))
+val pqc = PqcHttpClient(
+    PqcConfig.platformDefault(
+        context = applicationContext,
+        pinnedCertSha256 = CertPins.SPKI_SHA256,
+        userAgent = "MyApp/1.0",
+        redirectPolicy = RedirectPolicy.SameOriginOnly,
+    )
+)
 
 // Suspending call from a coroutine
 suspend fun fetchBalance(): String {

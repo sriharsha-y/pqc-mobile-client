@@ -16,9 +16,6 @@ import com.facebook.react.modules.network.ReactCookieJarContainer
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 import okhttp3.OkHttpClient
-import io.github.sriharsha_y.pqc.PqcConfig
-import io.github.sriharsha_y.pqc.PqcHttpClient
-import io.github.sriharsha_y.pqc.RedirectPolicy
 import io.github.sriharsha_y.pqc.android.PqcAndroidInit
 import java.util.concurrent.TimeUnit
 
@@ -63,37 +60,14 @@ class MainApplication : Application(), ReactApplication {
     //   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
     PqcAndroidInit.init(this)
 
-    // Always advertises the X25519MLKEM768 hybrid. The classical path is
-    // OkHttp's own stack (X-Pqc-Mode: off → PqcInterceptor falls through to the
-    // OS network stack), not a second client.
-    val config = PqcConfig(
-      // Empty = pinning disabled. A real banking app should populate with
-      // base64(SHA-256(SPKI)) for the production cert + at least one backup.
-      pinnedCertSha256 = emptyList(),
-      defaultTimeoutMs = 15_000UL,
-      // null = 10s connect default. Set explicitly in production so it
-      // survives a defaults change.
-      connectTimeoutMs = null,
-      // Banking clients should NOT auto-attach Set-Cookie across endpoints
-      // (session-leak vector); round-trip cookies via headers when needed.
-      enableCookies = false,
-      // Identify the app to Akamai Bot Manager / bank WAFs.
-      userAgent = "RnSample/0.3.1 (pqc-mobile-client)",
-      // Refuse cross-origin redirects so the original handshake's pin / PQ
-      // guarantees can't be silently dropped by a 3xx to another host.
-      redirectPolicy = RedirectPolicy.SameOriginOnly,
-      // Opt-in RFC 9111 response cache (off here). To enable, set
-      // enableCache = true and pass cacheDir = cacheDir.absolutePath.
-      enableCache = false,
-      cacheDir = null,
-      maxCacheBytes = null,
-    )
-
-    val pqcClient: PqcHttpClient
-    try {
-      pqcClient = PqcHttpClient(config)
+    // prewarm() forces PqcHttpClient construction so a misconfigured build
+    // (bad pin, missing native library) surfaces here. On failure, return
+    // without installing the factory — RN falls back to its default
+    // OkHttpClient (classical TLS) and the app stays online.
+    val pqcInterceptor = try {
+      RnSamplePqcInterceptor(applicationContext).also { it.prewarm() }
     } catch (t: Throwable) {
-      Log.e(TAG, "PqcHttpClient construction failed; falling back to default OkHttp", t)
+      Log.e("RnSample.PQC", "PqcHttpClient construction failed; falling back to default OkHttp", t)
       return
     }
 
@@ -103,13 +77,8 @@ class MainApplication : Application(), ReactApplication {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
         .cookieJar(ReactCookieJarContainer())
-        .addInterceptor(PqcInterceptor(pqcClient))    // MUST be last
+        .addInterceptor(pqcInterceptor)    // MUST be last
         .build()
     })
-    Log.i(TAG, "PQC OkHttp factory installed")
-  }
-
-  companion object {
-    private const val TAG = "RnSample.PQC"
   }
 }

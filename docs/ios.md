@@ -94,149 +94,80 @@ Behind the scenes: SPM resolves the version you pin to the matching `vX.Y.Z` git
 
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 
-`URLProtocol` is the iOS hook. A subclass intercepts requests for chosen hosts; the rest of the app keeps using `URLSession` unchanged.
+`URLProtocol` is the iOS hook. `PqcCore` ships an `open` base class `PqcURLProtocol` that contains the request/response plumbing and a `PqcHttpClient` whose defaults match `URLSessionConfiguration.default` (60 s request timeout, 10 s connect, cookies on, RFC 9111 cache on with a 20 MiB cap in `.cachesDirectory/pqc-http`, 20-redirect limit). Subclass it to customise just the knobs you care about; the rest of the app keeps using `URLSession` unchanged.
 
 ```swift
 import Foundation
-import PqcCore        // UniFFI module
+import PqcCore
 
-final class PqcURLProtocol: URLProtocol {
+final class AppPqcURLProtocol: PqcURLProtocol {
     static let pqcHosts: Set<String> = [
         "api.example.com",
         "auth.example.com",
-        // ... full hostname list to route through PQC
     ]
 
-    static let client: PqcHttpClient? = {
-        // The PqcHttpClient constructor throws on malformed config
-        // (e.g. bad base64 in pinnedCertSha256). Wrap in try? and
-        // gracefully degrade rather than crashing the app.
-        try? PqcHttpClient(
-            config: PqcConfig(
-                pinnedCertSha256: CertPins.spkiSha256,
-                defaultTimeoutMs: 15_000,
-                connectTimeoutMs: nil,           // 10s default
-                enableCookies: false,            // banking: no auto cookie jar
-                userAgent: "MyApp/1.0",          // identify to bank WAF / Akamai
-                redirectPolicy: .sameOriginOnly  // refuse cross-origin 3xx
-            )
+    /// Override `makeConfig` to set pins / app-specific defaults. The base
+    /// class lazily builds one `PqcHttpClient` per subclass under an NSLock.
+    override class func makeConfig() -> PqcConfig {
+        return .platformDefault(
+            pinnedCertSha256: CertPins.spkiSha256,    // see §10
+            defaultTimeoutMs: 15_000,
+            enableCookies: false,                     // banking: no auto cookie jar
+            userAgent: "MyApp/1.0",                   // identify to bank WAF / Akamai
+            redirectPolicy: .sameOriginOnly,          // refuse cross-origin 3xx
+            enableCache: false                        // opt out of the Rust cache too
         )
-    }()
-
-    private var task: Task<Void, Never>?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        guard request.url?.scheme == "https",
-              let host = request.url?.host,
-              Self.pqcHosts.contains(host) else { return false }
-        if URLProtocol.property(forKey: "PqcHandled", in: request) as? Bool == true { return false }
-        return true
     }
 
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let req = self.request
-        task = Task {
-            do {
-                let pqcReq = HttpRequest(
-                    method: req.httpMethod.flatMap(HttpMethod.from) ?? .get,
-                    url: req.url!.absoluteString,
-                    headers: (req.allHTTPHeaderFields ?? [:]).mapValues { [$0] },
-                    body: req.httpBody,
-                    timeoutMs: nil
-                )
-                guard let pqcClient = Self.client else {
-                    throw NSError(domain: "PqcURLProtocol", code: -3,
-                                  userInfo: [NSLocalizedDescriptionKey: "PqcHttpClient unavailable"])
-                }
-                let pqcResp = try await pqcClient.request(req: pqcReq)
-                let nsResp = HTTPURLResponse(
-                    url: req.url!,
-                    statusCode: Int(pqcResp.status),
-                    httpVersion: "HTTP/1.1",
-                    headerFields: pqcResp.headers.mapValues { $0.joined(separator: ", ") }
-                )!
-                self.client?.urlProtocol(self, didReceive: nsResp, cacheStoragePolicy: .notAllowed)
-                self.client?.urlProtocol(self, didLoad: Data(pqcResp.body))
-                self.client?.urlProtocolDidFinishLoading(self)
-            } catch {
-                self.client?.urlProtocol(self, didFailWithError: error)
-            }
-        }
-    }
-
-    override func stopLoading() { task?.cancel(); task = nil }
-}
-
-private extension HttpMethod {
-    static func from(_ s: String) -> HttpMethod? {
-        switch s.uppercased() {
-        case "GET":     return .get
-        case "POST":    return .post
-        case "PUT":     return .put
-        case "DELETE":  return .delete
-        case "PATCH":   return .patch
-        case "HEAD":    return .head
-        case "OPTIONS": return .options
-        default:        return nil
-        }
+    /// Override `shouldHandle` for host gating. Default: every HTTPS request.
+    override class func shouldHandle(_ request: URLRequest) -> Bool {
+        guard super.shouldHandle(request) else { return false }
+        guard let host = request.url?.host else { return false }
+        return pqcHosts.contains(host)
     }
 }
 ```
+
+That is the entire URLProtocol — no `startLoading`/`stopLoading`/body-drain/method-mapping/ALPN code to maintain. The base class also:
+
+- strips any inbound `Cookie:` header so the Rust client's jar is the only source of truth (URLSession's behaviour with custom URLProtocols is undocumented; this makes it deterministic);
+- emits `cacheStoragePolicy: .notAllowed` so `URLCache` cannot participate (Rust client's RFC 9111 cache is the single cache);
+- maps `PqcError.PinningFailure`/`TrustVerification` to `URLError.serverCertificateUntrusted`, `Timeout` to `URLError.timedOut`, etc. — override `mapError(_:)` to customise.
 
 ### Registration — native app
 
 Two paths depending on which session the app uses.
 
-**Pattern A — `URLSession.shared`:** `URLProtocol.registerClass(...)` works directly.
+**Pattern A — `URLSession.shared`:**
 
 ```swift
-if #available(iOS 26, *) {
-    // Native URLSession already negotiates X25519MLKEM768. No-op.
-} else {
-    URLProtocol.registerClass(PqcURLProtocol.self)
+if #unavailable(iOS 26, *) {
+    URLProtocol.registerClass(AppPqcURLProtocol.self)
 }
+// iOS 26+ negotiates X25519MLKEM768 natively. If you ALSO want SPKI
+// pinning on iOS 26+, drop the @unavailable and register unconditionally.
 ```
 
-**Pattern B — a custom `URLSession`:** add the class to the session's `configuration.protocolClasses` before constructing the session.
+**Pattern B — a custom `URLSession`:** use the bundled `registerIfNeeded(into:)` helper, which inserts at index 0 of `protocolClasses` on pre-iOS-26 and no-ops on iOS 26+. (Use `register(into:)` instead if you want to register unconditionally — e.g. to keep SPKI pinning on iOS 26+.)
 
 ```swift
 let cfg = URLSessionConfiguration.default
-if #unavailable(iOS 26, *) {
-    cfg.protocolClasses = [PqcURLProtocol.self] + (cfg.protocolClasses ?? [])
-}
+AppPqcURLProtocol.registerIfNeeded(into: cfg)
 let session = URLSession(configuration: cfg)
 ```
 
 Existing API code (Alamofire, Moya, raw `URLSession.dataTask`) using this session continues to work unchanged.
 
-### Cookies & multi-value response headers
+### Cookies and response cache — Rust-owned
 
-`HTTPURLResponse` is backed by a `[String: String]` dictionary, so it **cannot carry more than one value for a header name**. The common shortcut of joining multiple `Set-Cookie` headers with `", "` corrupts them, because a cookie's `Expires` attribute itself contains a comma (`Expires=Wed, 21 Oct 2026 ...`) — any later comma-split mis-parses the boundary and drops or mangles cookies.
+The base class deliberately does not bridge `HTTPCookieStorage.shared` or `URLCache.shared` because the wrapper boundary makes both unreliable:
 
-The Rust core preserves each `Set-Cookie` as its own value, so a synthesizing `URLProtocol` must handle cookies explicitly rather than fold them into the response dict. Parse each value **on its own** (a single-entry dict per cookie avoids the comma ambiguity) and hand it to the cookie store the URL Loading System / RN networking reads from:
+- `URLCache` is bypassed by the documented `cacheStoragePolicy: .notAllowed` contract. The Rust client's RFC 9111 cache is the only cache. By default (`PqcConfig.platformDefault()`) it is on, with a 20 MiB disk tier in `.cachesDirectory/pqc-http`.
+- `HTTPCookieStorage.shared` would suffer from `HTTPURLResponse`'s `[String: String]` backing — multiple `Set-Cookie` headers comma-join, and `Expires=Wed, 21 Oct 2026 …` corrupts the join. The Rust client's own cookie jar (`enableCookies: true` by default) handles this correctly and persists state across requests routed through the URLProtocol.
 
-```swift
-let cookieStorage = HTTPCookieStorage.shared
-for (name, values) in pqcResp.headers where name.lowercased() == "set-cookie" {
-    for raw in values {
-        let parsed = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": raw], for: url)
-        for cookie in parsed { cookieStorage.setCookie(cookie) }
-    }
-}
+**Documented constraint:** cookies set via the PQC flow are *not* visible to plain `URLSession.shared` calls elsewhere in the app, and vice versa. For most apps this isolation is desirable; apps that need a bridge would have to write their own `URLProtocol` from scratch (the base class's `emit` / `buildRequest` are file-private to keep the cookie/cache invariants enforced).
 
-// Build the response header dict from everything EXCEPT Set-Cookie:
-var headerFields = pqcResp.headers
-    .filter { $0.key.lowercased() != "set-cookie" }
-    .mapValues { $0.joined(separator: ", ") }
-```
-
-Comma-joining the **remaining** headers is fine — RFC 9110 §5.3 permits combining most field values with commas; `Set-Cookie` is the notable exception.
-
-**Banking posture:** the snippet above persists session cookies in `HTTPCookieStorage.shared`, so they auto-attach to later requests (normal iOS behavior). If you want the Rust client's stricter "no implicit cookie state" stance (`PqcConfig.enableCookies = false`), **skip the storage step** and instead surface the raw `Set-Cookie` values to your app layer to decide per request. Either way, never comma-join `Set-Cookie`.
-
-See `examples/RnSample/ios/RnSample/PqcURLProtocol.swift` for the full working implementation.
+See `examples/RnSample/ios/RnSample/PqcURLProtocol.swift` for a working subclass.
 
 ## 4. Native iOS — Alamofire / Moya / async-http-client
 
@@ -254,14 +185,12 @@ let af = Session(configuration: cfg)
 
 ## 5. Native iOS — direct use, no URLSession
 
-For new code paths or non-URLSession-based clients, call `PqcHttpClient` directly. The UniFFI-generated Swift class has Swift-native `async`/`throws`.
+For new code paths or non-URLSession-based clients, call `PqcHttpClient` directly. The UniFFI-generated Swift class has Swift-native `async`/`throws`. `PqcConfig.platformDefault(...)` gives you URLSession-aligned defaults so you only have to specify what's different.
 
 ```swift
 let pqc = try PqcHttpClient(
-    config: PqcConfig(
-        pinnedCertSha256: [],
-        defaultTimeoutMs: 10_000,
-        connectTimeoutMs: nil,           // 10s default
+    config: .platformDefault(
+        pinnedCertSha256: CertPins.spkiSha256,
         enableCookies: false,
         userAgent: "MyApp/1.0",
         redirectPolicy: .sameOriginOnly
@@ -297,11 +226,7 @@ final class AppDelegate: RCTAppDelegate {
     ) -> Bool {
         RCTSetCustomNSURLSessionConfigurationProvider {
             let cfg = URLSessionConfiguration.default
-            if #available(iOS 26, *) {
-                // native PQC
-            } else {
-                cfg.protocolClasses = [PqcURLProtocol.self] + (cfg.protocolClasses ?? [])
-            }
+            AppPqcURLProtocol.registerIfNeeded(into: cfg)
             return cfg
         }
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -309,11 +234,11 @@ final class AppDelegate: RCTAppDelegate {
 }
 ```
 
-The `PqcURLProtocol` class is identical to the native case (Section 3).
+The `AppPqcURLProtocol` class is identical to the native case (Section 3).
 
 ## 7. iOS 26 gate
 
-The `if #available(iOS 26, *)` check is the only runtime switch. On iOS 26+, the native `URLSession` already advertises `X25519MLKEM768` in every ClientHello (Apple [HT122756](https://support.apple.com/en-us/122756)), so the custom path is unnecessary and slightly slower. Skip registration on iOS 26+.
+On iOS 26+, the native `URLSession` already advertises `X25519MLKEM768` in every ClientHello (Apple [HT122756](https://support.apple.com/en-us/122756)), so the custom path is unnecessary and slightly slower. The bundled `registerIfNeeded(into:)` helper encapsulates this — call it instead of `register(into:)` and the gate stays in one place. Use `register(into:)` directly only when you want the URLProtocol to run on iOS 26+ as well (e.g. for SPKI pinning that the OS handshake doesn't provide).
 
 ## 8. Export compliance
 

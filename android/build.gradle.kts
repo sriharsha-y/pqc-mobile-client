@@ -35,8 +35,12 @@ android {
         // the gradle rootProject (android/).
         jniLibs.srcDir(rootProject.file("../target/jniLibs"))
         java.srcDir(rootProject.file("../generated/kotlin"))
-        // Hand-written glue (PqcAndroidInit) sits alongside the generated
-        // bindings so consumers get a single, fully-wired AAR.
+        // Hand-written glue (PqcAndroidInit, PqcConfigDefaults,
+        // PqcInterceptor) sits alongside the generated bindings so
+        // consumers get a single, fully-wired AAR. PqcInterceptor pulls
+        // OkHttp in via the `compileOnly` dep below — most Android
+        // consumers use OkHttp directly or transitively via Retrofit /
+        // Ktor / RN, so co-locating is fine.
         java.srcDir("src/main/kotlin")
         manifest.srcFile("AndroidManifest.xml")
     }
@@ -64,6 +68,12 @@ dependencies {
 
     // Generated Kotlin bindings expose `suspend` fns.
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+
+    // PqcInterceptor compiles against OkHttp's API; consumers bring their
+    // own OkHttp at runtime (almost all Android apps do via Retrofit / Ktor
+    // / RN). Pinned to the supported floor so the AAR doesn't accidentally
+    // use APIs that would break older 4.x consumers.
+    compileOnly("com.squareup.okhttp3:okhttp:4.0.0")
 
     // Bundle the rustls-platform-verifier Kotlin glue
     // (org.rustls.platformverifier.*) into our published AAR. Upstream ships

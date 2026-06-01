@@ -3,8 +3,8 @@
 #import <React/RCTBundleURLProvider.h>
 #import <React/RCTHTTPRequestHandler.h>
 
-// PqcURLProtocol is a Swift class marked @objc; available through the
-// auto-generated module header for the app target.
+// RnSamplePqcURLProtocol is a Swift subclass, @objc-visible via the
+// auto-generated module header.
 #import "RnSample-Swift.h"
 
 @implementation AppDelegate
@@ -14,19 +14,16 @@
   self.moduleName = @"RnSample";
   self.initialProps = @{};
 
-  // Route React Native's fetch() / XHR through PqcURLProtocol so the TLS
-  // handshake uses the Rust core (rustls + rustls-post-quantum). Must be
-  // installed before any JS executes — RCTSetCustomNSURLSessionConfigurationProvider
-  // is read lazily by RCTHTTPRequestHandler on first request.
-  //
-  // iOS 26+ already negotiates X25519MLKEM768 natively via URLSession, so we
-  // skip registration there and let the system stack handle PQC.
+  // Route RN's fetch() / XHR through PqcURLProtocol. Must be installed
+  // before any JS executes — RCTHTTPRequestHandler reads the provider
+  // lazily on first request. iOS 26+ negotiates X25519MLKEM768 natively,
+  // so skip there.
   RCTSetCustomNSURLSessionConfigurationProvider(^NSURLSessionConfiguration *{
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     if (@available(iOS 26.0, *)) {
-      // native PQC — leave URLProtocol classes alone
+      // native PQC
     } else {
-      NSMutableArray *protocols = [NSMutableArray arrayWithObject:[PqcURLProtocol class]];
+      NSMutableArray *protocols = [NSMutableArray arrayWithObject:[RnSamplePqcURLProtocol class]];
       if (cfg.protocolClasses) {
         [protocols addObjectsFromArray:cfg.protocolClasses];
       }
