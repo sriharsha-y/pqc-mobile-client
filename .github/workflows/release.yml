@@ -85,6 +85,57 @@ jobs:
       - name: Build
         run: make android
 
+      # Set up Java + Gradle BEFORE assembling the AAR, so AAR contract
+      # assertions can run here rather than at publish-maven time. Any
+      # failure here aborts the workflow BEFORE the tarball is uploaded
+      # and BEFORE publish-maven / publish-cocoapods / publish-swiftpm
+      # touch their downstream registries.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Run the same AAR build publish-maven will run, but here, so a
+      # broken AAR fails the release BEFORE any registry is touched.
+      # Catches: duplicate-source kotlinc errors (the v0.7.0 publish-maven
+      # failure), missing rustls-pv glue, missing UniFFI bindings, missing
+      # consumer ProGuard rules.
+      - name: Assemble AAR + assert contract
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease --no-daemon
+          AAR=build/outputs/aar/pqc-mobile-client-release.aar
+          if [ ! -f "$AAR" ]; then
+            echo "::error::Expected AAR at android/$AAR"
+            exit 1
+          fi
+          unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
+          for cls in \
+              io/github/sriharsha_y/pqc/PqcHttpClient.class \
+              io/github/sriharsha_y/pqc/PqcInterceptor.class \
+              io/github/sriharsha_y/pqc/PqcConfigDefaultsKt.class
+          do
+            if ! unzip -l /tmp/aar-classes.jar | grep -q "$cls"; then
+              echo "::error::$AAR is missing $cls."
+              echo "::error::This is what publish-maven would have caught later — fix in build-android."
+              unzip -l /tmp/aar-classes.jar
+              exit 1
+            fi
+          done
+          if ! unzip -l "$AAR" | grep -qE 'libs/rustls-platform-verifier-[0-9.]+\.jar'; then
+            echo "::error::$AAR is missing libs/rustls-platform-verifier-*.jar."
+            echo "::error::Audit android/build.gradle.kts api(fileTree(\"libs\")) and scripts/build-android.sh extract step."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          if ! unzip -l "$AAR" | grep -q 'proguard.txt'; then
+            echo "::error::$AAR is missing proguard.txt (consumer R8 rules)."
+            echo "::error::Audit consumerProguardFiles in android/build.gradle.kts."
+            unzip -l "$AAR"
+            exit 1
+          fi
+          echo "OK: AAR contract holds — bindings + PqcInterceptor + rustls-pv glue + ProGuard rules all present."
+
       - name: Package
         run: |
           VERSION="${{ needs.release-please.outputs.version }}"
@@ -230,6 +281,37 @@ jobs:
           rm -rf "$STAGE"
 
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
+
+      # Mirror of build-android's "Assemble AAR + assert contract": run
+      # the contract assertion HERE so a malformed zip fails the release
+      # BEFORE CocoaPods Trunk lints it (Trunk's lint can be lenient and
+      # accept a missing file silently) and BEFORE SPM consumers see a
+      # broken Package.swift checksum.
+      - name: Assert iOS zip contents
+        run: |
+          ZIP="dist/${ARCHIVE}"
+          for f in \
+              PqcCore.xcframework/Info.plist \
+              pqc.swift \
+              "PqcConfig+Defaults.swift" \
+              PqcURLProtocol.swift \
+              LICENSE
+          do
+            if ! unzip -l "$ZIP" | grep -qF "$f"; then
+              echo "::error::$ZIP is missing $f."
+              echo "::error::Audit the Package step's cp + zip arg list."
+              unzip -l "$ZIP"
+              exit 1
+            fi
+          done
+          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
+            if ! unzip -l "$ZIP" | grep -qF "PqcCore.xcframework/$slice/libpqc_client.a"; then
+              echo "::error::$ZIP is missing PqcCore.xcframework/$slice/libpqc_client.a."
+              unzip -l "$ZIP"
+              exit 1
+            fi
+          done
+          echo "OK: iOS zip carries the XCFramework + Swift binding + both wrappers + LICENSE."
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -437,20 +519,28 @@ jobs:
       # PqcConfig) that no other check caught. This guards the exact
       # artifact about to be published; assembleRelease here primes the
       # build the publish task reuses, so it is not wasted work.
-      - name: Assert AAR carries the UniFFI Kotlin bindings before publishing
+      # Defense-in-depth: build-android already asserts the AAR contract,
+      # but the pqc-android-native artifact could corrupt in transit. Run
+      # the same check here so a corrupted artifact fails before publish.
+      - name: Assert AAR contract before publishing
         working-directory: android
         run: |
           gradle assembleRelease --no-configuration-cache
           AAR=build/outputs/aar/pqc-mobile-client-release.aar
           unzip -p "$AAR" classes.jar > /tmp/aar-classes.jar
-          if ! unzip -l /tmp/aar-classes.jar | grep -q 'io/github/sriharsha_y/pqc/PqcHttpClient\.class'; then
-            echo "::error::$AAR is missing io/github/sriharsha_y/pqc/PqcHttpClient.class."
-            echo "::error::Refusing to publish an empty-API AAR (uniffi-rs#2520). Audit"
-            echo "::error::scripts/build-android.sh's host-dylib strip override + binding guard."
-            unzip -l /tmp/aar-classes.jar
-            exit 1
-          fi
-          echo "OK: AAR carries the UniFFI Kotlin bindings; proceeding to publish."
+          for cls in \
+              io/github/sriharsha_y/pqc/PqcHttpClient.class \
+              io/github/sriharsha_y/pqc/PqcInterceptor.class \
+              io/github/sriharsha_y/pqc/PqcConfigDefaultsKt.class
+          do
+            if ! unzip -l /tmp/aar-classes.jar | grep -q "$cls"; then
+              echo "::error::$AAR is missing $cls."
+              echo "::error::Refusing to publish an incomplete-API AAR. build-android should have caught this earlier."
+              unzip -l /tmp/aar-classes.jar
+              exit 1
+            fi
+          done
+          echo "OK: AAR contract holds; proceeding to publish."
 
       - name: Publish to Maven Central
         working-directory: android
