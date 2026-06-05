@@ -33,6 +33,21 @@ pub struct PqcConfig {
     /// app's identifier.
     pub user_agent: Option<String>,
 
+    // ----- DNS -----
+    /// Which DNS resolver to use. `None` (default) selects `System` —
+    /// libc `getaddrinfo` driven on tokio's blocking pool, which on
+    /// Android honors user-configured Private DNS (DNS-over-TLS) and on
+    /// iOS honors the system resolver chain.
+    ///
+    /// Set to `Some(Hickory)` to use the bundled hickory-dns async
+    /// resolver, which enables RFC 8305 Happy Eyeballs (concurrent
+    /// v4/v6 connection racing — meaningfully faster on dual-stack
+    /// networks where one family is broken). The trade-off: hickory
+    /// bypasses Android's Private DNS setting, so consumers whose users
+    /// depend on DoT for privacy/policy should leave this at `None`.
+    #[uniffi(default = None)]
+    pub dns_resolver: Option<DnsResolver>,
+
     // ----- Redirects -----
     /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
     /// are refused so a redirect can't silently downgrade to an un-pinned
@@ -109,4 +124,16 @@ pub enum RedirectPolicy {
     NoRedirects {},
     SameOriginOnly {},
     Limited { max: u8 },
+}
+
+/// DNS resolver selection. See `PqcConfig::dns_resolver` for the full
+/// trade-off (Happy Eyeballs vs. Android Private DNS interaction).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum DnsResolver {
+    /// libc `getaddrinfo` (synchronous, on tokio's blocking pool).
+    /// Honors Android Private DNS / DoT and the iOS system resolver chain.
+    System,
+    /// hickory-resolver (async, RFC 8305 Happy Eyeballs). Bypasses
+    /// Android Private DNS.
+    Hickory,
 }

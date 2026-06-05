@@ -313,3 +313,16 @@ This is a **private** cache (`shared = false`), so — exactly like OkHttp/`URLC
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache = true` makes the constructor throw `PqcError.InvalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
 - **Eviction** is by insertion time (FIFO) once `maxCacheBytes` is exceeded — a close approximation of OkHttp's LRU (the disk store exposes no access time).
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
+
+## 12. DNS resolver — `dnsResolver` (opt-in)
+
+By default the client uses libc `getaddrinfo` driven on tokio's blocking pool. On Android this **honors the user-configured Private DNS (DNS-over-TLS) setting** in *Settings → Network & internet → Private DNS*. Most apps want this — leave `dnsResolver` unset.
+
+Set `dnsResolver = DnsResolver.Hickory` to switch to the bundled `hickory-dns` async resolver. This enables **RFC 8305 Happy Eyeballs** — concurrent IPv4/IPv6 connection racing, materially faster on dual-stack networks where one address family is broken (common on some cellular carriers). The trade-off: **hickory bypasses the system Private DNS setting**, so consumers whose users depend on DoT for privacy or enterprise policy should leave the resolver at the default `System`.
+
+```kotlin
+val config = PqcConfig(
+    // ...
+    dnsResolver = DnsResolver.Hickory,  // opt-in for Happy Eyeballs
+)
+```

@@ -6,7 +6,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use tokio::sync::Semaphore;
 
-use crate::config::{PqcConfig, RedirectPolicy};
+use crate::config::{DnsResolver, PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
 use crate::tls::build_tls_config;
 use crate::types::{HttpMethod, HttpRequest, HttpResponse};
@@ -111,6 +111,15 @@ impl PqcHttpClient {
 
         if let Some(ref ua) = config.user_agent {
             builder = builder.user_agent(ua.clone());
+        }
+
+        // DNS resolver — opt-in hickory for Happy Eyeballs (v4/v6 race).
+        // System is the default and matches today's behavior; we only flip
+        // hickory_dns on when explicitly requested, because it bypasses
+        // Android Private DNS. The hickory-dns reqwest feature is always
+        // compiled in (small cost) so the runtime toggle is real.
+        if matches!(config.dns_resolver, Some(DnsResolver::Hickory)) {
+            builder = builder.hickory_dns(true);
         }
 
         builder = builder.redirect(match config.redirect_policy {
