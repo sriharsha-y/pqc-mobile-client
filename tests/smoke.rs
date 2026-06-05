@@ -4,9 +4,10 @@
 //! Run: `cargo test --release --test smoke -- --nocapture`
 
 use pqc_client::{
-    HttpMethod, HttpRequest, HttpResponse, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy,
+    HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, PqcResponse, RedirectPolicy,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Extract the `kex=` value from a Cloudflare `/cdn-cgi/trace` body.
 fn parse_kex(trace_body: &str) -> Option<String> {
@@ -58,13 +59,13 @@ fn get(url: &str) -> HttpRequest {
 /// returns the first response with a < 500, non-429 status. Use ONLY for
 /// success-path tests — error-path tests (pin / trust failures) assert on
 /// the returned Err and must NOT retry.
-async fn request_resilient(client: &PqcHttpClient, req: HttpRequest) -> HttpResponse {
+async fn request_resilient(client: &PqcHttpClient, req: HttpRequest) -> Arc<PqcResponse> {
     const ATTEMPTS: u32 = 4;
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         match client.request(req.clone()).await {
-            Ok(resp) if resp.status < 500 && resp.status != 429 => return resp,
-            Ok(resp) => last = format!("HTTP {}", resp.status),
+            Ok(resp) if resp.status() < 500 && resp.status() != 429 => return resp,
+            Ok(resp) => last = format!("HTTP {}", resp.status()),
             Err(e) => last = format!("{e:?}"),
         }
         if attempt < ATTEMPTS {
@@ -88,25 +89,26 @@ async fn pq_handshake_cloudflare() {
         get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
     )
     .await;
-    let body = String::from_utf8_lossy(&resp.body);
+    let status = resp.status();
+    let final_url = resp.final_url();
+    let negotiated_protocol = resp.negotiated_protocol();
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body = String::from_utf8_lossy(&body_bytes);
     let kex = parse_kex(&body).expect("trace body should contain a kex= line");
-    println!(
-        "status={} kex={} alpn={}",
-        resp.status, kex, resp.negotiated_protocol
-    );
+    println!("status={status} kex={kex} alpn={negotiated_protocol}");
     assert_eq!(
         kex, "X25519MLKEM768",
         "Cloudflare should negotiate X25519MLKEM768 when the client offers it"
     );
     // No redirect on /cdn-cgi/trace, so final_url should echo the request URL.
     assert_eq!(
-        resp.final_url, "https://pq.cloudflareresearch.com/cdn-cgi/trace",
+        final_url, "https://pq.cloudflareresearch.com/cdn-cgi/trace",
         "final_url should report the URL the body came from"
     );
     // ALPN must be set so the server negotiates h2; without it the http2
     // feature is silently a no-op.
     assert_eq!(
-        resp.negotiated_protocol, "h2",
+        negotiated_protocol, "h2",
         "ALPN must select h2 against Cloudflare"
     );
 }
@@ -170,12 +172,13 @@ async fn post_body_round_trips() {
     };
 
     let resp = request_resilient(&client, req).await;
-    assert_eq!(resp.status, 200, "POST should return 200");
+    assert_eq!(resp.status(), 200, "POST should return 200");
 
     // httpbin echoes the body bytes back under either `data` or `json`.
     // Don't full-parse the JSON; substring-match the unique payload we
     // sent so the assertion isn't coupled to httpbin's exact schema.
-    let body_str = String::from_utf8_lossy(&resp.body);
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body_str = String::from_utf8_lossy(&body_bytes);
     assert!(
         body_str.contains("\"hello\""),
         "echoed body should contain our payload key, got: {body_str}"
@@ -190,8 +193,6 @@ async fn post_body_round_trips() {
 /// tokio tasks, which consumers rely on when fanning out calls.
 #[tokio::test]
 async fn concurrent_requests_share_one_client() {
-    use std::sync::Arc;
-
     let client =
         Arc::new(PqcHttpClient::new(default_test_config()).expect("client should construct"));
 
@@ -211,8 +212,12 @@ async fn concurrent_requests_share_one_client() {
             .await
             .expect("task should not panic")
             .expect("request should succeed");
-        assert!(resp.status < 500, "unexpected status: {}", resp.status);
-        // Liveness is the signal: all tasks complete without panic/deadlock.
+        let status = resp.status();
+        assert!(status < 500, "unexpected status: {status}");
+        // Drop the response without draining the body — confirms the
+        // permit-release-on-drop path is healthy under concurrent load.
+        // (Dropping aborts the body stream; matches OkHttp `close()`.)
+        drop(resp);
         ok += 1;
     }
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");

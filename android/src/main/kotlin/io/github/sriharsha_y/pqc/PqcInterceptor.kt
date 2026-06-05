@@ -9,7 +9,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import java.io.IOException
 
@@ -102,25 +101,38 @@ open class PqcInterceptor(context: Context) : Interceptor {
             throw if (e is IOException) e else IOException(e.message, e)
         }
 
-        val mediaType = pqcResp.headers["content-type"]
+        val respHeaders = pqcResp.headers()
+        val mediaType = respHeaders["content-type"]
             ?.firstOrNull()
             ?.toMediaTypeOrNull()
 
         // Post-redirect URL for response.request.url; fall back to the
         // original only if finalUrl is unparseable (it shouldn't be).
-        val effectiveRequest = pqcResp.finalUrl.toHttpUrlOrNull()
+        val effectiveRequest = pqcResp.finalUrl().toHttpUrlOrNull()
             ?.let { req.newBuilder().url(it).build() }
             ?: req
 
+        // Streaming ResponseBody backed by PqcResponse.readChunk(). Mirrors
+        // OkHttp's own streaming body shape: the downstream consumer pulls
+        // bytes via source().read(), each pull translates to one readChunk()
+        // suspension. Memory is bounded to one chunk (~16-64 KB) regardless
+        // of total body size. Closing the body cancels the Rust-side stream
+        // and releases the underlying connection.
+        val contentLength: Long = respHeaders["content-length"]
+            ?.firstOrNull()
+            ?.toLongOrNull()
+            ?: -1L
+        val body = streamingResponseBody(pqcResp, mediaType, contentLength)
+
         val responseBuilder = Response.Builder()
             .request(effectiveRequest)
-            .protocol(parseProtocol(pqcResp.negotiatedProtocol))
-            .code(pqcResp.status.toInt())
-            .message(statusReasonPhrase(pqcResp.status.toInt()))
-            .body(pqcResp.body.toResponseBody(mediaType))
+            .protocol(parseProtocol(pqcResp.negotiatedProtocol()))
+            .code(pqcResp.status().toInt())
+            .message(statusReasonPhrase(pqcResp.status().toInt()))
+            .body(body)
 
         val headerBuilder = Headers.Builder()
-        for ((name, values) in pqcResp.headers) {
+        for ((name, values) in respHeaders) {
             // Set-Cookie stays in the Rust jar; not surfaced to OkHttp's
             // cookieJar (which the chain order bypasses anyway).
             if (name.equals("Set-Cookie", ignoreCase = true)) continue
@@ -132,6 +144,40 @@ open class PqcInterceptor(context: Context) : Interceptor {
         responseBuilder.headers(headerBuilder.build())
 
         return responseBuilder.build()
+    }
+
+    /**
+     * Wrap a [PqcResponse] as an OkHttp [okhttp3.ResponseBody] whose underlying
+     * source is `PqcResponse.readChunk()`. One chunk in flight at a time;
+     * memory does not scale with body size. On `close()`, calls
+     * `PqcResponse.cancel()` so the Rust-side connection is released
+     * promptly instead of waiting for JVM GC.
+     */
+    private fun streamingResponseBody(
+        pqcResp: PqcResponse,
+        mediaType: okhttp3.MediaType?,
+        contentLength: Long,
+    ): okhttp3.ResponseBody {
+        val source = object : okio.Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                // `runBlocking` is acceptable here — OkHttp interceptors
+                // already drive blocking I/O on the calling thread.
+                val chunk = runBlocking { pqcResp.readChunk() } ?: return -1
+                if (chunk.isEmpty()) return -1
+                sink.write(chunk)
+                return chunk.size.toLong()
+            }
+            override fun timeout(): okio.Timeout = okio.Timeout.NONE
+            override fun close() {
+                runBlocking { pqcResp.cancel() }
+            }
+        }
+        val buffered = okio.buffer(source)
+        return object : okhttp3.ResponseBody() {
+            override fun contentType(): okhttp3.MediaType? = mediaType
+            override fun contentLength(): Long = contentLength
+            override fun source(): okio.BufferedSource = buffered
+        }
     }
 
     // MARK: - Helpers

@@ -205,9 +205,45 @@ func fetchBalance() async throws -> Data {
         body: nil,
         timeoutMs: nil
     ))
-    return Data(resp.body)
+    // resp is `PqcResponse` — streaming-first like URLSession.bytes(for:).
+    // `bytes()` is the buffered convenience for small JSON; for large
+    // downloads loop on `readChunk()` to keep memory bounded.
+    return Data(try await resp.bytes())
 }
 ```
+
+### Streaming a large download
+
+`PqcResponse.readChunk()` returns the next chunk or `nil` at EOF. Mirrors OkHttp `ResponseBody.source()` and `URLSession.bytes(for:)`. Headers/status are available before the first chunk arrives, so you can decide whether to drain or abort based on `resp.headers()` / `resp.status()`.
+
+```swift
+let resp = try await pqc.request(req: req)
+guard resp.status() == 200 else { throw MyError.badStatus(resp.status()) }
+
+let out = FileHandle(forWritingAtPath: "/path/to/output")!
+defer { try? out.close() }
+
+while let chunk = try await resp.readChunk() {
+    try out.write(contentsOf: chunk)
+}
+```
+
+### Cancellation
+
+UniFFI 0.29 does **not** propagate Swift `Task.cancel()` into Rust. To abort an in-flight body read, call `resp.cancel()` explicitly. Idempotent.
+
+```swift
+let task = Task {
+    let resp = try await pqc.request(req: req)
+    // ... read chunks ...
+}
+
+// Some time later, the user backs out of the view:
+await pqcResp.cancel()      // releases the underlying connection
+task.cancel()               // cancels the Swift Task (Rust side already aborted)
+```
+
+Dropping a `PqcResponse` without calling `cancel()` or draining via `bytes()`/`readChunk()`-to-EOF also aborts the body — the connection returns to the pool when the response is deallocated. The explicit `cancel()` exists so you can release the connection promptly without waiting for ARC.
 
 ## 6. React Native iOS
 
@@ -251,7 +287,7 @@ Bundling Rust crypto promotes the app from "uses-OS-encryption-only" (exempt) to
 
 ## 9. Verification
 
-Debug-build sanity check. `HttpResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global — see the `HttpResponse` doc in `src/types.rs`). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
+Debug-build sanity check. `PqcResponse` deliberately does not expose the negotiated key-exchange group (it is a per-connection property the client can only observe via a racy process-global). Confirm it from the **server's** report instead: Cloudflare's `/cdn-cgi/trace` returns a `kex=` line.
 
 ```swift
 Task {
@@ -261,10 +297,10 @@ Task {
         url: "https://pq.cloudflareresearch.com/cdn-cgi/trace",
         headers: [:] as [String: [String]], body: nil, timeoutMs: 5000
     ))
-    let body = String(decoding: Data(resp.body), as: UTF8.self)
+    let body = String(decoding: Data(try await resp.bytes()), as: UTF8.self)
     let kex = body.split(separator: "\n")
         .first { $0.hasPrefix("kex=") }?.dropFirst(4)
-    print("kex:", kex ?? "unknown", "alpn:", resp.negotiatedProtocol)
+    print("kex:", kex ?? "unknown", "alpn:", resp.negotiatedProtocol())
     // kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
 }
 ```

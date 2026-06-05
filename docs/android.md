@@ -203,8 +203,43 @@ suspend fun fetchBalance(): String {
         body = null,
         timeoutMs = null,
     ))
-    return String(resp.body, Charsets.UTF_8)
+    // resp is `PqcResponse` — streaming-first like OkHttp ResponseBody.
+    // `bytes()` is the buffered convenience matching `body.bytes()`;
+    // for large downloads loop on `readChunk()` to keep heap bounded.
+    return String(resp.bytes(), Charsets.UTF_8)
 }
+
+// Streaming large downloads to disk without buffering the whole body
+suspend fun downloadLargeFile(url: String, dest: java.io.File) {
+    val resp = pqc.request(HttpRequest(
+        method = HttpMethod.GET,
+        url = url,
+        headers = emptyMap(),
+        body = null,
+        timeoutMs = null,
+    ))
+    if (resp.status() != 200.toUShort()) error("HTTP ${resp.status()}")
+    dest.outputStream().use { out ->
+        while (true) {
+            val chunk = resp.readChunk() ?: break
+            out.write(chunk)
+        }
+    }
+}
+
+// Cancellation — UniFFI 0.29 does NOT propagate coroutine cancellation
+// into Rust. Call `resp.cancel()` explicitly when you want to abort a
+// download mid-stream. Idempotent.
+//
+//   val resp = pqc.request(req)
+//   try {
+//       resp.bytes()
+//   } finally {
+//       resp.cancel()  // safe even after bytes(); idempotent
+//   }
+//
+// Dropping the `PqcResponse` reference also aborts when GC reclaims it,
+// but explicit `cancel()` releases the connection immediately.
 
 // Blocking adapter for Java / legacy code
 fun fetchBalanceBlocking() = runBlocking { fetchBalance() }
@@ -229,7 +264,7 @@ Ship as an App Bundle so each device only downloads its ABI's `.so`. `arm64-v8a`
 
 ## 9. Verification
 
-Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `HttpResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global (see the `HttpResponse` doc in `src/types.rs`):
+Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `PqcResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global:
 
 ```kotlin
 val resp = pqc.request(HttpRequest(
@@ -237,11 +272,11 @@ val resp = pqc.request(HttpRequest(
     url = "https://pq.cloudflareresearch.com/cdn-cgi/trace",
     headers = emptyMap<String, List<String>>(), body = null, timeoutMs = 5000UL,
 ))
-val kex = String(resp.body).lineSequence()
+val kex = String(resp.bytes()).lineSequence()
     .firstOrNull { it.startsWith("kex=") }?.removePrefix("kex=")
-android.util.Log.i("PQC", "kex=$kex alpn=${resp.negotiatedProtocol}")
+android.util.Log.i("PQC", "kex=$kex alpn=${resp.negotiatedProtocol()}")
 // kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
-// `negotiatedProtocol` is per-request ("h2", "http/1.1").
+// `negotiatedProtocol()` is per-request ("h2", "http/1.1").
 ```
 
 For production verification use Wireshark on a USB-tethered device — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.

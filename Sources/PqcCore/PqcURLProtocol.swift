@@ -104,7 +104,7 @@ open class PqcURLProtocol: URLProtocol {
                 let client = try subclass.clientFor(subclass)
                 let pqcReq = try Self.buildRequest(from: self.request, url: url)
                 let pqcResp = try await client.request(req: pqcReq)
-                try self.emit(pqcResp, originalURL: url)
+                try await self.emit(pqcResp, originalURL: url)
             } catch is CancellationError {
                 // stopLoading() cancelled us; URLProtocol contract is to
                 // stay silent — URLSession owns the cancel notification.
@@ -161,20 +161,26 @@ open class PqcURLProtocol: URLProtocol {
     /// Emits `cacheStoragePolicy: .notAllowed` always (URLCache stays out)
     /// and drops `Set-Cookie:` (HTTPURLResponse's [String: String] backing
     /// corrupts comma-bearing Expires dates; Rust jar owns cookies).
-    private func emit(_ pqcResp: HttpResponse, originalURL: URL) throws {
-        let responseURL = URL(string: pqcResp.finalUrl) ?? originalURL
+    ///
+    /// Streams the body chunk-by-chunk from `PqcResponse.readChunk()` so
+    /// large responses never materialize in app memory. Forwards each
+    /// chunk to URLProtocol via `urlProtocol(_:didLoad:)`, which itself
+    /// supports incremental delivery — matches Apple's pattern for
+    /// `URLSession.bytes(for:)`.
+    private func emit(_ pqcResp: PqcResponse, originalURL: URL) async throws {
+        let responseURL = URL(string: pqcResp.finalUrl()) ?? originalURL
 
         var headerFields: [String: String] = [:]
-        for (key, values) in pqcResp.headers {
+        for (key, values) in pqcResp.headers() {
             if key.lowercased() == "set-cookie" { continue }
             headerFields[key] = values.joined(separator: ", ")
         }
 
-        let httpVersion = Self.httpVersionString(forAlpn: pqcResp.negotiatedProtocol)
+        let httpVersion = Self.httpVersionString(forAlpn: pqcResp.negotiatedProtocol())
 
         guard let response = HTTPURLResponse(
             url: responseURL,
-            statusCode: Int(pqcResp.status),
+            statusCode: Int(pqcResp.status()),
             httpVersion: httpVersion,
             headerFields: headerFields
         ) else {
@@ -182,7 +188,10 @@ open class PqcURLProtocol: URLProtocol {
         }
 
         self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        self.client?.urlProtocol(self, didLoad: Data(pqcResp.body))
+        // Stream body chunks. Empty body → loop exits on first iteration.
+        while let chunk = try await pqcResp.readChunk() {
+            self.client?.urlProtocol(self, didLoad: Data(chunk))
+        }
         self.client?.urlProtocolDidFinishLoading(self)
     }
 

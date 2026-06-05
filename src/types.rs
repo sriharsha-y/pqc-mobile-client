@@ -20,16 +20,13 @@ pub struct HttpRequest {
     pub timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct HttpResponse {
-    pub status: u16,
-    /// The final URL the body was actually fetched from, after any redirects
-    /// were followed. Equals the request URL when no redirect occurred. Lets
-    /// callers detect a redirect they refused (see `RedirectPolicy`) and learn
-    /// the effective origin — mirrors OkHttp `Response.request().url()` and
-    /// `URLResponse.url`.
-    pub final_url: String,
-    pub headers: HashMap<String, Vec<String>>,
-    pub body: Vec<u8>,
-    pub negotiated_protocol: String,
-}
+// HttpResponse (a UniFFI Record) was removed in this release. Responses
+// are now streamed via PqcResponse, a UniFFI Object with async methods
+// (read_chunk / bytes / cancel) — see src/client.rs. This matches the
+// native default: URLSession's `dataTask` and OkHttp's `ResponseBody`
+// are both streaming-first; their byte-buffered variants (`data(for:)`
+// / `body().bytes()`) are convenience layers on top.
+//
+// Migration: `resp.body` → `resp.bytes().await` (same behavior, async)
+// or `while let Some(c) = resp.read_chunk().await? { ... }` for true
+// streaming over large downloads.

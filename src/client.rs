@@ -9,7 +9,8 @@ use tokio::sync::Semaphore;
 use crate::config::{DnsResolver, PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
 use crate::tls::build_tls_config;
-use crate::types::{HttpMethod, HttpRequest, HttpResponse};
+use crate::types::{HttpMethod, HttpRequest};
+use tokio::sync::OwnedSemaphorePermit;
 
 /// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
 /// handover: absorbs one SYN retry, still fails fast.
@@ -227,7 +228,7 @@ impl PqcHttpClient {
 // above (async_runtime applies only to the async methods here).
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcHttpClient {
-    pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
+    pub async fn request(&self, req: HttpRequest) -> Result<Arc<PqcResponse>, PqcError> {
         // Concurrency gates — acquired before cache lookup OR network send,
         // and held until this function returns (after the body is fully
         // consumed). Cache hits count too, matching OkHttp's Dispatcher,
@@ -351,30 +352,20 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        // Mid-body errors are transport-level (handshake already done), so
-        // map to Timeout/Network, skipping the rustls classifier. Matches the
-        // native stacks' shape: URLSession `dataTask` and OkHttp
-        // `ResponseBody.bytes()` buffer the whole body to memory with no cap
-        // — callers stream when they need to bound it.
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    PqcError::Timeout
-                } else {
-                    PqcError::Network
-                }
-            })?
-            .to_vec();
-
-        Ok(HttpResponse {
+        // Return a PqcResponse handle. The body is NOT drained here —
+        // consumers pull via async `read_chunk()` / `bytes()`. The
+        // semaphore permits move INTO the response so they're held
+        // until the response is fully consumed or dropped, matching
+        // OkHttp's "in-flight until response.close()" lifecycle.
+        Ok(Arc::new(PqcResponse {
             status,
             final_url,
             headers,
-            body,
             negotiated_protocol,
-        })
+            body: tokio::sync::Mutex::new(Some(resp)),
+            _global_permit,
+            _host_permit,
+        }))
     }
 
     /// Clear all cached responses. Best-effort and non-throwing, mirroring
@@ -397,6 +388,175 @@ impl PqcHttpClient {
             return m.size().await;
         }
         0
+    }
+}
+
+/// Streaming HTTP response handle. Returned by [`PqcHttpClient::request`]
+/// as soon as the response head (status, headers) has been received —
+/// the body is pulled on demand via [`PqcResponse::read_chunk`] or
+/// drained whole via [`PqcResponse::bytes`].
+///
+/// Matches the streaming default of OkHttp's `ResponseBody` and
+/// URLSession's `URLSession.bytes(for:)`. The buffered convenience
+/// (`bytes()`) mirrors `body.bytes()` / `data(for:)`.
+///
+/// # Concurrency
+///
+/// `&self` methods can be called concurrently; an internal async mutex
+/// serializes body reads. Only one reader at a time makes progress
+/// (chunks have to come out in order), but headers/status are pre-
+/// captured so those getters never block.
+///
+/// # Lifecycle
+///
+/// The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
+/// semaphore permits acquired at request time both live inside this
+/// object. Dropping the response without calling `bytes()` aborts the
+/// body stream — same as OkHttp `Response.close()` and URLSession's
+/// task-cancel semantics.
+///
+/// # Cancellation note
+///
+/// UniFFI 0.29 does not propagate foreign-runtime cancellation
+/// (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust.
+/// Consumers who want to abort an in-flight body read must call
+/// [`PqcResponse::cancel`] explicitly. See `docs/ios.md` and
+/// `docs/android.md`.
+#[derive(uniffi::Object)]
+pub struct PqcResponse {
+    // (Debug impl is manual below — the body field's mutex contents
+    // include reqwest::Response which isn't Debug.)
+    status: u16,
+    headers: HashMap<String, Vec<String>>,
+    final_url: String,
+    negotiated_protocol: String,
+    /// The live response. Wrapped in `tokio::sync::Mutex` so multiple
+    /// `&self` callers can coordinate access (UniFFI Object methods
+    /// must take `&self`). `Option` so consume-style operations
+    /// (`bytes`, `cancel`) can `take()` it.
+    body: tokio::sync::Mutex<Option<reqwest::Response>>,
+    /// In-flight semaphore permits acquired at request time. Held
+    /// here so they're released by `Drop` exactly when the response
+    /// is no longer in flight from the consumer's perspective.
+    /// Underscore-prefixed because we never read them — the lifetime
+    /// is what matters.
+    _global_permit: Option<OwnedSemaphorePermit>,
+    _host_permit: Option<OwnedSemaphorePermit>,
+}
+
+impl std::fmt::Debug for PqcResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PqcResponse")
+            .field("status", &self.status)
+            .field("final_url", &self.final_url)
+            .field("negotiated_protocol", &self.negotiated_protocol)
+            .field("headers_len", &self.headers.len())
+            .field(
+                "body_consumed",
+                &self.body.try_lock().map(|g| g.is_none()).ok(),
+            )
+            .finish()
+    }
+}
+
+#[uniffi::export]
+impl PqcResponse {
+    /// HTTP status code (e.g. 200, 404, 503).
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Response headers. Multi-valued headers (`Set-Cookie`, `Vary`,
+    /// `Link`) appear with all values intact — never collapsed.
+    pub fn headers(&self) -> HashMap<String, Vec<String>> {
+        self.headers.clone()
+    }
+
+    /// The URL the body actually came from, after any followed
+    /// redirects. Equals the request URL when no redirect occurred.
+    /// Lets callers detect a redirect they refused (see
+    /// `RedirectPolicy`) — mirrors OkHttp `Response.request().url()`
+    /// and `URLResponse.url`.
+    pub fn final_url(&self) -> String {
+        self.final_url.clone()
+    }
+
+    /// The negotiated ALPN protocol (`"h2"`, `"http/1.1"`, etc.).
+    /// Useful for logging / observability; the consumer never has to
+    /// branch on this.
+    pub fn negotiated_protocol(&self) -> String {
+        self.negotiated_protocol.clone()
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl PqcResponse {
+    /// Pull the next chunk of the body. Returns `Ok(None)` when the
+    /// body has been fully consumed (EOF). Chunks arrive in network
+    /// order and are not bounded in size — typically 16 KB to 64 KB
+    /// for HTTP/2, larger for HTTP/1.1.
+    ///
+    /// Calling `read_chunk` after `bytes()` or `cancel()` always
+    /// returns `Ok(None)` — both consume the body.
+    pub async fn read_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
+        let mut guard = self.body.lock().await;
+        let resp = match guard.as_mut() {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        match resp.chunk().await {
+            Ok(Some(b)) => Ok(Some(b.to_vec())),
+            Ok(None) => {
+                // EOF — drop the live response so the connection
+                // returns to the pool promptly instead of waiting for
+                // the PqcResponse to be dropped.
+                *guard = None;
+                Ok(None)
+            }
+            Err(e) => {
+                // Mid-body errors are transport-level (handshake
+                // already done), so map to Timeout/Network. The rustls
+                // classifier doesn't apply mid-body.
+                let mapped = if e.is_timeout() {
+                    PqcError::Timeout
+                } else {
+                    PqcError::Network
+                };
+                *guard = None;
+                Err(mapped)
+            }
+        }
+    }
+
+    /// Drain the entire body to a `Vec<u8>` (the buffered convenience,
+    /// mirroring OkHttp `body.bytes()` and URLSession `data(for:)`).
+    /// Internally consumes the response — subsequent `read_chunk`
+    /// calls return `Ok(None)`.
+    pub async fn bytes(&self) -> Result<Vec<u8>, PqcError> {
+        let mut guard = self.body.lock().await;
+        let resp = match guard.take() {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        match resp.bytes().await {
+            Ok(b) => Ok(b.to_vec()),
+            Err(e) => {
+                if e.is_timeout() {
+                    Err(PqcError::Timeout)
+                } else {
+                    Err(PqcError::Network)
+                }
+            }
+        }
+    }
+
+    /// Abort the body stream and release the underlying connection.
+    /// Idempotent — a second call is a no-op. Required for consumers
+    /// who want to abort mid-download because UniFFI 0.29 doesn't
+    /// propagate foreign cancellation into Rust.
+    pub async fn cancel(&self) {
+        let mut guard = self.body.lock().await;
+        *guard = None; // Dropping the reqwest::Response aborts the stream.
     }
 }
 
