@@ -8,36 +8,35 @@
 //! verifier needs exactly those to call back into the JVM. So we export
 //! an `extern "system"` symbol the JVM resolves by JNI name lookup.
 
+use jni::errors::{Result as JniResult, ThrowRuntimeExAndDefault};
 use jni::objects::{JClass, JObject};
-use jni::JNIEnv;
+use jni::EnvUnowned;
 
 /// JNI symbol must mirror the Kotlin `external fun nativeInit` exactly.
 /// JNI mangling escapes the `_` in the `sriharsha_y` package segment as
 /// `_1`, hence `..._sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`.
 /// Returns `void` so init failure surfaces as a Java exception, not a
 /// silent `false`.
+///
+/// jni 0.22 native-method signature shape: the FFI param is
+/// `EnvUnowned<'local>` (was `JNIEnv<'local>` in 0.21). The body is
+/// wrapped in `with_env` / `resolve` so the `ThrowRuntimeExAndDefault`
+/// policy converts a returned `Err` into a thrown
+/// `java.lang.RuntimeException` automatically — replaces the manual
+/// `env.throw_new(...)` + `env.fatal_error(...)` dance from 0.21.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit<'local>(
-    mut env: JNIEnv<'local>,
+    mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
     context: JObject<'local>,
 ) {
-    // Captures a global ref to the Application Context + a JavaVM handle.
-    // Idempotent via the crate's internal OnceCell.
-    if let Err(e) = rustls_platform_verifier::android::init_with_env(&mut env, context) {
-        // Surface as a Java exception (loud in logcat). If throw_new
-        // itself fails, abort the VM — returning would let the Kotlin
-        // wrapper mark itself initialized, masking a hard init failure.
-        if env
-            .throw_new(
-                "java/lang/RuntimeException",
-                format!("rustls-platform-verifier init failed: {e:?}"),
-            )
-            .is_err()
-        {
-            env.fatal_error(format!(
-                "rustls-platform-verifier init failed and the failure could not be thrown: {e:?}"
-            ));
-        }
-    }
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            // Captures a global ref to the Application Context + a
+            // JavaVM handle. Idempotent via the crate's internal
+            // OnceCell. The verifier's error type IS jni::errors::Error,
+            // so the `?` propagates straight to the policy below.
+            rustls_platform_verifier::android::init_with_env(env, context)
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
