@@ -149,9 +149,11 @@ async fn trust_failure_surfaces_typed_error() {
 }
 
 /// POST round-trip: method, headers, and body survive to the server.
-/// httpbin.org/post echoes the payload back; it's flaky under load, so this
-/// goes through `request_resilient`. If it's ever gone, swap to
-/// postman-echo.com or a local rustls fixture.
+/// Tries multiple public echo endpoints in order — postman-echo first
+/// (Postman-backed, generally reliable), then httpbin.org as a fallback
+/// because both have hit recurring 5xx incidents under load and the test
+/// shouldn't red CI for an unrelated third-party outage. If all echo
+/// services are down the test fails loudly so we don't silently skip.
 #[tokio::test]
 async fn post_body_round_trips() {
     let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
@@ -163,20 +165,52 @@ async fn post_body_round_trips() {
         vec!["application/json".to_string()],
     );
 
-    let req = HttpRequest {
-        method: HttpMethod::Post,
-        url: "https://httpbin.org/post".to_string(),
-        headers,
-        body: Some(body.clone()),
-        timeout_ms: None,
-    };
+    // Endpoints tried in order. Both are public echo services; we want
+    // at least one to be up. Each gets the full `request_resilient`
+    // retry budget before falling through to the next.
+    let endpoints = ["https://postman-echo.com/post", "https://httpbin.org/post"];
 
-    let resp = request_resilient(&client, req).await;
+    let mut last_err: Option<String> = None;
+    let mut got_resp = None;
+    for url in endpoints {
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: url.to_string(),
+            headers: headers.clone(),
+            body: Some(body.clone()),
+            timeout_ms: None,
+        };
+        // Each endpoint is its own resilient attempt; we don't panic
+        // until ALL endpoints have been tried. So inline the retry
+        // loop instead of using request_resilient's panic-on-fail.
+        let mut endpoint_ok = None;
+        for attempt in 1..=3 {
+            match client.request(req.clone()).await {
+                Ok(r) if r.status() < 500 && r.status() != 429 => {
+                    endpoint_ok = Some(r);
+                    break;
+                }
+                Ok(r) => last_err = Some(format!("{url}: HTTP {}", r.status())),
+                Err(e) => last_err = Some(format!("{url}: {e:?}")),
+            }
+            if attempt < 3 {
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+            }
+        }
+        if let Some(r) = endpoint_ok {
+            got_resp = Some(r);
+            break;
+        }
+    }
+
+    let resp =
+        got_resp.unwrap_or_else(|| panic!("all POST echo endpoints failed (last: {last_err:?})"));
     assert_eq!(resp.status(), 200, "POST should return 200");
 
-    // httpbin echoes the body bytes back under either `data` or `json`.
-    // Don't full-parse the JSON; substring-match the unique payload we
-    // sent so the assertion isn't coupled to httpbin's exact schema.
+    // Both echo services include the unique payload bytes back somewhere
+    // in the response (postman-echo under `json`, httpbin under `data`
+    // or `json`). Substring-match the unique payload so the assertion
+    // isn't coupled to either's exact schema.
     let body_bytes = resp.bytes().await.expect("body drain should succeed");
     let body_str = String::from_utf8_lossy(&body_bytes);
     assert!(
