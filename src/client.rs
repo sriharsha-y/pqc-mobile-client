@@ -109,6 +109,13 @@ impl PqcHttpClient {
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
+        // Per-read idle timeout — reqwest resets the timer after every
+        // successful read, so this kills a stalled stream without burning
+        // the total request budget. Mirrors OkHttp's readTimeout.
+        if let Some(t) = config.read_idle_timeout_ms {
+            builder = builder.read_timeout(Duration::from_millis(t));
+        }
+
         if let Some(ref ua) = config.user_agent {
             builder = builder.user_agent(ua.clone());
         }

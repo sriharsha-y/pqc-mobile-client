@@ -21,6 +21,19 @@ pub struct PqcConfig {
     /// fails fast instead of burning the whole request budget. `None` = 10s.
     pub connect_timeout_ms: Option<u64>,
 
+    /// Idle timeout between body-bytes read operations. The timer resets
+    /// after every successful chunk read, so a healthy slow download is
+    /// not killed by it; only a stalled server (TCP open but no bytes
+    /// flowing) is. Mirrors OkHttp's `readTimeout`.
+    ///
+    /// `None` (default) leaves this off — only `default_timeout_ms` (the
+    /// total request budget) applies. Set this when downloading large
+    /// bodies where you'd rather kill a stuck stream within seconds than
+    /// wait for the total budget to expire (recommended values: 10–30s for
+    /// APIs, 60s+ for large file downloads).
+    #[uniffi(default = None)]
+    pub read_idle_timeout_ms: Option<u64>,
+
     // ----- Cookies -----
     /// Off by default: no cookie jar, so callers round-trip
     /// `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across

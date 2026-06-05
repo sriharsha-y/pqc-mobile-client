@@ -24,6 +24,7 @@ fn default_test_config() -> PqcConfig {
         pinned_cert_sha256: vec![],
         default_timeout_ms: Some(15_000),
         connect_timeout_ms: None,
+        read_idle_timeout_ms: None,
         enable_cookies: false,
         user_agent: Some("pqc-client-smoke-test/0.3.1".to_string()),
         redirect_policy: RedirectPolicy::SameOriginOnly {},
