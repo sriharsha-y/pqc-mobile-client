@@ -57,8 +57,8 @@ impl PqcHttpClient {
             // a classical TLS 1.3 handshake, so making reuse worthwhile is
             // more battery-relevant for us than for a classical client.
             // Dead-idle-socket risk on cell↔wifi handover is handled by
-            // hyper refusing connections it knows are broken plus
-            // tcp_keepalive below.
+            // hyper refusing connections it knows are broken plus the
+            // HTTP/2 keep-alive PING wired below.
             .pool_idle_timeout(Duration::from_secs(300))
             // Cap idle sockets per host to match OkHttp's ConnectionPool
             // (maxIdleConnections = 5). reqwest defaults to usize::MAX, which
@@ -66,8 +66,20 @@ impl PqcHttpClient {
             // having paid a full PQ handshake — sitting in the pool. iOS
             // URLSession caps in-flight per host at 6; the parity number is 5.
             .pool_max_idle_per_host(5)
-            // TCP keep-alive: detect dead peers faster than the OS default.
-            .tcp_keepalive(Duration::from_secs(30));
+            // Dead-peer detection: HTTP/2 keep-alive PING ONLY while streams
+            // are open, never on an idle pooled connection. Crucial for
+            // cellular battery — sending SO_KEEPALIVE probes on an otherwise
+            // idle socket wakes the modem and prevents it from dropping to
+            // IDLE (the LTE RRC inactivity timer is 10–60s on most networks,
+            // typically 20s, and SO_KEEPALIVE resets it on every probe).
+            // OkHttp and URLSession both leave SO_KEEPALIVE OFF for the same
+            // reason; Go fixed the same battery bug (see golang/go#48622).
+            //
+            // 60s interval / 20s timeout: a stuck h2 connection fails after
+            // ~80s instead of hanging for the full request timeout.
+            .http2_keep_alive_interval(Duration::from_secs(60))
+            .http2_keep_alive_timeout(Duration::from_secs(20))
+            .http2_keep_alive_while_idle(false);
 
         builder = builder.connect_timeout(
             config
