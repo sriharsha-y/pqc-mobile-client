@@ -54,6 +54,12 @@ impl PqcHttpClient {
             // below bound the cell↔wifi-handover risk of a dead idle socket
             // (hyper also refuses a connection it knows is broken).
             .pool_idle_timeout(Duration::from_secs(60))
+            // Cap idle sockets per host to match OkHttp's ConnectionPool
+            // (maxIdleConnections = 5). reqwest defaults to usize::MAX, which
+            // on HTTP/1.1 lets a burst leave hundreds of idle sockets — each
+            // having paid a full PQ handshake — sitting in the pool. iOS
+            // URLSession caps in-flight per host at 6; the parity number is 5.
+            .pool_max_idle_per_host(5)
             // TCP keep-alive: detect dead peers faster than the OS default.
             .tcp_keepalive(Duration::from_secs(30));
 
