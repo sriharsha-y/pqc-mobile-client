@@ -50,10 +50,16 @@ impl PqcHttpClient {
             .gzip(true)
             .brotli(true)
             // Reuse idle connections so a burst doesn't pay a PQ TLS 1.3
-            // handshake per call. The 60s idle timeout + tcp_keepalive
-            // below bound the cell↔wifi-handover risk of a dead idle socket
-            // (hyper also refuses a connection it knows is broken).
-            .pool_idle_timeout(Duration::from_secs(60))
+            // handshake per call. 5 min idle window matches OkHttp's
+            // ConnectionPool (keepAliveDuration = 5 minutes); reqwest's own
+            // default is 90s, URLSession is system-managed. The hybrid
+            // X25519MLKEM768 handshake adds ~2.2 KB of keyshare on top of
+            // a classical TLS 1.3 handshake, so making reuse worthwhile is
+            // more battery-relevant for us than for a classical client.
+            // Dead-idle-socket risk on cell↔wifi handover is handled by
+            // hyper refusing connections it knows are broken plus
+            // tcp_keepalive below.
+            .pool_idle_timeout(Duration::from_secs(300))
             // Cap idle sockets per host to match OkHttp's ConnectionPool
             // (maxIdleConnections = 5). reqwest defaults to usize::MAX, which
             // on HTTP/1.1 lets a burst leave hundreds of idle sockets — each
