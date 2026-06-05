@@ -34,6 +34,7 @@ fn default_test_config() -> PqcConfig {
         enable_cache: false,
         cache_dir: None,
         max_cache_bytes: None,
+        max_memory_cache_bytes: None,
     }
 }
 

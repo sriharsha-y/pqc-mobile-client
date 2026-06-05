@@ -6,9 +6,14 @@
 //! `URLCache`. See docs/{android,ios}.md for the consumer-facing narrative.
 //!
 //! This module supplies the storage the bundled managers lack: [`PqcCacheManager`]
-//! is a private (`shared = false`), byte-bounded `cacache` disk tier, fronted by
-//! a `moka` in-memory tier on iOS (mirroring `URLCache`'s mem+disk; Android is
-//! disk-only like OkHttp).
+//! is a private (`shared = false`), byte-bounded `cacache` disk tier, fronted
+//! optionally by a `moka` in-memory tier on either platform. The memory tier
+//! used to be iOS-only (mirroring `URLCache`'s mem+disk while keeping the
+//! Android side disk-only like OkHttp), but that was a self-imposed limit —
+//! OkHttp ships disk-only because the Cache class is `final`, not because
+//! Android can't memory-cache. The memory tier is now controlled purely by
+//! `PqcConfig.max_memory_cache_bytes` (default 4 MiB on both platforms;
+//! `Some(0)` opts out).
 //!
 //! One intentional divergence from a strict native LRU: disk eviction is by
 //! insertion time, not access time (cacache exposes no access time; the iOS
@@ -28,9 +33,10 @@ use crate::config::PqcConfig;
 /// disk capacity.
 const DEFAULT_MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 
-/// In-memory hot-tier cap (iOS only): 4 MiB, matching `URLCache`'s historical
-/// memory capacity.
-#[cfg(target_os = "ios")]
+/// In-memory hot-tier cap when `max_memory_cache_bytes` is `None`: 4 MiB,
+/// matching `URLCache`'s historical memory capacity. Applied on both platforms.
+/// `Some(0)` disables the memory tier entirely (Android consumers who want
+/// OkHttp-style disk-only behavior).
 const DEFAULT_MEM_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The persisted cache record: the response plus the RFC policy needed to
@@ -57,7 +63,9 @@ struct DiskTier {
 #[derive(Clone)]
 pub struct PqcCacheManager {
     disk: Option<DiskTier>,
-    /// Used only on iOS; `None` elsewhere (Android = disk-only like OkHttp).
+    /// In-memory LRU hot tier. Built when `max_memory_cache_bytes` is
+    /// non-zero (default 4 MiB on both platforms); `None` when the consumer
+    /// opts out via `Some(0)`.
     mem: Option<moka::future::Cache<String, Arc<Vec<u8>>>>,
     /// Per-entry size cap. Equals `disk.max_bytes` when disk is present;
     /// otherwise the mem tier's capacity. Guards both tiers symmetrically so a
@@ -82,14 +90,17 @@ impl PqcCacheManager {
                 evict_lock: Arc::new(tokio::sync::Mutex::new(())),
             }
         });
-        let mem = build_mem_tier();
+        let mem_cap = config
+            .max_memory_cache_bytes
+            .unwrap_or(DEFAULT_MEM_CACHE_BYTES);
+        let mem = build_mem_tier(mem_cap);
 
         if disk.is_none() && mem.is_none() {
             return None;
         }
         let entry_max_bytes = match (&disk, &mem) {
             (Some(d), _) => d.max_bytes,
-            (None, Some(_)) => mem_tier_capacity(),
+            (None, Some(_)) => mem_cap,
             (None, None) => unreachable!(),
         };
         Some(Self {
@@ -204,32 +215,22 @@ fn seed_byte_counter_async(path: PathBuf, bytes: Arc<AtomicU64>) {
         .ok();
 }
 
-fn build_mem_tier() -> Option<moka::future::Cache<String, Arc<Vec<u8>>>> {
-    #[cfg(target_os = "ios")]
-    {
-        Some(
-            moka::future::Cache::builder()
-                .max_capacity(DEFAULT_MEM_CACHE_BYTES)
-                .weigher(|_k: &String, v: &Arc<Vec<u8>>| v.len().try_into().unwrap_or(u32::MAX))
-                .build(),
-        )
+/// Build the in-memory LRU tier. Returns `None` when `cap` is 0 (the
+/// consumer-controlled opt-out for OkHttp-style disk-only behavior).
+/// Platform-agnostic: OkHttp's disk-only design was a product choice driven
+/// by `Cache` being a `final` class and historical Dalvik heap caps, not a
+/// limitation of Android — modern devices and ART make a small in-process
+/// memory tier safe on either platform.
+fn build_mem_tier(cap: u64) -> Option<moka::future::Cache<String, Arc<Vec<u8>>>> {
+    if cap == 0 {
+        return None;
     }
-    // Non-iOS (Android, host): disk-only, like OkHttp's `Cache`.
-    #[cfg(not(target_os = "ios"))]
-    {
-        None
-    }
-}
-
-fn mem_tier_capacity() -> u64 {
-    #[cfg(target_os = "ios")]
-    {
-        DEFAULT_MEM_CACHE_BYTES
-    }
-    #[cfg(not(target_os = "ios"))]
-    {
-        0
-    }
+    Some(
+        moka::future::Cache::builder()
+            .max_capacity(cap)
+            .weigher(|_k: &String, v: &Arc<Vec<u8>>| v.len().try_into().unwrap_or(u32::MAX))
+            .build(),
+    )
 }
 
 #[async_trait::async_trait]

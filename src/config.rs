@@ -126,6 +126,21 @@ pub struct PqcConfig {
     /// defaults to 20 MiB, matching a typical `URLCache` disk capacity.
     #[uniffi(default = None)]
     pub max_cache_bytes: Option<u64>,
+
+    /// Hard ceiling on the in-process LRU memory cache tier, in bytes.
+    /// `None` defaults to 4 MiB on both platforms (matching `URLCache`'s
+    /// historical memory capacity). `Some(0)` opts out of the memory tier
+    /// entirely — Android consumers who want OkHttp-style disk-only
+    /// behavior set this to `Some(0)`.
+    ///
+    /// Native baseline note: OkHttp's bundled `Cache` is disk-only (the
+    /// `Cache` class is `final` and not extensible), so OkHttp users get
+    /// no HTTP memory cache out of the box. URLCache on iOS does have a
+    /// memory tier. We expose the same tier on both platforms because
+    /// modern Android ART has dynamic heaps and the historical Dalvik
+    /// caps that drove OkHttp's choice no longer apply.
+    #[uniffi(default = None)]
+    pub max_memory_cache_bytes: Option<u64>,
 }
 
 /// What the client does on a 3xx. The reqwest default (10 unbounded
