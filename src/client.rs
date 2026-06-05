@@ -50,7 +50,7 @@ pub struct PqcHttpClient {
     // Held alongside the middleware's copy so clear_cache / cache_size_bytes
     // reach the same store. None when caching is off.
     #[cfg(feature = "cache")]
-    cache_manager: Option<crate::cache::PqcCacheManager>,
+    cache_manager: Option<crate::cache::PqcStreamingCacheManager>,
 }
 
 #[uniffi::export]
@@ -175,7 +175,7 @@ impl PqcHttpClient {
             // Android with no `cache_dir`) logs and falls back to no caching
             // rather than failing the constructor.
             let cache_manager = if config.enable_cache {
-                let m = crate::cache::PqcCacheManager::new(&config);
+                let m = crate::cache::PqcStreamingCacheManager::new(&config);
                 if m.is_none() {
                     log::warn!(
                         "pqc cache: enable_cache=true but no usable tier \

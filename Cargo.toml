@@ -2,7 +2,12 @@
 name = "pqc_client"
 version = "0.7.1"
 edition = "2021"
-rust-version = "1.81"
+# Bumped 1.81 → 1.88 for http-cache 1.0.0-alpha.6, which uses RPITIT
+# (return-position impl Trait in trait) on StreamingCacheManager — a
+# language feature stabilized in 1.75 but with full trait-object dyn
+# compatibility in 1.85+; alpha.6 declares 1.88. The runtime cost is
+# zero; the cost is just that contributors need a modern toolchain.
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Post-Quantum TLS HTTPS client for iOS and Android (native + React Native) via UniFFI"
 repository = ""
@@ -37,24 +42,37 @@ cli = ["uniffi/cli"]
 # was compiled in. Mobile release builds enable it explicitly via the build
 # scripts; the default (feature-free) build stays lean. See src/cache.rs.
 cache = [
-    "dep:http-cache-reqwest",
     "dep:http-cache",
-    "dep:http-cache-semantics",
+    "dep:http-cache-reqwest",
     "dep:reqwest-middleware",
     "dep:cacache",
     "dep:moka",
     "dep:postcard",
     "dep:serde",
-    "dep:async-trait",
+    "dep:http-cache-semantics",
+    # Body + streaming machinery for our StreamingCacheManager impl.
+    "dep:http-body",
+    "dep:http-body-util",
+    "dep:http",
+    "dep:bytes",
+    "dep:pin-project-lite",
+    "dep:futures-util",
 ]
 
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
-# HTTP client (rustls backend, no native-tls)
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls-manual-roots-no-provider",
+# HTTP client (rustls backend, no native-tls).
+#
+# reqwest 0.13 made rustls the default TLS backend and rustls-platform-
+# verifier the default trust source — both already the case for our prior
+# 0.12 config, so the change is mostly a feature-rename. We use
+# `rustls-no-provider` (renamed from `rustls-tls-manual-roots-no-provider`)
+# so reqwest doesn't install its own CryptoProvider — we install
+# rustls-post-quantum's provider via `use_preconfigured_tls`.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
     "http2",
     "gzip",
     "brotli",
@@ -70,7 +88,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 # TLS with post-quantum support
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-post-quantum = "0.2"
-rustls-platform-verifier = "0.5"
+# Bumped 0.5 → 0.7 to satisfy reqwest 0.13's transitive requirement
+# (`rustls-platform-verifier >=0.6.0, <0.8.0`). 0.7's API moves audited
+# in src/tls.rs; functionality unchanged.
+rustls-platform-verifier = "0.7"
 
 # Crypto provider (ML-KEM, SHA-256 for SPKI hashing). aws-lc-rs is built on
 # AWS-LC, which is FIPS-capable via the crate's "fips" feature (the validated
@@ -93,24 +114,45 @@ log = "0.4"
 uniffi = { version = "0.29", features = ["tokio"] }
 
 # ----- Optional HTTP response cache (the `cache` feature) -----
-# Versions pinned to the highest that keep our rust-version = 1.81 floor
-# (http-cache 0.21 / http-cache-reqwest 0.16 require rustc 1.82). The RFC
-# 9111 semantics come from http-cache-semantics (the same engine the whole
-# http-cache stack is built on); we bring cacache (disk) + moka (iOS memory
-# tier) in directly and ship our own CacheManager in src/cache.rs (bounded,
-# byte-evicting, composite mem+disk) instead of the bundled managers, so
-# http-cache(-reqwest) default-features are off.
-http-cache-reqwest = { version = "0.15", default-features = false, optional = true }
-http-cache = { version = "0.20", default-features = false, optional = true }
-http-cache-semantics = { version = "2.1", features = ["serde"], optional = true }
-reqwest-middleware = { version = "0.4", optional = true }
+# http-cache pinned EXACT to 1.0.0-alpha.6 — pre-1.0. This is the first
+# release with the `StreamingCacheManager` trait + `StreamingCache`
+# middleware (streaming is unconditional in alpha.6; no feature flag).
+# We implement `StreamingCacheManager` ourselves in src/cache.rs against
+# cacache + moka + postcard (NOT the bundled `StreamingManager`, which
+# uses redb + raw tokio::fs files internally — we keep our content-
+# addressable cacache layout).
+#
+# DO NOT auto-bump. Audit the trait shape before any version change.
+# Upstream alphas have shipped breaking API changes routinely; alpha.6
+# was declared as the last alpha before 1.0 in upstream issue #141
+# (2026-03-05), so 1.0 may be next, but no timeline is published.
+http-cache = { version = "=1.0.0-alpha.6", default-features = false, features = ["url-standard", "streaming"], optional = true }
+http-cache-reqwest = { version = "=1.0.0-alpha.6", default-features = false, features = ["streaming"], optional = true }
+reqwest-middleware = { version = "0.5", optional = true }
+
+# Storage primitives. Same as before — these implement our
+# StreamingCacheManager. cacache is the content-addressable disk store
+# (Writer is AsyncWrite with atomic commit + drop cleanup); moka is the
+# in-memory hot tier; postcard encodes our metadata records.
 cacache = { version = "13", default-features = false, features = ["tokio-runtime"], optional = true }
 moka = { version = "0.12", features = ["future"], optional = true }
-# Compact serde serializer for cache records. postcard (maintained) rather than
-# bincode 1.x, which RUSTSEC-2025-0141 flags unmaintained (no patched version).
 postcard = { version = "1", default-features = false, features = ["use-std"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-async-trait = { version = "0.1", optional = true }
+# CachePolicy comes from http-cache-semantics; http-cache uses it
+# internally but doesn't re-export the type. Pin to 3.x to match the
+# version http-cache 1.0.0-alpha.6 uses internally — otherwise our
+# CachePolicy values can't round-trip through the cache trait.
+http-cache-semantics = { version = "3", features = ["serde"], optional = true }
+
+# Body / streaming primitives needed by the StreamingCacheManager trait
+# (alpha.6 returns Response<Self::Body> where Body: http_body::Body).
+# Pinned to the versions http-cache alpha.6 itself uses.
+http-body = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+pin-project-lite = { version = "0.2", optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
 
 # Android-only: rustls-platform-verifier needs a JNI handshake from the
 # app's Application.onCreate to capture the Android Context so it can
@@ -129,6 +171,8 @@ env_logger = "0.11"
 # Self-signed certs for pinning unit tests
 rcgen = "0.13"
 http = "1.4.1"
+# Cache unit tests need temp directories
+tempfile = "3"
 
 # Release profile tuned for mobile binary size.
 #

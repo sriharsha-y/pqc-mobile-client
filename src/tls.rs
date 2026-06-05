@@ -35,17 +35,22 @@ pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
         .map_err(|_| PqcError::Tls)?;
 
     let tls = if cfg.pinned_cert_sha256.is_empty() {
-        // No pinning: just the platform verifier.
-        builder.with_platform_verifier().with_no_client_auth()
+        // No pinning: just the platform verifier. In rustls-platform-verifier
+        // 0.7, `with_platform_verifier()` returns Result (it loads the system
+        // trust store eagerly and can fail) — propagate as Tls.
+        builder
+            .with_platform_verifier()
+            .map_err(|_| PqcError::Tls)?
+            .with_no_client_auth()
     } else {
         // Wrap the platform verifier (chain still validates against the
         // system store) and additionally require an SPKI pin match.
-        // The inner verifier MUST share rustls's CryptoProvider: a bare
-        // `Verifier::new()` reaches for the process-default provider,
-        // which we never install, and panics ("rustls default
-        // CryptoProvider not set") on the first signature check.
-        let inner: Arc<dyn rustls::client::danger::ServerCertVerifier> =
-            Arc::new(rustls_platform_verifier::Verifier::new().with_provider(provider.clone()));
+        // The inner verifier MUST share rustls's CryptoProvider — in 0.7 the
+        // provider is a required `Verifier::new()` argument (was a separate
+        // `.with_provider()` call in 0.5). Returns Result.
+        let inner: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(
+            rustls_platform_verifier::Verifier::new(provider.clone()).map_err(|_| PqcError::Tls)?,
+        );
         let pins = decode_pin_list(&cfg.pinned_cert_sha256)?;
         let pinning = Arc::new(PinningVerifier::new(inner, pins));
 
