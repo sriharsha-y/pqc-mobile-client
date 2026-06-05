@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
+use tokio::sync::Semaphore;
 
 use crate::config::{PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
@@ -22,6 +24,15 @@ enum HttpBackend {
     Cached(reqwest_middleware::ClientWithMiddleware),
 }
 
+/// Per-host concurrency gate. The map grows on first contact with a new
+/// host and lives for the client's lifetime. The `Mutex` is only held to
+/// look up or insert a per-host `Semaphore` — `acquire_owned` is awaited
+/// outside the lock so no `.await` happens across the critical section.
+struct PerHostInflight {
+    cap: u32,
+    map: Mutex<HashMap<String, Arc<Semaphore>>>,
+}
+
 /// The HTTPS client exposed to Kotlin / Swift via UniFFI.
 ///
 /// Holds a single client with PQC TLS configured. Construct once per process
@@ -30,6 +41,12 @@ enum HttpBackend {
 pub struct PqcHttpClient {
     inner: HttpBackend,
     default_timeout: Option<Duration>,
+    /// Global in-flight cap (OkHttp `Dispatcher.maxRequests` parity).
+    /// `None` when the consumer disabled the global gate.
+    global_inflight: Option<Arc<Semaphore>>,
+    /// Per-host in-flight cap (OkHttp `Dispatcher.maxRequestsPerHost`
+    /// parity). `None` when the consumer disabled the per-host gate.
+    per_host_inflight: Option<PerHostInflight>,
     // Held alongside the middleware's copy so clear_cache / cache_size_bytes
     // reach the same store. None when caching is off.
     #[cfg(feature = "cache")]
@@ -128,6 +145,14 @@ impl PqcHttpClient {
 
         let default_timeout = config.default_timeout_ms.map(Duration::from_millis);
 
+        let global_inflight = config
+            .max_inflight_total
+            .map(|n| Arc::new(Semaphore::new(n as usize)));
+        let per_host_inflight = config.max_inflight_per_host.map(|n| PerHostInflight {
+            cap: n,
+            map: Mutex::new(HashMap::new()),
+        });
+
         #[cfg(feature = "cache")]
         {
             // `enable_cache` builds the cache layer; a missing tier (e.g.
@@ -156,6 +181,8 @@ impl PqcHttpClient {
             Ok(Self {
                 inner,
                 default_timeout,
+                global_inflight,
+                per_host_inflight,
                 cache_manager,
             })
         }
@@ -170,6 +197,8 @@ impl PqcHttpClient {
             Ok(Self {
                 inner: HttpBackend::Plain(client),
                 default_timeout,
+                global_inflight,
+                per_host_inflight,
             })
         }
     }
@@ -183,6 +212,48 @@ impl PqcHttpClient {
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcHttpClient {
     pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
+        // Concurrency gates — acquired before cache lookup OR network send,
+        // and held until this function returns (after the body is fully
+        // consumed). Cache hits count too, matching OkHttp's Dispatcher,
+        // because OkHttp counts Calls, not network sockets.
+        //
+        // Global first, then per-host: a request "in flight" includes time
+        // queued waiting for the per-host gate. Acquisition is `.await` —
+        // queued requests park, never spin.
+        //
+        // OwnedSemaphorePermit's Drop releases the slot. The bindings
+        // are unused on purpose; the lifetimes are what matter.
+        let _global_permit = match &self.global_inflight {
+            Some(s) => Some(
+                s.clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| PqcError::Network)?,
+            ),
+            None => None,
+        };
+        let _host_permit = match &self.per_host_inflight {
+            Some(ph) => {
+                // Host key matches OkHttp: URL host only (no port, no scheme).
+                // A parse failure here would also fail in reqwest below, but
+                // we surface it now so the permit isn't held while we discover
+                // the URL is invalid.
+                let host = reqwest::Url::parse(&req.url)
+                    .map_err(|_| PqcError::InvalidRequest)?
+                    .host_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let sem = {
+                    let mut m = ph.map.lock().expect("per-host inflight map poisoned");
+                    m.entry(host)
+                        .or_insert_with(|| Arc::new(Semaphore::new(ph.cap as usize)))
+                        .clone()
+                };
+                Some(sem.acquire_owned().await.map_err(|_| PqcError::Network)?)
+            }
+            None => None,
+        };
+
         let method = match req.method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,

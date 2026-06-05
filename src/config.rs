@@ -45,6 +45,29 @@ pub struct PqcConfig {
     /// read `final_url` on the response to confirm where the body came from.
     pub redirect_policy: RedirectPolicy,
 
+    // ----- Concurrency -----
+    /// Maximum concurrent in-flight requests across all hosts. Acquired
+    /// before cache lookup and network send, so cache hits also count
+    /// against the budget — matches OkHttp's `Dispatcher.maxRequests`.
+    /// Default 64 mirrors OkHttp; `Some(n)` enforces n; `None` disables the
+    /// global gate entirely (use only when a consumer needs unbounded
+    /// concurrency, e.g. server-side or tunnelled use).
+    #[uniffi(default = Some(64))]
+    pub max_inflight_total: Option<u32>,
+
+    /// Maximum concurrent in-flight requests per host, keyed by URL hostname
+    /// (no port, no scheme). Default 5 mirrors OkHttp's
+    /// `Dispatcher.maxRequestsPerHost`. URLSession's analogous cap is 6
+    /// in-flight per host; we pick the lower OkHttp value. `None` disables
+    /// the per-host gate.
+    ///
+    /// Once a host is seen for the first time, its semaphore lives for the
+    /// lifetime of the client (one entry per unique host). For a typical
+    /// mobile app this is bounded by the number of distinct API hosts the
+    /// app talks to (usually under 100); the memory cost is negligible.
+    #[uniffi(default = Some(5))]
+    pub max_inflight_per_host: Option<u32>,
+
     // ----- Caching -----
     /// Opt-in RFC 9111 response cache (default false). When enabled it mirrors
     /// the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
