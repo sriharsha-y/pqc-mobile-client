@@ -10,6 +10,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okio.Buffer
+import okio.buffer
 import java.io.IOException
 
 /**
@@ -172,7 +173,10 @@ open class PqcInterceptor(context: Context) : Interceptor {
                 runBlocking { pqcResp.cancel() }
             }
         }
-        val buffered = okio.buffer(source)
+        // `Source.buffer()` extension (imported above) — wraps the raw
+        // Source in a BufferedSource that does the small-read amortization
+        // OkHttp's downstream consumers expect.
+        val buffered = source.buffer()
         return object : okhttp3.ResponseBody() {
             override fun contentType(): okhttp3.MediaType? = mediaType
             override fun contentLength(): Long = contentLength
