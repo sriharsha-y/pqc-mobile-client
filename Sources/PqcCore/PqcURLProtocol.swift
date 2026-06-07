@@ -93,6 +93,12 @@ open class PqcURLProtocol: URLProtocol {
     }
 
     private var pqcTask: Task<Void, Never>?
+    /// Captured once `client.request(...)` returns so `stopLoading()` can
+    /// invoke `cancel()` on it. UniFFI 0.29 doesn't propagate Swift
+    /// `Task.cancel()` into Rust (mozilla/uniffi-rs#2771), so without this
+    /// the underlying request keeps streaming bytes and holding the global +
+    /// per-host semaphore permits long after URLSession told us to stop.
+    private var pqcResp: PqcResponse?
 
     public override func startLoading() {
         let subclass = type(of: self)
@@ -103,8 +109,9 @@ open class PqcURLProtocol: URLProtocol {
                 }
                 let client = try subclass.clientFor(subclass)
                 let pqcReq = try Self.buildRequest(from: self.request, url: url)
-                let pqcResp = try await client.request(req: pqcReq)
-                try await self.emit(pqcResp, originalURL: url)
+                let resp = try await client.request(req: pqcReq)
+                self.pqcResp = resp
+                try await self.emit(resp, originalURL: url)
             } catch is CancellationError {
                 // stopLoading() cancelled us; URLProtocol contract is to
                 // stay silent — URLSession owns the cancel notification.
@@ -115,8 +122,16 @@ open class PqcURLProtocol: URLProtocol {
     }
 
     public override func stopLoading() {
+        let resp = self.pqcResp
+        self.pqcResp = nil
         pqcTask?.cancel()
         pqcTask = nil
+        // Reach into Rust to release the connection + permits NOW. The
+        // detached task is fire-and-forget; `cancel()` is idempotent and
+        // races safely with an `emit()` already in flight.
+        if let resp {
+            Task { await resp.cancel() }
+        }
     }
 
     // MARK: - Request / response plumbing
