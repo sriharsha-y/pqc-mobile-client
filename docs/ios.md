@@ -369,5 +369,5 @@ This is a **private** cache (`shared = false`), so — exactly like `URLCache`/O
 ### Notes / behavior vs. native
 
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache: true` makes the initializer throw `PqcError.invalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
-- **vs. `URLCache`:** the memory tier is true LRU; the disk tier evicts oldest-first (FIFO) once `maxCacheBytes` is exceeded. We deliberately do **not** replicate two `URLCache` quirks: its 200–299-only status filter (we cache the broader RFC set) and its "reject responses larger than ~5% of capacity" rule (we bound by total size + LRU instead).
+- **vs. `URLCache`:** the memory tier is true LRU; the disk tier evicts oldest-first (FIFO) once `maxCacheBytes` is exceeded. Like `URLCache`, we apply a **per-entry cap of ~5% of total capacity** — with a 20 MiB cache, individual responses larger than ~1 MiB skip the cache, so one large download can't evict the entire hot set. We deliberately do **not** replicate `URLCache`'s 200–299-only status filter (we cache the broader RFC set).
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
