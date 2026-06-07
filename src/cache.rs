@@ -136,15 +136,30 @@ fn body_key(cache_key: &str) -> String {
     format!("body:{cache_key}")
 }
 
+/// Inverse of meta_key/body_key: recover the logical cache key from a
+/// raw cacache index key. Callers that walk `cacache::list_sync` use
+/// this to group `meta:K` and `body:K` halves back into one entry.
+/// Returns the input unchanged if neither prefix matches (defensive
+/// — keys we didn't write would otherwise alias to themselves).
+fn logical_key(index_key: &str) -> &str {
+    index_key
+        .strip_prefix("meta:")
+        .or_else(|| index_key.strip_prefix("body:"))
+        .unwrap_or(index_key)
+}
+
 /// Persistent byte-bounded disk tier. `bytes` is a running logical-size
 /// counter so put/size stay O(1); `evict_lock` serializes both eviction
-/// and `clear` so concurrent puts can't race a full rescan.
+/// and `clear` so concurrent puts can't race a full rescan. `seeded`
+/// is the one-shot flag for lazy on-first-use counter initialization
+/// (constructor can't spawn — see `ensure_seeded`).
 #[derive(Clone)]
 struct DiskTier {
     path: PathBuf,
     max_bytes: u64,
     bytes: Arc<AtomicU64>,
     evict_lock: Arc<tokio::sync::Mutex<()>>,
+    seeded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -163,16 +178,19 @@ pub struct PqcStreamingCacheManager {
 impl PqcStreamingCacheManager {
     pub fn new(config: &PqcConfig) -> Option<Self> {
         let disk = config.cache_dir.as_ref().map(|d| {
-            let path = PathBuf::from(d);
-            let bytes = Arc::new(AtomicU64::new(0));
-            // Seed off the constructor thread so a populated cache
-            // doesn't block the UI on app launch.
-            seed_byte_counter_async(path.clone(), Arc::clone(&bytes));
+            // No `tokio::spawn` here: PqcHttpClient::new is a sync UniFFI
+            // constructor called from a foreign FFI thread (Swift Main on
+            // iOS, JNI on Android) with no tokio runtime entered, so spawn
+            // would panic with "there is no reactor running". The byte
+            // counter is seeded lazily by `ensure_seeded` on the first
+            // async cache call instead — by then UniFFI's tokio runtime
+            // is live.
             DiskTier {
-                path,
+                path: PathBuf::from(d),
                 max_bytes: config.max_cache_bytes.unwrap_or(DEFAULT_MAX_CACHE_BYTES),
-                bytes,
+                bytes: Arc::new(AtomicU64::new(0)),
                 evict_lock: Arc::new(tokio::sync::Mutex::new(())),
+                seeded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         });
 
@@ -209,7 +227,12 @@ impl PqcStreamingCacheManager {
             if let Err(e) = cacache::clear(&disk.path).await {
                 log::warn!("pqc cache: clear failed: {e}");
             }
+            // The evict_lock excludes other resyncs; puts don't take it
+            // before fetch_add, but a put that races here has already
+            // written to disk and would be wiped by cacache::clear above
+            // either way. store(0) + seeded is the authoritative state.
             disk.bytes.store(0, Ordering::Release);
+            disk.seeded.store(true, Ordering::Release);
         }
     }
 
@@ -233,10 +256,15 @@ impl PqcStreamingCacheManager {
 pin_project! {
     #[project = PqcCachedBodyProj]
     pub enum PqcCachedBody {
-        /// One-shot send of an already-resident `Bytes` blob — used for
-        /// memory-tier hits, `convert_body` results, and `empty_body`.
+        /// Resident `Bytes` blob — memory-tier hits, `convert_body` results,
+        /// `empty_body`, and the put() return value on the cache-miss path.
+        /// `poll_frame` carves it into STREAM_CHUNK_SIZE slices so consumers
+        /// see streamed chunks even on the mem-hit / miss paths, matching
+        /// the disk-tier Cached variant's chunked delivery and the streaming
+        /// contract OkHttp `ResponseBody.source()` / URLSession.bytes(for:)
+        /// promise. Without this a 50 MiB miss yields one 50 MiB chunk.
         Buffered {
-            data: Option<Bytes>,
+            data: Bytes,
         },
         /// Streamed from cacache via `AsyncRead`. Reads up to
         /// `STREAM_CHUNK_SIZE` bytes per `poll_frame`, never holding
@@ -260,10 +288,14 @@ impl HttpBody for PqcCachedBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, StreamingError>>> {
         match self.project() {
-            PqcCachedBodyProj::Buffered { data } => match data.take() {
-                Some(b) if !b.is_empty() => Poll::Ready(Some(Ok(Frame::data(b)))),
-                _ => Poll::Ready(None),
-            },
+            PqcCachedBodyProj::Buffered { data } => {
+                if data.is_empty() {
+                    return Poll::Ready(None);
+                }
+                let n = STREAM_CHUNK_SIZE.min(data.len());
+                let chunk = data.split_to(n);
+                Poll::Ready(Some(Ok(Frame::data(chunk))))
+            }
             PqcCachedBodyProj::Cached {
                 mut reader,
                 buf,
@@ -340,6 +372,9 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         &self,
         cache_key: &str,
     ) -> HttpCacheResult<Option<(Response<Self::Body>, CachePolicy)>> {
+        // Seed the byte counter on the first cache call — the sync
+        // constructor can't (no tokio runtime on FFI threads).
+        self.ensure_seeded().await;
         let disk = match &self.disk {
             Some(d) => d,
             None => return Ok(None),
@@ -366,7 +401,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         // Step 2: build the body. Memory tier first — if hit, the entire
         // body is already resident; no disk syscall needed.
         let body = if let Some(b) = self.read_mem(cache_key).await {
-            PqcCachedBody::Buffered { data: Some(b) }
+            PqcCachedBody::Buffered { data: b }
         } else {
             // Open a streaming reader. cacache::Reader is AsyncRead;
             // we stream in STREAM_CHUNK_SIZE chunks.
@@ -404,6 +439,9 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         B::Data: Send,
         B::Error: Into<StreamingError>,
     {
+        // Seed the byte counter on the first cache call — the sync
+        // constructor can't (no tokio runtime on FFI threads).
+        self.ensure_seeded().await;
         let (parts, body) = response.into_parts();
 
         // Collect body to bytes. This matches upstream's StreamingManager
@@ -418,15 +456,9 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             .to_bytes();
         let body_size = body_bytes.len() as u64;
 
-        // Cacheability gate: oversized → skip both tiers, return
-        // Buffered (caller still gets the response, just uncached).
-        let cacheable = match &self.disk {
-            Some(d) => body_size <= self.per_entry_disk && body_size <= d.max_bytes,
-            None => false,
-        };
-
-        if cacheable {
-            if let Some(disk) = &self.disk {
+        // Disk tier: write iff within both the per-entry and total caps.
+        if let Some(disk) = &self.disk {
+            if body_size <= self.per_entry_disk && body_size <= disk.max_bytes {
                 // Write body first. cacache's Writer atomically commits
                 // (SHA-verified + atomic rename) and orphans the tmp
                 // file on drop without commit.
@@ -468,15 +500,16 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
                 // Best-effort eviction if over budget.
                 self.evict_if_over_budget().await;
             }
+        }
 
-            // Memory tier: only entries under the per-entry mem cap are
-            // promoted. Avoids a single large response evicting many
-            // small useful ones.
-            if let Some(mem) = &self.mem {
-                if body_size <= self.per_entry_mem {
-                    mem.insert(cache_key.clone(), Arc::new(body_bytes.clone()))
-                        .await;
-                }
+        // Memory tier: independent of the disk tier. Without this, configs
+        // with `cache_dir = None` + `max_memory_cache_bytes = Some(N)`
+        // (memory-only, e.g. the iOS docs example) silently never store
+        // anything — the mem.insert is gated on its own per-entry cap.
+        if let Some(mem) = &self.mem {
+            if body_size <= self.per_entry_mem {
+                mem.insert(cache_key.clone(), Arc::new(body_bytes.clone()))
+                    .await;
             }
         }
 
@@ -490,9 +523,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             b = b.header(name, value);
         }
         let mut resp = b
-            .body(PqcCachedBody::Buffered {
-                data: Some(body_bytes),
-            })
+            .body(PqcCachedBody::Buffered { data: body_bytes })
             .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
         *resp.extensions_mut() = parts.extensions;
         Ok(resp)
@@ -518,9 +549,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             b = b.header(name, value);
         }
         let mut resp = b
-            .body(PqcCachedBody::Buffered {
-                data: Some(body_bytes),
-            })
+            .body(PqcCachedBody::Buffered { data: body_bytes })
             .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
         *resp.extensions_mut() = parts.extensions;
         Ok(resp)
@@ -531,30 +560,10 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             mem.invalidate(cache_key).await;
         }
         if let Some(disk) = &self.disk {
-            // Account before remove so an intervening crash doesn't
-            // double-decrement.
-            let meta_sz = cacache::metadata(&disk.path, meta_key(cache_key))
-                .await
-                .ok()
-                .flatten()
-                .map(|m| m.size as u64)
-                .unwrap_or(0);
-            let body_sz = cacache::metadata(&disk.path, body_key(cache_key))
-                .await
-                .ok()
-                .flatten()
-                .map(|m| m.size as u64)
-                .unwrap_or(0);
-            let _ = cacache::remove(&disk.path, meta_key(cache_key)).await;
-            let _ = cacache::remove(&disk.path, body_key(cache_key)).await;
-            // cacache 13 doesn't expose explicit blob-GC. Orphan content
-            // (no key references) lingers on disk until `clear()`. This
-            // is acceptable for our use: the size-counter is logical
-            // (sums key blob sizes), and the next `evict_if_over_budget`
-            // pass will reclaim space if we drift over budget.
+            let removed = remove_entry(disk, cache_key).await;
             disk.bytes
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                    Some(v.saturating_sub(meta_sz + body_sz))
+                    Some(v.saturating_sub(removed))
                 })
                 .ok();
         }
@@ -562,7 +571,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
     }
 
     fn empty_body(&self) -> Self::Body {
-        PqcCachedBody::Buffered { data: None }
+        PqcCachedBody::Buffered { data: Bytes::new() }
     }
 
     // Note: trait-side this method is `#[cfg(feature = "streaming")]` —
@@ -593,9 +602,35 @@ impl PqcStreamingCacheManager {
         mem.get(cache_key).await.map(|arc| (*arc).clone())
     }
 
+    /// One-shot lazy initialization of the byte counter. The sync
+    /// UniFFI constructor can't spawn a tokio task, so the counter is
+    /// seeded on the first cache call (put or get) instead — by then
+    /// UniFFI's tokio runtime is live and we're already on a tokio
+    /// worker. Idempotent and cheap after the first call.
+    async fn ensure_seeded(&self) {
+        if let Some(disk) = &self.disk {
+            // Optimistic load: post-seed every cache call is one acquire load.
+            if disk.seeded.load(Ordering::Acquire) {
+                return;
+            }
+            // Serialize racing first-callers via evict_lock so we don't
+            // double-walk the cacache index on cold start.
+            let _guard = disk.evict_lock.lock().await;
+            if disk.seeded.load(Ordering::Acquire) {
+                return;
+            }
+            resync_from_disk(disk).await;
+            disk.seeded.store(true, Ordering::Release);
+        }
+    }
+
     /// Evict oldest entries until under budget. Best-effort; called
     /// after each put. Serialized via evict_lock so concurrent puts
-    /// don't all race the same rescan.
+    /// don't all race the same rescan. Evicts by *logical* key — both
+    /// halves of a `meta:`/`body:` pair go together atomically, so the
+    /// cache can never end up with a meta and no body (which `get` would
+    /// then permanently mis-handle as a miss while the orphan meta
+    /// lingers).
     async fn evict_if_over_budget(&self) {
         let disk = match &self.disk {
             Some(d) => d,
@@ -605,28 +640,49 @@ impl PqcStreamingCacheManager {
             return;
         }
         let _guard = disk.evict_lock.lock().await;
-        // Re-check inside the lock.
+        // Authoritative resync inside the lock: handles counter drift
+        // (e.g. an OS-side blob loss that left our counter high) and
+        // the cold-start window before `ensure_seeded` has run.
+        resync_from_disk(disk).await;
         if disk.bytes.load(Ordering::Acquire) <= disk.max_bytes {
             return;
         }
-        // Walk index, evict oldest-first until under budget.
-        let mut entries: Vec<(String, u64, std::time::SystemTime)> = Vec::new();
-        for item in cacache::list_sync(&disk.path).flatten() {
-            entries.push((
-                item.key.clone(),
-                item.size as u64,
-                std::time::UNIX_EPOCH + std::time::Duration::from_millis(item.time as u64),
-            ));
-        }
-        entries.sort_by_key(|(_, _, t)| *t);
+
+        // Group cacache index entries by their logical key so eviction
+        // takes both halves of a meta/body pair atomically. The min(time)
+        // of the pair is the entry's age. Tuple value: (summed_size,
+        // min_time). Walk in spawn_blocking — list_sync is a synchronous
+        // directory traversal that would otherwise park a tokio worker
+        // for the duration of the scan.
+        use std::collections::HashMap;
+        let path = disk.path.clone();
+        let entries: Vec<(String, u64, u64)> = tokio::task::spawn_blocking(move || {
+            let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
+            for item in cacache::list_sync(&path).flatten() {
+                let logical = logical_key(&item.key).to_owned();
+                let t = item.time as u64;
+                let e = agg.entry(logical).or_insert((0, u64::MAX));
+                e.0 += item.size as u64;
+                e.1 = e.1.min(t);
+            }
+            let mut v: Vec<(String, u64, u64)> =
+                agg.into_iter().map(|(k, (s, t))| (k, s, t)).collect();
+            v.sort_by_key(|(_, _, t)| *t);
+            v
+        })
+        .await
+        .unwrap_or_default();
+
         let mut total = disk.bytes.load(Ordering::Acquire);
-        for (key, size, _) in entries {
+        for (logical, size, _) in entries {
             if total <= disk.max_bytes {
                 break;
             }
-            if cacache::remove(&disk.path, &key).await.is_ok() {
-                total = total.saturating_sub(size);
-            }
+            // remove_entry drops both keys AND the underlying content
+            // blobs (via remove_hash), so no orphaned blobs creep past
+            // max_bytes between clear()s.
+            let _ = remove_entry(disk, &logical).await;
+            total = total.saturating_sub(size);
         }
         disk.bytes.store(total, Ordering::Release);
     }
@@ -649,16 +705,63 @@ fn build_mem_tier(cap: u64) -> Option<moka::future::Cache<String, Arc<Bytes>>> {
     )
 }
 
-/// Walk the cacache index off-thread to seed the byte counter. Run
-/// once from `new`; the counter is otherwise updated incrementally.
-fn seed_byte_counter_async(path: PathBuf, bytes: Arc<AtomicU64>) {
-    tokio::spawn(async move {
-        let mut total: u64 = 0;
-        for item in cacache::list_sync(&path).flatten() {
-            total = total.saturating_add(item.size as u64);
-        }
-        bytes.store(total, Ordering::Release);
-    });
+/// Authoritative resync of the byte counter from the cacache index.
+/// Sums every live entry and stores the total in `disk.bytes`. Called
+/// from `clear`, the cold-start path of `ensure_seeded`, and the top
+/// of `evict_if_over_budget` to self-heal drift. Wrapped in
+/// `spawn_blocking` so cacache's sync index walk doesn't park a tokio
+/// worker (small caches: microseconds; populated 20 MiB cache with
+/// ~1k entries: tens of ms).
+///
+/// Caller must hold `disk.evict_lock` for the duration — the final
+/// `store` overwrites any concurrent `put.fetch_add` racing this scan,
+/// and the lock both serializes resync callers and excludes the puts
+/// that would otherwise be lost.
+async fn resync_from_disk(disk: &DiskTier) {
+    let path = disk.path.clone();
+    let total = tokio::task::spawn_blocking(move || {
+        cacache::list_sync(&path)
+            .flatten()
+            .map(|i| i.size as u64)
+            .sum::<u64>()
+    })
+    .await
+    .unwrap_or(0);
+    disk.bytes.store(total, Ordering::Release);
+}
+
+/// Remove a logical entry from cacache: both keys (`meta:K` and
+/// `body:K`) and the content blobs they referenced. Returns the total
+/// bytes reclaimed so the caller can decrement the counter.
+///
+/// `cacache::remove` drops the key but leaves the content blob — the
+/// store is content-addressable, so the blob is still on disk if any
+/// other key references its integrity. Our layout has one key per
+/// blob, so the blob is always orphaned by the remove and we follow
+/// up with `remove_hash` to reclaim it. Without this, RFC 9111
+/// invalidations (delete on every unsafe-method match against a cached
+/// GET) leak storage indefinitely.
+async fn remove_entry(disk: &DiskTier, cache_key: &str) -> u64 {
+    let meta_m = cacache::metadata(&disk.path, meta_key(cache_key))
+        .await
+        .ok()
+        .flatten();
+    let body_m = cacache::metadata(&disk.path, body_key(cache_key))
+        .await
+        .ok()
+        .flatten();
+    let reclaimed =
+        meta_m.as_ref().map(|m| m.size as u64).unwrap_or(0)
+        + body_m.as_ref().map(|m| m.size as u64).unwrap_or(0);
+    let _ = cacache::remove(&disk.path, meta_key(cache_key)).await;
+    let _ = cacache::remove(&disk.path, body_key(cache_key)).await;
+    if let Some(m) = meta_m {
+        let _ = cacache::remove_hash(&disk.path, &m.integrity).await;
+    }
+    if let Some(m) = body_m {
+        let _ = cacache::remove_hash(&disk.path, &m.integrity).await;
+    }
+    reclaimed
 }
 
 /// Build the streaming-aware reqwest cache middleware from this manager.
@@ -836,6 +939,92 @@ mod tests {
         assert_eq!(m.size().await, 0);
         assert!(m.get("k1").await.unwrap().is_none());
         assert!(m.get("k2").await.unwrap().is_none());
+    }
+
+    /// Regression for the Buffered single-chunk bug: a body larger than
+    /// STREAM_CHUNK_SIZE must be delivered in multiple frames, not one.
+    /// Otherwise read_chunk() on a cache-miss path hands the consumer a
+    /// single huge Vec<u8>, defeating the streaming feature.
+    #[tokio::test]
+    async fn buffered_body_chunks_match_stream_size() {
+        use http_body_util::BodyExt;
+        let big = Bytes::from(vec![0xab; STREAM_CHUNK_SIZE * 3 + 17]);
+        let mut body = PqcCachedBody::Buffered { data: big.clone() };
+        let mut frames = 0usize;
+        let mut max_chunk = 0usize;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.unwrap();
+            if let Some(data) = frame.data_ref() {
+                frames += 1;
+                max_chunk = max_chunk.max(data.len());
+                assert!(data.len() <= STREAM_CHUNK_SIZE);
+            }
+        }
+        // 3 full chunks + 1 partial = 4 frames.
+        assert_eq!(frames, 4);
+        assert_eq!(max_chunk, STREAM_CHUNK_SIZE);
+    }
+
+    /// Regression for the memory-only cache no-op: a config with
+    /// cache_dir=None + max_memory_cache_bytes=Some must actually serve
+    /// mem-tier hits. The previous wiring nested mem.insert inside
+    /// `if cacheable`, which evaluated false whenever the disk tier
+    /// was absent — so mem-only was silently disabled.
+    #[tokio::test]
+    async fn memory_only_cache_actually_stores() {
+        let cfg = PqcConfig {
+            pinned_cert_sha256: vec![],
+            default_timeout_ms: None,
+            connect_timeout_ms: None,
+            read_idle_timeout_ms: None,
+            enable_cookies: false,
+            user_agent: None,
+            redirect_policy: RedirectPolicy::SameOriginOnly {},
+            dns_resolver: None,
+            max_inflight_total: None,
+            max_inflight_per_host: None,
+            enable_cache: true,
+            cache_dir: None,
+            max_cache_bytes: None,
+            max_memory_cache_bytes: Some(64 * 1024),
+        };
+        let m = PqcStreamingCacheManager::new(&cfg).expect("mem-only manager builds");
+        // No disk tier; assert we can still write to the mem tier and
+        // read it back via the private read_mem helper.
+        assert!(m.disk.is_none());
+        let mem = m.mem.as_ref().expect("mem tier present");
+        mem.insert("k".to_string(), Arc::new(Bytes::from_static(b"hello")))
+            .await;
+        assert_eq!(m.read_mem("k").await.as_deref(), Some(&b"hello"[..]));
+    }
+
+    /// Regression for the eviction-orphans-pair bug. Seed the cache
+    /// with two complete entries past the budget, force eviction, and
+    /// verify that no half-pair (meta without body or vice versa)
+    /// remains on disk.
+    #[tokio::test]
+    async fn eviction_removes_pairs_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = tmp_config(dir.path());
+        cfg.max_cache_bytes = Some(1024); // tight enough that 2 entries trip it
+        let m = PqcStreamingCacheManager::new(&cfg).unwrap();
+        write_entry(&m, "k1", &vec![0u8; 600]).await;
+        write_entry(&m, "k2", &vec![0u8; 600]).await;
+        // Force eviction.
+        m.evict_if_over_budget().await;
+        // Whatever logical keys survive, both halves must be present.
+        let disk = m.disk.as_ref().unwrap();
+        let mut metas: std::collections::HashSet<String> = Default::default();
+        let mut bodies: std::collections::HashSet<String> = Default::default();
+        for item in cacache::list_sync(&disk.path).flatten() {
+            let logical = logical_key(&item.key).to_owned();
+            if item.key.starts_with("meta:") {
+                metas.insert(logical);
+            } else if item.key.starts_with("body:") {
+                bodies.insert(logical);
+            }
+        }
+        assert_eq!(metas, bodies, "half-pair orphan after eviction");
     }
 
     #[tokio::test]
