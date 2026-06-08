@@ -10,13 +10,7 @@ The Rust core, the XCFramework, and the generated Swift bindings are the same re
 
 ## 1. Build outputs
 
-> **Note on regenerating bindings manually.** The build script invokes
-> `cargo run --release --features cli --bin uniffi-bindgen -- generate ...`.
-> The `--features cli` flag is mandatory — the uniffi-bindgen binary is
-> gated behind a `cli` cargo feature so its dep tree (clap, goblin,
-> uniffi_bindgen itself) never gets linked into the mobile cross-compiled
-> archive. Running `cargo run --bin uniffi-bindgen ...` without the flag
-> errors with `target uniffi-bindgen requires the features: cli`.
+> Regenerating bindings manually requires `--features cli` — the `uniffi-bindgen` binary is gated behind it so its deps (clap, goblin, uniffi_bindgen) stay out of the mobile archive.
 
 After `make ios` at the repo root:
 
@@ -31,22 +25,14 @@ generated/
     └── module.modulemap
 ```
 
-The `.a` file size is **not** the shipped cost — it's a static archive,
-and `clang -dead_strip` + LTO discard the unused symbols and embedded
-bitcode metadata at link time. The actual delta to the app's main
-executable, measured by linking a stub with App Store flags
-(`-Os -Wl,-dead_strip` + `strip -x -S`):
+The `.a` size is not the shipped cost — `clang -dead_strip` + LTO discard most of it. Measured link-time delta to the app binary:
 
 | Build | Static archive (.a) | Linked binary delta in `.app` |
 |---|---|---|
 | `--features cache` (release default) | ~68 MiB | **~6.0 MiB** |
 | no cache (`PQC_CARGO_FEATURES=""`) | ~59 MiB | ~5.0 MiB |
 
-App Store thinning + IPA compression mean the **download** is smaller
-(the Mach-O compresses to ~3–3.5 MiB inside the zipped IPA), but the
-"App Size" the App Store shows users — and the install footprint — is
-the linked-binary number above. The simulator slice is dev-only and
-never ships.
+The simulator slice is dev-only and never ships.
 
 ## 2. Packaging
 
@@ -88,9 +74,7 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL → pick "Up to Next Minor".
 
-Behind the scenes: SPM resolves the version you pin to the matching `vX.Y.Z` git tag, which points at a commit on `main` where `Package.swift` lives at the repo root. That manifest declares `PqcCore.xcframework` as a `binaryTarget` whose URL fetches the release asset (`PqcCore-X.Y.Z.zip`) and SPM verifies its SHA256 checksum at download time — SPM finds the `.xcframework` at the zip root and ignores the bundled `pqc.swift`/LICENSE. CocoaPods consumes the same zip over the same HTTPS release endpoint but does **not** verify a per-pod-spec SHA256 — integrity in the CocoaPods path relies on HTTPS transport security and GitHub's write controls on the release asset. If you need byte-level integrity on the CocoaPods side too, prefer the SPM path or vendor the XCFramework manually.
-
-`Package.swift` at the repo root is auto-maintained by the release workflow's `publish-swiftpm` job, which rewrites it with the latest version + URL + checksum on every release and re-points the release tag to the resulting commit.
+SPM verifies the release asset's SHA256 at download time. CocoaPods does not — integrity there relies on HTTPS + GitHub release controls. Prefer SPM (or vendor the XCFramework) if you need byte-level guarantees.
 
 ### Apple framework dependencies
 
@@ -330,7 +314,7 @@ The UniFFI-generated classes (`PqcHttpClient`, `PqcResponse`, `PqcConfig`, `Body
 
 ## 7. iOS 26 gate
 
-On iOS 26+, the native `URLSession` already advertises `X25519MLKEM768` in every ClientHello (Apple [HT122756](https://support.apple.com/en-us/122756)), so the custom path is unnecessary and slightly slower. The bundled `registerIfNeeded(into:)` helper encapsulates this — call it instead of `register(into:)` and the gate stays in one place. Use `register(into:)` directly only when you want the URLProtocol to run on iOS 26+ as well (e.g. for SPKI pinning that the OS handshake doesn't provide).
+Covered in §3 — the bundled `registerIfNeeded(into:)` helper no-ops on iOS 26+ where `URLSession` already negotiates `X25519MLKEM768` natively.
 
 ## 8. Export compliance
 
@@ -416,11 +400,9 @@ let bytes = await client.cacheSizeBytes()   // UInt64, e.g. for "Clear cache (1.
 
 **Use exactly one cache.** Keep the `URLProtocol`'s `cacheStoragePolicy: .notAllowed` (and leave `URLCache` unconfigured for the routed session) so the core's cache is the single source of truth — no double storage. Direct-`URLSession`/direct-API consumers just set the config above; nothing else changes.
 
-### What gets cached (it's not about file type)
+### What gets cached
 
-Cacheability is decided by **request method + response status + cache headers** — never by extension or `Content-Type`. A `.json`, `.html`, `.svg`, or image are all cached identically *if and only if* their headers allow it. In practice CDN assets sent with `Cache-Control: max-age=…` cache; API responses sent with `Cache-Control: no-store` (typical for account/balance/transaction endpoints) do not.
-
-This is a **private** cache (`shared = false`), so — exactly like `URLCache`/OkHttp — it will cache responses to `Authorization`-bearing requests when their headers permit. To keep a sensitive endpoint out of the cache, have the server send `Cache-Control: no-store` (or `no-cache` to force revalidation). `clearCache()` on logout is the belt-and-suspenders backstop.
+Cacheability is decided by method + status + cache headers — not by extension or `Content-Type`. This is a **private** cache (`shared = false`), so it will cache `Authorization`-bearing responses when their headers permit (same as `URLCache`/OkHttp). Use `Cache-Control: no-store` server-side to keep sensitive endpoints out; `clearCache()` on logout is the backstop.
 
 ### Notes / behavior vs. native
 

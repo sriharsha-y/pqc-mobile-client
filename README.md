@@ -174,7 +174,6 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 - **WebViews** (`WKWebView`, system WebView) — use the system network stack, not interceptable.
 - **iOS background `URLSession`** — the OS daemon owns the socket.
 - **RN image loaders / 3rd-party native SDKs** (Fresco, SDWebImage, Firebase, Sentry, …) — bundle their own HTTP clients.
-- **Streaming bodies** — the response body is fully buffered in memory (matches `URLSession.dataTask` / OkHttp `ResponseBody.bytes()`). A streaming surface is possible but not yet exposed across the FFI.
 
 ## App size impact
 

@@ -416,13 +416,8 @@ impl PqcStreamingCacheManager {
         let disk_rejects = self
             .disk
             .as_ref()
-            .map(|d| len > self.per_entry_disk || len > d.max_bytes)
-            .unwrap_or(true);
-        let mem_rejects = self
-            .mem
-            .as_ref()
-            .map(|_| len > self.per_entry_mem)
-            .unwrap_or(true);
+            .is_none_or(|d| len > self.per_entry_disk || len > d.max_bytes);
+        let mem_rejects = self.mem.as_ref().is_none_or(|_| len > self.per_entry_mem);
         disk_rejects && mem_rejects
     }
 }
@@ -448,7 +443,7 @@ fn build_response_with_body(
     let mut b = Response::builder()
         .status(parts.status)
         .version(parts.version);
-    for (name, value) in parts.headers.iter() {
+    for (name, value) in &parts.headers {
         b = b.header(name, value);
     }
     let mut resp = b
@@ -614,7 +609,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         //   - no disk tier: mem-only caching requires the full body in
         //     memory anyway, so streaming buys nothing.
         let should_buffer =
-            self.disk.is_none() || content_len.map_or(false, |n| n <= INLINE_BUFFERED_THRESHOLD);
+            self.disk.is_none() || content_len.is_some_and(|n| n <= INLINE_BUFFERED_THRESHOLD);
         if should_buffer {
             return self
                 .put_buffered(cache_key, parts, body, policy, metadata)
@@ -1112,9 +1107,6 @@ impl PqcStreamingCacheManager {
     }
 }
 
-/// Serialize the cache metadata head (status/headers/policy/user_meta)
-/// to postcard bytes. Used by both put_buffered and put_tee so the
-/// on-disk layout stays a single source of truth.
 /// Single source of truth for the on-disk `CacheMetadata` postcard
 /// shape. Called by `put_buffered` (with body_size known up front),
 /// `put_tee` initial commit (body_size=None, the in-flight sentinel),

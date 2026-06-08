@@ -91,11 +91,11 @@ open class PqcURLProtocol: URLProtocol {
     // MARK: - `URLProtocol` overrides (final implementations)
 
     public override class func canInit(with request: URLRequest) -> Bool {
-        return shouldHandle(request)
+        shouldHandle(request)
     }
 
     public override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        return request
+        request
     }
 
     private var pqcTask: Task<Void, Never>?
@@ -142,14 +142,9 @@ open class PqcURLProtocol: URLProtocol {
     // MARK: - Request / response plumbing
 
     private static func buildRequest(from req: URLRequest, url: URL) throws -> HttpRequest {
-        let method: HttpMethod
-        if let raw = req.httpMethod {
-            guard let parsed = parseMethod(raw) else {
-                throw PqcError.InvalidRequest(message: "unsupported HTTP method: \(raw)")
-            }
-            method = parsed
-        } else {
-            method = .get
+        let rawMethod = req.httpMethod ?? "GET"
+        guard let method = parseMethod(rawMethod) else {
+            throw PqcError.InvalidRequest(message: "unsupported HTTP method: \(rawMethod)")
         }
 
         // Body routing matches Android: small inline `httpBody` is buffered
@@ -204,15 +199,10 @@ open class PqcURLProtocol: URLProtocol {
         )
     }
 
-    /// Emits `cacheStoragePolicy: .notAllowed` always (URLCache stays out)
-    /// and drops `Set-Cookie:` (HTTPURLResponse's [String: String] backing
-    /// corrupts comma-bearing Expires dates; Rust jar owns cookies).
-    ///
-    /// Streams the body chunk-by-chunk from `PqcResponse.readChunk()` so
-    /// large responses never materialize in app memory. Forwards each
-    /// chunk to URLProtocol via `urlProtocol(_:didLoad:)`, which itself
-    /// supports incremental delivery — matches Apple's pattern for
-    /// `URLSession.bytes(for:)`.
+    /// `Set-Cookie` is dropped because `HTTPURLResponse`'s `[String: String]`
+    /// header backing corrupts comma-bearing Expires dates — the Rust jar
+    /// owns cookies anyway. Body is streamed chunk-by-chunk so large
+    /// responses don't materialise in memory.
     private func emit(_ pqcResp: PqcResponse, originalURL: URL) async throws {
         let responseURL = URL(string: pqcResp.finalUrl()) ?? originalURL
 
@@ -234,7 +224,6 @@ open class PqcURLProtocol: URLProtocol {
         }
 
         self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        // Stream body chunks. Empty body → loop exits on first iteration.
         while let chunk = try await pqcResp.readChunk() {
             self.client?.urlProtocol(self, didLoad: Data(chunk))
         }
@@ -256,9 +245,8 @@ open class PqcURLProtocol: URLProtocol {
         }
     }
 
-    /// Map the Rust core's ALPN id to the `httpVersion` string
-    /// `HTTPURLResponse` accepts. Defaults to HTTP/1.1 on unknown values —
-    /// wrong telemetry is worse than conservative.
+    /// Maps ALPN id → `HTTPURLResponse.httpVersion`. Unknown ALPN falls
+    /// back to HTTP/1.1 (conservative is better than wrong telemetry).
     private static func httpVersionString(forAlpn alpn: String) -> String {
         switch alpn {
         case "http/0.9", "http/1.0": return "HTTP/1.0"
@@ -312,11 +300,8 @@ final class InputStreamBodyProvider: BodyProvider, @unchecked Sendable {
         closeIfOpenLocked()
     }
 
-    /// Caller must hold `lock`. Closes the stream if it was opened
-    /// and not yet closed; marks closed unconditionally so a future
-    /// nextChunk short-circuits. Single source of truth for the
-    /// close sequence — used by deinit, cancel, and nextChunk's
-    /// error/EOF branches.
+    /// Caller must hold `lock`. Idempotent: marks `closed` even if the
+    /// stream was never opened, so subsequent `nextChunk` short-circuits.
     private func closeIfOpenLocked() {
         if opened && !closed {
             stream.close()

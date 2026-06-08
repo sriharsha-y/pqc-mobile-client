@@ -40,13 +40,9 @@ echo "==> Generating Kotlin bindings (via --library mode)"
 # cross-compile above is feature-free so clap/goblin/uniffi_bindgen don't
 # bloat the mobile .so.
 #
-# CRITICAL — host dylib must NOT be stripped (mozilla/uniffi-rs#2520).
-# `uniffi-bindgen --library` reads UNIFFI_META_* symbols from .symtab, but
-# our `strip = true` (release) removes them on Linux, so bindgen silently
-# emits zero bindings and the AAR ships no Kotlin API (macOS strip keeps
-# them, hiding this). Disable strip for the host build only; the mobile
-# cargo-ndk .so above are already built (stripped) and unaffected. Must
-# also cover the `cargo run` below, else it rebuilds a stripped dylib.
+# Disable strip for the host build — uniffi-rs#2520: stripping removes the
+# .symtab UNIFFI_META_* symbols `uniffi-bindgen --library` reads, so on Linux
+# it silently emits zero bindings. Covers the `cargo run` below too.
 export CARGO_PROFILE_RELEASE_STRIP=false
 cargo build --release --features cli
 HOST_DYLIB="target/release/libpqc_client.dylib"
@@ -83,16 +79,11 @@ echo "==> Extracting rustls-platform-verifier Kotlin glue into android/libs/"
 # our AAR (self-contained, no extra repos for consumers). Locate the crate
 # via cargo metadata.
 PV_INFO=$(cargo metadata --format-version 1 \
-  | python3 -c '
-import json, sys
-m = json.load(sys.stdin)
-for p in m["packages"]:
-    if p["name"] == "rustls-platform-verifier-android":
-        print(p["manifest_path"])
-        print(p["version"])
-        sys.exit(0)
-sys.exit("rustls-platform-verifier-android not found in cargo metadata")
-')
+  | jq -r '.packages[] | select(.name=="rustls-platform-verifier-android") | "\(.manifest_path)\n\(.version)"')
+if [ -z "$PV_INFO" ]; then
+    echo "::error::rustls-platform-verifier-android not found in cargo metadata"
+    exit 1
+fi
 PV_MANIFEST=$(echo "$PV_INFO" | sed -n '1p')
 PV_VERSION=$(echo "$PV_INFO" | sed -n '2p')
 PV_DIR=$(dirname "$PV_MANIFEST")

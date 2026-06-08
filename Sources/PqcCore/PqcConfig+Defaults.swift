@@ -13,10 +13,6 @@ public extension PqcConfig {
     /// Android / OkHttp. Verified against `swift-corelibs-foundation`'s
     /// `URLSessionConfiguration.init(correctly:)`. Safe to call from any
     /// thread.
-    ///
-    /// The parameter list mirrors the 9 fields of `PqcConfig`. When a field
-    /// is added to the Rust struct, the `PqcConfig(...)` call below stops
-    /// compiling — that compile error is the upgrade signal.
     static func platformDefault(
         pinnedCertSha256: [String] = [],
         defaultTimeoutMs: UInt64? = 60_000,
@@ -28,7 +24,7 @@ public extension PqcConfig {
         cacheDir: String? = nil,
         maxCacheBytes: UInt64? = 20 * 1024 * 1024
     ) -> PqcConfig {
-        return PqcConfig(
+        PqcConfig(
             pinnedCertSha256: pinnedCertSha256,
             defaultTimeoutMs: defaultTimeoutMs,
             connectTimeoutMs: connectTimeoutMs,

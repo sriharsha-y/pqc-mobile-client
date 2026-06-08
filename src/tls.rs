@@ -21,10 +21,6 @@ use crate::pinning::{decode_pin_list, PinningVerifier};
 /// - When `pinned_cert_sha256` is non-empty, wraps the platform verifier in a
 ///   `PinningVerifier` that additionally enforces an SPKI pin from the chain.
 pub fn build_tls_config(cfg: &PqcConfig) -> Result<ClientConfig, PqcError> {
-    // Always offer the X25519MLKEM768 hybrid. This provider prepends it to the
-    // default group list, so the ClientHello carries both the hybrid and
-    // classical X25519 — servers that don't support the hybrid negotiate
-    // classical automatically, transparently to the caller.
     let provider = Arc::new(rustls_post_quantum::provider());
 
     // builder_with_provider consumes the provider, but the pinning branch
