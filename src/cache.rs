@@ -232,23 +232,29 @@ impl PqcStreamingCacheManager {
     }
 }
 
-// Our concrete `Body` type. Two variants are enough because we always
-// buffer body bytes into `Bytes` on put (mirroring upstream's
-// `StreamingManager` design — see module doc); cached reads then
-// stream via cacache::Reader.
+// Our concrete `Body` type. Three variants:
+//   - Buffered: resident Bytes carved into STREAM_CHUNK_SIZE slices.
+//     Used for mem-tier hits and the small-body cache-miss path
+//     (where the body was buffered to compute size for caching).
+//   - Cached: disk-tier hits, streaming from cacache::Reader.
+//   - Passthrough: large or non-cacheable bodies bypass cache
+//     storage entirely and stream through from the upstream body.
+//     Frame size tracks the upstream's natural frame size (typically
+//     16-64 KB from reqwest/hyper). Lets a 100 MB download with
+//     known-oversized Content-Length avoid the 100 MB buffering
+//     spike that `put` would otherwise incur — peak memory stays
+//     at one frame regardless of body size.
 //
 // pin-project'd because the Cached variant pins an AsyncRead trait
-// object.
+// object and Passthrough pins a dyn HttpBody trait object.
 pin_project! {
     #[project = PqcCachedBodyProj]
     pub enum PqcCachedBody {
-        /// Resident `Bytes` blob — memory-tier hits, `convert_body` results,
-        /// `empty_body`, and the put() return value on the cache-miss path.
-        /// `poll_frame` carves it into STREAM_CHUNK_SIZE slices so consumers
-        /// see streamed chunks even on the mem-hit / miss paths, matching
-        /// the disk-tier Cached variant's chunked delivery and the streaming
-        /// contract OkHttp `ResponseBody.source()` / URLSession.bytes(for:)
-        /// promise. Without this a 50 MiB miss yields one 50 MiB chunk.
+        /// Resident `Bytes` blob — memory-tier hits, mem-promoted put
+        /// results, and `empty_body`. `poll_frame` carves it into
+        /// STREAM_CHUNK_SIZE slices so consumers see streamed chunks
+        /// even on the mem-hit path, matching the disk-tier Cached
+        /// variant's chunked delivery.
         Buffered {
             data: Bytes,
         },
@@ -261,6 +267,14 @@ pin_project! {
             buf: BytesMut,
             done: bool,
             remaining: u64,
+        },
+        /// Passthrough — wraps the upstream `HttpBody` directly,
+        /// delegating `poll_frame` without any buffering. Used by
+        /// `put` when the response is known oversized (via
+        /// Content-Length) and by `convert_body` for the
+        /// non-cacheable path. Peak memory: one upstream frame.
+        Passthrough {
+            body: Pin<Box<dyn HttpBody<Data = Bytes, Error = StreamingError> + Send>>,
         },
     }
 }
@@ -281,6 +295,13 @@ impl HttpBody for PqcCachedBody {
                 let n = STREAM_CHUNK_SIZE.min(data.len());
                 let chunk = data.split_to(n);
                 Poll::Ready(Some(Ok(Frame::data(chunk))))
+            }
+            PqcCachedBodyProj::Passthrough { body } => {
+                // `body: &mut Pin<Box<dyn HttpBody<...>>>`. Pin<Box<T>>
+                // is Unpin (heap-pinned), so we can take &mut through
+                // pin_project's normal projection and call .as_mut()
+                // to peel into Pin<&mut dyn HttpBody<...>>.
+                body.as_mut().poll_frame(cx)
             }
             PqcCachedBodyProj::Cached {
                 mut reader,
@@ -349,6 +370,81 @@ impl PqcStreamingCacheManager {
         }
         b
     }
+
+    /// Pre-decide whether a response of known length would fail to fit
+    /// in EVERY available tier. When true, `put` skips buffering and
+    /// streams the upstream body through directly. Returns false when
+    /// the length is unknown (chunked encoding) — we can't pre-decide
+    /// without the body, so fall through to the existing buffered path
+    /// (which the `tee-stream middleware` follow-up will fix).
+    fn known_too_big_for_all_tiers(&self, content_length: Option<u64>) -> bool {
+        let Some(len) = content_length else { return false };
+        let disk_rejects = self
+            .disk
+            .as_ref()
+            .map(|d| len > self.per_entry_disk || len > d.max_bytes)
+            .unwrap_or(true);
+        let mem_rejects = self
+            .mem
+            .as_ref()
+            .map(|_| len > self.per_entry_mem)
+            .unwrap_or(true);
+        disk_rejects && mem_rejects
+    }
+}
+
+/// Parse the response's Content-Length header into a u64, if present
+/// and well-formed. Used by `put` / `convert_body` to pre-decide on
+/// the streaming-vs-buffered path before consuming the body.
+fn content_length_of(headers: &http::HeaderMap) -> Option<u64> {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Build a `Response<PqcCachedBody>` whose body is a `Passthrough`
+/// wrapping the upstream body type-erased. The upstream body's
+/// `Data`/`Error` are mapped to `Bytes`/`StreamingError` via
+/// `BodyExt::map_frame` + `map_err`; data conversion uses
+/// `Buf::copy_to_bytes` so each upstream frame allocates one Bytes —
+/// memory bound is one frame (typically 16-64 KB), not the whole body.
+///
+/// Used by `put` when Content-Length is known-oversized for all tiers,
+/// and by `convert_body` on every non-cacheable response.
+fn passthrough_response<B>(
+    parts: http::response::Parts,
+    body: B,
+) -> HttpCacheResult<Response<PqcCachedBody>>
+where
+    B: HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<StreamingError>,
+{
+    use bytes::Buf;
+    use http_body_util::BodyExt;
+    let mapped = body
+        .map_err(Into::<StreamingError>::into)
+        .map_frame(|frame| {
+            frame.map_data(|mut d| {
+                let len = d.remaining();
+                d.copy_to_bytes(len)
+            })
+        });
+
+    let mut b = Response::builder()
+        .status(parts.status)
+        .version(parts.version);
+    for (name, value) in parts.headers.iter() {
+        b = b.header(name, value);
+    }
+    let mut resp = b
+        .body(PqcCachedBody::Passthrough {
+            body: Box::pin(mapped),
+        })
+        .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
+    *resp.extensions_mut() = parts.extensions;
+    Ok(resp)
 }
 
 impl StreamingCacheManager for PqcStreamingCacheManager {
@@ -435,10 +531,22 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         self.ensure_seeded().await;
         let (parts, body) = response.into_parts();
 
-        // Collect body to bytes. This matches upstream's StreamingManager
-        // design — body is buffered during put then streamed during get.
-        // The per_entry_disk cap (5% of total, ~1 MiB by default)
-        // bounds memory pressure here.
+        // Content-Length pre-check: if the upstream advertises a length
+        // that won't fit in ANY tier we have, skip the buffering put
+        // path entirely and stream through. This is the critical
+        // memory-pressure escape valve — without it, a 100 MiB
+        // download with cache enabled would materialize 100 MiB in
+        // memory only to be rejected by the per-entry size gate. With
+        // it, peak memory stays at one upstream frame. The
+        // chunked-encoding (unknown-length) case still buffers; that's
+        // the follow-up tee-stream middleware work.
+        if self.known_too_big_for_all_tiers(content_length_of(&parts.headers)) {
+            return passthrough_response(parts, body);
+        }
+
+        // Collect body to bytes. The body is small enough to fit (per
+        // the Content-Length check above when known, or accepted as
+        // best-effort when chunked).
         use http_body_util::BodyExt;
         let body_bytes = body
             .collect()
@@ -527,24 +635,13 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         B::Data: Send,
         B::Error: Into<StreamingError>,
     {
+        // Non-cacheable response by definition (the middleware uses
+        // this when CacheMode says skip). Pass through without
+        // buffering — there's no caching benefit to materializing,
+        // and a `Cache-Control: no-store` 4K-camera video upload
+        // would otherwise eat hundreds of MiB.
         let (parts, body) = response.into_parts();
-        use http_body_util::BodyExt;
-        let body_bytes = body
-            .collect()
-            .await
-            .map_err(|e| StreamingError::new(e.into()))?
-            .to_bytes();
-        let mut b = Response::builder()
-            .status(parts.status)
-            .version(parts.version);
-        for (name, value) in parts.headers.iter() {
-            b = b.header(name, value);
-        }
-        let mut resp = b
-            .body(PqcCachedBody::Buffered { data: body_bytes })
-            .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
-        *resp.extensions_mut() = parts.extensions;
-        Ok(resp)
+        passthrough_response(parts, body)
     }
 
     async fn delete(&self, cache_key: &str) -> HttpCacheResult<()> {
@@ -1021,6 +1118,114 @@ mod tests {
         // The oldest (k1) is the one evicted; k2 survives.
         assert!(m.get("k1").await.unwrap().is_none(), "k1 should be gone");
         assert!(m.get("k2").await.unwrap().is_some(), "k2 should remain");
+    }
+
+    /// Regression for the Content-Length pre-check bypass. A response
+    /// whose advertised Content-Length is too big for every tier MUST
+    /// NOT get buffered — it returns a Passthrough body and never
+    /// touches the cacache index or the mem tier.
+    #[tokio::test]
+    async fn oversized_content_length_bypasses_cache() {
+        use http::header::CONTENT_LENGTH;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = tmp_config(dir.path());
+        cfg.max_cache_bytes = Some(1024 * 1024); // 1 MiB → per_entry_disk = 50 KiB
+        cfg.max_memory_cache_bytes = Some(64 * 1024); // → per_entry_mem ≈ 3.2 KiB
+        let m = PqcStreamingCacheManager::new(&cfg).unwrap();
+
+        // Construct a Response<Full<Bytes>> claiming a 5 MiB body
+        // via Content-Length. The actual body Full is small (10 bytes)
+        // but the header is what triggers the pre-check.
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"0123456789"));
+        let response = http::Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, "5242880")
+            .body(body)
+            .unwrap();
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let policy = CachePolicy::new_options(
+            &req.into_parts().0,
+            &response.into_parts().0,
+            std::time::SystemTime::UNIX_EPOCH,
+            http_cache_semantics::CacheOptions::default(),
+        );
+        // Rebuild Response (we consumed the original via into_parts).
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"0123456789"));
+        let response = http::Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, "5242880")
+            .body(body)
+            .unwrap();
+
+        let url = "http://example.test/".parse::<http_cache::Url>().unwrap();
+        let result = m
+            .put("oversized".to_string(), response, policy, url, None)
+            .await
+            .expect("put should succeed via passthrough");
+
+        // The body we got back is Passthrough (not Buffered) — assert
+        // by checking that nothing was written to cacache.
+        let disk = m.disk.as_ref().unwrap();
+        let entry = cacache::metadata(&disk.path, "oversized")
+            .await
+            .ok()
+            .flatten();
+        assert!(
+            entry.is_none(),
+            "oversized response with known Content-Length should not be cached"
+        );
+        // Counter should be untouched.
+        assert_eq!(m.size().await, 0);
+        // Mem tier should also be empty.
+        assert!(m.read_mem("oversized").await.is_none());
+        // Body should still be drainable (it's Passthrough).
+        use http_body_util::BodyExt;
+        let drained = result.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&drained[..], b"0123456789");
+    }
+
+    /// Small-body path is unchanged: a body that fits in per_entry_disk
+    /// still goes through the buffered+caching codepath. Guards that
+    /// the bypass didn't accidentally skip the common case.
+    #[tokio::test]
+    async fn small_content_length_still_caches() {
+        use http::header::CONTENT_LENGTH;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = tmp_config(dir.path()); // 1 MiB / 64 KiB defaults
+        let m = PqcStreamingCacheManager::new(&cfg).unwrap();
+
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"hi"));
+        let response = http::Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, "2")
+            .body(body)
+            .unwrap();
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let policy = CachePolicy::new_options(
+            &req.into_parts().0,
+            &response.into_parts().0,
+            std::time::SystemTime::UNIX_EPOCH,
+            http_cache_semantics::CacheOptions::default(),
+        );
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"hi"));
+        let response = http::Response::builder()
+            .status(200)
+            .header(CONTENT_LENGTH, "2")
+            .body(body)
+            .unwrap();
+        let url = "http://example.test/".parse::<http_cache::Url>().unwrap();
+        let _ = m
+            .put("small".to_string(), response, policy, url, None)
+            .await
+            .unwrap();
+
+        // Small body — disk got written.
+        let disk = m.disk.as_ref().unwrap();
+        let entry = cacache::metadata(&disk.path, "small")
+            .await
+            .unwrap()
+            .expect("small response should be cached on disk");
+        assert_eq!(entry.size, 2);
     }
 
     #[tokio::test]
