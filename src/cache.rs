@@ -84,6 +84,23 @@ const DEFAULT_MEM_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 /// against memory footprint.
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
+/// Content-Length threshold (inclusive) below which `put` skips the
+/// tee machinery and just buffers the body before writing.
+///
+/// Why 64 KiB: matches okio's 8 * Segment.SIZE (OkHttp's "small body"
+/// unit) and our existing INLINE_BODY_THRESHOLD on the upload path
+/// (PqcInterceptor.kt). Below this, a single allocation + sequential
+/// write outperforms the spawn-task + channel setup; above, the tee
+/// pattern pays for itself by capping peak memory at one frame
+/// instead of the full body.
+const INLINE_BUFFERED_THRESHOLD: u64 = 64 * 1024;
+
+/// Bounded channel depth between the tee background task and the
+/// consumer-side PqcCachedBody. 16 frames × ~64 KiB peak resident ≈
+/// 1 MiB of buffer per in-flight chunked cache miss — provides natural
+/// network-to-disk backpressure without OOM risk on mobile.
+const TEE_CHANNEL_DEPTH: usize = 16;
+
 /// Internal per-entry cap on the on-disk tier.
 fn per_entry_disk_cap(disk_total: u64) -> u64 {
     disk_total / ENTRY_CAP_DIVISOR
@@ -543,93 +560,35 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         // constructor can't (no tokio runtime on FFI threads).
         self.ensure_seeded().await;
         let (parts, body) = response.into_parts();
+        let content_len = content_length_of(&parts.headers);
 
-        // Content-Length pre-check: if the upstream advertises a length
-        // that won't fit in ANY tier we have, skip the buffering put
-        // path entirely and stream through. This is the critical
-        // memory-pressure escape valve — without it, a 100 MiB
-        // download with cache enabled would materialize 100 MiB in
-        // memory only to be rejected by the per-entry size gate. With
-        // it, peak memory stays at one upstream frame. The
-        // chunked-encoding (unknown-length) case still buffers; that's
-        // the follow-up tee-stream middleware work.
-        if self.known_too_big_for_all_tiers(content_length_of(&parts.headers)) {
+        // Path A — known too big for ALL tiers: pass through entirely.
+        // Avoids the buffering OOM spike for large known-length bodies.
+        if self.known_too_big_for_all_tiers(content_len) {
             return passthrough_response(parts, body);
         }
 
-        // Collect body to bytes. The body is small enough to fit (per
-        // the Content-Length check above when known, or accepted as
-        // best-effort when chunked).
-        use http_body_util::BodyExt;
-        let body_bytes = body
-            .collect()
-            .await
-            .map_err(|e| StreamingError::new(e.into()))?
-            .to_bytes();
-        let body_size = body_bytes.len() as u64;
-
-        // Disk tier: write iff within both the per-entry and total caps.
-        if let Some(disk) = &self.disk {
-            if body_size <= self.per_entry_disk && body_size <= disk.max_bytes {
-                // Serialize our CacheMetadata into the entry's
-                // raw_metadata (stored inline in the cacache index, no
-                // separate file). The Writer atomically commits the
-                // body blob — SHA-verified + atomic rename, dropped
-                // without commit means the tmp file is orphaned.
-                let headers: Vec<(String, Vec<u8>)> = parts
-                    .headers
-                    .iter()
-                    .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_owned()))
-                    .collect();
-                let meta = CacheMetadata {
-                    status: parts.status.as_u16(),
-                    version: version_to_u8(parts.version),
-                    headers,
-                    policy,
-                    user_metadata: metadata,
-                };
-                let meta_blob = postcard::to_allocvec(&meta)
-                    .map_err(|e| HttpCacheError::cache(format!("meta serialize: {e}")))?;
-
-                let mut writer = cacache::WriteOpts::new()
-                    .raw_metadata(meta_blob)
-                    .size(body_bytes.len())
-                    .open(&disk.path, cache_key.clone())
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("writer create: {e}")))?;
-                tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("body write: {e}")))?;
-                writer
-                    .commit()
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("commit: {e}")))?;
-
-                // Counter tracks body bytes only — raw_metadata lives in
-                // the index file, which cacache::list_sync doesn't count
-                // against the per-entry `size` field.
-                disk.bytes.fetch_add(body_size, Ordering::AcqRel);
-
-                // Best-effort eviction if over budget.
-                self.evict_if_over_budget().await;
-            }
+        // Path B — small known-length OR no disk tier: buffer.
+        //   - small known: tee overhead (channel + spawn) isn't worth it
+        //     for a <= 64 KiB JSON; one allocation + sequential write is
+        //     simpler and faster.
+        //   - no disk tier: mem-only caching requires the full body in
+        //     memory anyway, so streaming buys nothing.
+        let should_buffer = self.disk.is_none()
+            || content_len.map_or(false, |n| n <= INLINE_BUFFERED_THRESHOLD);
+        if should_buffer {
+            return self
+                .put_buffered(cache_key, parts, body, policy, metadata)
+                .await;
         }
 
-        // Memory tier: independent of the disk tier. Without this, configs
-        // with `cache_dir = None` + `max_memory_cache_bytes = Some(N)`
-        // (memory-only, e.g. the iOS docs example) silently never store
-        // anything — the mem.insert is gated on its own per-entry cap.
-        if let Some(mem) = &self.mem {
-            if body_size <= self.per_entry_mem {
-                mem.insert(cache_key.clone(), Arc::new(body_bytes.clone()))
-                    .await;
-            }
-        }
-
-        // Return the response to the caller with our Body type.
-        // It's Buffered regardless of cacheability — the caller drains
-        // it the same way; cacheable vs not is invisible at this point.
-        build_response_with_body(parts, PqcCachedBody::Buffered { data: body_bytes })
+        // Path C — large known OR unknown length (chunked encoding): tee.
+        // Bytes flow through ONCE — every chunk goes simultaneously to
+        // the consumer (via mpsc) and to cacache::Writer. Peak memory
+        // stays at one frame, never the full body. Matches OkHttp's
+        // CacheRequestBody Source/Sink tee pattern. See put_tee at the
+        // bottom of this file.
+        self.put_tee(cache_key, parts, body, policy, metadata).await
     }
 
     async fn convert_body<B>(&self, response: Response<B>) -> HttpCacheResult<Response<Self::Body>>
@@ -768,6 +727,342 @@ impl PqcStreamingCacheManager {
             total = total.saturating_sub(size);
         }
         disk.bytes.store(total, Ordering::Release);
+    }
+
+    /// Collect-then-write `put` path. Used for small known-length
+    /// responses (≤ INLINE_BUFFERED_THRESHOLD) and for the
+    /// mem-only-cache configuration (which has to materialize the body
+    /// anyway). Larger bodies go through `put_tee` instead.
+    async fn put_buffered<B>(
+        &self,
+        cache_key: String,
+        parts: http::response::Parts,
+        body: B,
+        policy: CachePolicy,
+        metadata: Option<Vec<u8>>,
+    ) -> HttpCacheResult<Response<PqcCachedBody>>
+    where
+        B: HttpBody + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<StreamingError>,
+    {
+        use http_body_util::BodyExt;
+        let body_bytes = body
+            .collect()
+            .await
+            .map_err(|e| StreamingError::new(e.into()))?
+            .to_bytes();
+        let body_size = body_bytes.len() as u64;
+
+        // Disk tier: write iff within both the per-entry and total caps.
+        if let Some(disk) = &self.disk {
+            if body_size <= self.per_entry_disk && body_size <= disk.max_bytes {
+                let meta_blob = serialize_cache_metadata(&parts, policy, metadata)?;
+                let mut writer = cacache::WriteOpts::new()
+                    .raw_metadata(meta_blob)
+                    .size(body_bytes.len())
+                    .open(&disk.path, cache_key.clone())
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("writer create: {e}")))?;
+                tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("body write: {e}")))?;
+                writer
+                    .commit()
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("commit: {e}")))?;
+                disk.bytes.fetch_add(body_size, Ordering::AcqRel);
+                self.evict_if_over_budget().await;
+            }
+        }
+
+        // Memory tier: independent of the disk tier — mem-only configs
+        // (cache_dir=None) must still cache; gated only on per_entry_mem.
+        if let Some(mem) = &self.mem {
+            if body_size <= self.per_entry_mem {
+                mem.insert(cache_key.clone(), Arc::new(body_bytes.clone()))
+                    .await;
+            }
+        }
+
+        build_response_with_body(parts, PqcCachedBody::Buffered { data: body_bytes })
+    }
+
+    /// Tee `put` path — used when Content-Length is large-known or
+    /// absent (chunked transfer-encoding). Spawns a background task
+    /// that pulls frames from the upstream body and simultaneously:
+    ///   - writes each chunk to `cacache::Writer` (disk side)
+    ///   - sends each chunk through a bounded mpsc channel to the
+    ///     consumer-side `StreamBody` (consumer side)
+    ///
+    /// Peak memory: one frame in flight (typically 16–64 KiB from
+    /// reqwest/hyper) plus the channel buffer (TEE_CHANNEL_DEPTH × frame
+    /// size, ≈ 1 MiB). Matches OkHttp's `CacheRequestBody` tee pattern.
+    ///
+    /// Failure modes (matched against OkHttp):
+    ///  - Cache write fails mid-stream → writer dropped (cacache cleans
+    ///    up tmp file), consumer continues reading. Best-effort cache.
+    ///  - Consumer drops response → channel send fails, task exits,
+    ///    writer dropped (tmp cleaned).
+    ///  - Upstream body errors → error forwarded to consumer, writer
+    ///    dropped (no cache commit).
+    ///  - Body grows past per_entry_disk → drop writer mid-stream,
+    ///    continue forwarding to consumer.
+    async fn put_tee<B>(
+        &self,
+        cache_key: String,
+        parts: http::response::Parts,
+        body: B,
+        policy: CachePolicy,
+        metadata: Option<Vec<u8>>,
+    ) -> HttpCacheResult<Response<PqcCachedBody>>
+    where
+        B: HttpBody + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<StreamingError>,
+    {
+        let disk = self
+            .disk
+            .as_ref()
+            .expect("put_tee must only be invoked when disk tier is present");
+
+        // Serialize metadata up-front so a malformed CachePolicy fails
+        // synchronously (BEFORE we hand the consumer a body that the
+        // background task can't complete). Two clones: one consumed by
+        // the WriteOpts opening the writer, one held back for the
+        // post-commit index re-insert (see commit phase in the task —
+        // cacache's commit() writes size=0 because we can't pass
+        // `.size()` to a streaming writer; we have to overwrite the
+        // index entry with the correct size once we know it).
+        let meta_blob = serialize_cache_metadata(&parts, policy, metadata)?;
+        let meta_blob_for_reinsert = meta_blob.clone();
+
+        // Snapshot of disk-tier state for the spawned task — we can't
+        // hold &self across the spawn boundary.
+        let disk_path = disk.path.clone();
+        let disk_bytes = Arc::clone(&disk.bytes);
+        let per_entry_disk = self.per_entry_disk;
+        let per_entry_mem = self.per_entry_mem;
+        let mem = self.mem.clone();
+        let manager = self.clone(); // for post-commit eviction trigger
+        let task_cache_key = cache_key.clone();
+
+        // Map B::Data → Bytes (via Buf::copy_to_bytes, one alloc per
+        // frame — typically 16-64 KiB upstream, fine on mobile) and
+        // B::Error → StreamingError BEFORE spawning. After this both
+        // are Send + 'static so the body moves into the task without
+        // pushing Send/'static bounds up into the trait `put`
+        // signature (which would force them on every caller).
+        use bytes::Buf;
+        use http_body_util::BodyExt;
+        let body_for_task = body
+            .map_err(Into::<StreamingError>::into)
+            .map_frame(|frame| {
+                frame.map_data(|mut d| {
+                    let len = d.remaining();
+                    d.copy_to_bytes(len)
+                })
+            });
+
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<Result<Frame<Bytes>, StreamingError>>(TEE_CHANNEL_DEPTH);
+
+        tokio::spawn(async move {
+            let mut writer = match cacache::WriteOpts::new()
+                .raw_metadata(meta_blob)
+                .open(&disk_path, task_cache_key.clone())
+                .await
+            {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    log::warn!("pqc cache: tee writer open failed: {e}");
+                    None
+                }
+            };
+
+            let mut body = Box::pin(body_for_task);
+            let mut total: u64 = 0;
+            // Mem-tier accumulator — bounded by per_entry_mem so chunked
+            // bodies that turn out to be small can still hit the mem
+            // tier on subsequent gets. Dropped if total grows past the
+            // cap, so the buffer never exceeds per_entry_mem.
+            let mut mem_buf: Option<BytesMut> =
+                if mem.is_some() && per_entry_mem > 0 {
+                    Some(BytesMut::with_capacity(STREAM_CHUNK_SIZE))
+                } else {
+                    None
+                };
+
+            loop {
+                let frame_opt = body.as_mut().frame().await;
+                let Some(frame_res) = frame_opt else { break };
+                let frame = match frame_res {
+                    Ok(f) => f,
+                    Err(e) => {
+                        // Upstream errored — forward to consumer, abort
+                        // cache write by dropping the writer.
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+
+                if !frame.is_data() {
+                    // Trailers / unknown frame types — forward as-is,
+                    // don't write to cache.
+                    if tx.send(Ok(frame)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+
+                let data = match frame.into_data() {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                total += data.len() as u64;
+
+                // Body grew past the disk per-entry cap — stop caching
+                // (drop the writer) but keep forwarding to consumer.
+                if writer.is_some() && total > per_entry_disk {
+                    writer = None;
+                    mem_buf = None;
+                }
+
+                // Mem accumulator tracking.
+                if let Some(buf) = mem_buf.as_mut() {
+                    if (buf.len() as u64 + data.len() as u64) > per_entry_mem {
+                        mem_buf = None;
+                    } else {
+                        buf.extend_from_slice(&data);
+                    }
+                }
+
+                // Send to consumer FIRST (low latency); the disk write
+                // below happens after the consumer has the bytes. If
+                // consumer dropped, channel send fails — abort cache
+                // too. data.clone() is a ref-bump on Bytes (O(1)).
+                let send_result = tx.send(Ok(Frame::data(data.clone()))).await;
+                if send_result.is_err() {
+                    return;
+                }
+
+                // Write to cache. On failure, abort cache write but
+                // keep forwarding to consumer (matches OkHttp's
+                // best-effort cache semantics — consumer shouldn't
+                // fail because disk filled up).
+                if let Some(w) = writer.as_mut() {
+                    if let Err(e) = tokio::io::AsyncWriteExt::write_all(w, &data).await {
+                        log::warn!("pqc cache: tee write_all failed: {e}");
+                        writer = None;
+                        mem_buf = None;
+                    }
+                }
+            }
+
+            // Upstream EOF — commit if we still have a writer.
+            if let Some(w) = writer {
+                let integrity = match w.commit().await {
+                    Ok(sri) => sri,
+                    Err(e) => {
+                        log::warn!("pqc cache: tee commit failed: {e}");
+                        return;
+                    }
+                };
+                // The commit above wrote the index entry with size=0
+                // (cacache only stores `Metadata.size` if `WriteOpts::size`
+                // was set, and for streaming bodies we don't know the
+                // total up front). Re-insert the index entry now that
+                // we know `total` — this is what makes get()'s
+                // `remaining: entry.size` deliver the full body, and
+                // what makes eviction's `cacache::list_sync` see the
+                // real on-disk footprint. Both ops are sequential
+                // atomic appends to the cacache index bucket — small
+                // observable window where the entry has size=0, but
+                // get() also reads our raw_metadata so consumers don't
+                // observe a half-written entry.
+                let reinsert_opts = cacache::WriteOpts::new()
+                    .raw_metadata(meta_blob_for_reinsert)
+                    .size(total as usize)
+                    .integrity(integrity);
+                if let Err(e) = cacache::index::insert_async(
+                    &disk_path,
+                    &task_cache_key,
+                    reinsert_opts,
+                )
+                .await
+                {
+                    log::warn!("pqc cache: tee index re-insert failed: {e}");
+                    return;
+                }
+                disk_bytes.fetch_add(total, Ordering::AcqRel);
+                if let (Some(buf), Some(mem_tier)) = (mem_buf, mem) {
+                    if total <= per_entry_mem {
+                        mem_tier
+                            .insert(task_cache_key, Arc::new(buf.freeze()))
+                            .await;
+                    }
+                }
+                // Best-effort eviction in case this commit pushed the
+                // total over budget. Held off until after commit so a
+                // racing get() during the stream doesn't miss.
+                manager.evict_if_over_budget().await;
+            }
+        });
+
+        // Return a response whose body streams from the channel. The
+        // ReceiverFrameStream wraps the Receiver; StreamBody adapts it
+        // to http_body::Body; Passthrough delegates poll_frame to it.
+        let receiver_stream = ReceiverFrameStream { rx };
+        let stream_body = http_body_util::StreamBody::new(receiver_stream);
+        build_response_with_body(
+            parts,
+            PqcCachedBody::Passthrough {
+                body: Box::pin(stream_body),
+            },
+        )
+    }
+}
+
+/// Serialize the cache metadata head (status/headers/policy/user_meta)
+/// to postcard bytes. Used by both put_buffered and put_tee so the
+/// on-disk layout stays a single source of truth.
+fn serialize_cache_metadata(
+    parts: &http::response::Parts,
+    policy: CachePolicy,
+    user_metadata: Option<Vec<u8>>,
+) -> HttpCacheResult<Vec<u8>> {
+    let headers: Vec<(String, Vec<u8>)> = parts
+        .headers
+        .iter()
+        .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_owned()))
+        .collect();
+    let meta = CacheMetadata {
+        status: parts.status.as_u16(),
+        version: version_to_u8(parts.version),
+        headers,
+        policy,
+        user_metadata,
+    };
+    let blob = postcard::to_allocvec(&meta)
+        .map_err(|e| HttpCacheError::cache(format!("meta serialize: {e}")))?;
+    Ok(blob)
+}
+
+/// Adapts a tokio mpsc `Receiver<Result<Frame<Bytes>, StreamingError>>`
+/// to the `Stream` shape `http_body_util::StreamBody` expects. Just a
+/// thin pass-through over `Receiver::poll_recv` — used only by put_tee.
+struct ReceiverFrameStream {
+    rx: tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, StreamingError>>,
+}
+
+impl futures_core::Stream for ReceiverFrameStream {
+    type Item = Result<Frame<Bytes>, StreamingError>;
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
     }
 }
 
@@ -1241,5 +1536,202 @@ mod tests {
         // Zero divides cleanly to zero (no panic).
         assert_eq!(per_entry_disk_cap(0), 0);
         assert_eq!(per_entry_mem_cap(0), 0);
+    }
+
+    // ---- Tee-path regression tests (put_tee, chunked encoding) ----
+
+    /// Build a streaming response body of N frames of `chunk_size` each
+    /// with byte pattern `fill`. No Content-Length header → routes
+    /// through put_tee.
+    fn streaming_response(
+        n_frames: usize,
+        chunk_size: usize,
+        fill: u8,
+    ) -> http::Response<
+        http_body_util::StreamBody<
+            futures_util::stream::Iter<
+                std::vec::IntoIter<Result<Frame<Bytes>, std::io::Error>>,
+            >,
+        >,
+    > {
+        let frames: Vec<Result<Frame<Bytes>, std::io::Error>> = (0..n_frames)
+            .map(|_| Ok(Frame::data(Bytes::from(vec![fill; chunk_size]))))
+            .collect();
+        let stream = futures_util::stream::iter(frames);
+        let body = http_body_util::StreamBody::new(stream);
+        http::Response::builder().status(200).body(body).unwrap()
+    }
+
+    fn policy_for(response: &http::Response<impl Sized>) -> CachePolicy {
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let (req_parts, _) = req.into_parts();
+        // Build a fresh response_parts from status/headers so we don't
+        // consume the test's response.
+        let mut resp_parts = http::Response::new(()).into_parts().0;
+        resp_parts.status = response.status();
+        for (k, v) in response.headers().iter() {
+            resp_parts.headers.insert(k, v.clone());
+        }
+        CachePolicy::new_options(
+            &req_parts,
+            &resp_parts,
+            std::time::SystemTime::UNIX_EPOCH,
+            http_cache_semantics::CacheOptions::default(),
+        )
+    }
+
+    /// Tee path: chunked response (no Content-Length, > 64 KiB) caches
+    /// on disk AND delivers all bytes to the consumer.
+    #[tokio::test]
+    async fn tee_chunked_response_caches_and_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = tmp_config(dir.path());
+        // 4 MiB disk → per_entry_disk ≈ 200 KiB, room for our 160 KiB body.
+        cfg.max_cache_bytes = Some(4 * 1024 * 1024);
+        let m = PqcStreamingCacheManager::new(&cfg).unwrap();
+        // 5 frames × 32 KiB = 160 KiB; no Content-Length, so the
+        // dispatcher routes to put_tee.
+        let n_frames = 5;
+        let chunk_size = 32 * 1024;
+        let response = streaming_response(n_frames, chunk_size, 0xaa);
+        let policy = policy_for(&response);
+        let url = "http://example.test/big"
+            .parse::<http_cache::Url>()
+            .unwrap();
+
+        let result = m
+            .put("big".to_string(), response, policy, url, None)
+            .await
+            .expect("tee put should succeed");
+
+        // Drain the consumer-side body.
+        use http_body_util::BodyExt;
+        let drained = result.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(drained.len(), n_frames * chunk_size);
+        assert!(drained.iter().all(|&b| b == 0xaa));
+
+        // The background task may finish writing slightly after put()
+        // returns. Wait for the commit to land before asserting disk
+        // state — the channel-close happens on the upstream EOF, but
+        // the commit is the very last thing the task does.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(Some(_)) = cacache::metadata(dir.path(), "big").await {
+                break;
+            }
+        }
+        let entry = cacache::metadata(dir.path(), "big")
+            .await
+            .unwrap()
+            .expect("tee put should have committed");
+        assert_eq!(entry.size as usize, n_frames * chunk_size);
+
+        // Subsequent get() returns the cached body.
+        let (resp, _policy) = m.get("big").await.unwrap().unwrap();
+        let cached = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(cached.len(), n_frames * chunk_size);
+    }
+
+    /// Tee path: dropping the response before draining aborts the
+    /// background task; nothing gets committed to cacache.
+    #[tokio::test]
+    async fn tee_aborts_when_consumer_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let response = streaming_response(20, 32 * 1024, 0xcc); // 640 KiB
+        let policy = policy_for(&response);
+        let url = "http://example.test/drop".parse::<http_cache::Url>().unwrap();
+        let result = m
+            .put("drop".to_string(), response, policy, url, None)
+            .await
+            .expect("tee put should succeed (handshake)");
+        // Drop immediately — consumer never drains.
+        drop(result);
+
+        // Give the task time to notice the channel close + abort.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // No commit happened — entry should not be in cacache.
+        let entry = cacache::metadata(dir.path(), "drop").await.unwrap();
+        assert!(
+            entry.is_none(),
+            "consumer-drop should abort cache write, but entry persists: {:?}",
+            entry
+        );
+    }
+
+    /// Tee path: upstream body error mid-stream propagates to consumer
+    /// and aborts the cache write.
+    #[tokio::test]
+    async fn tee_upstream_error_propagates_and_no_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let frames: Vec<Result<Frame<Bytes>, std::io::Error>> = vec![
+            Ok(Frame::data(Bytes::from(vec![0xee; 32 * 1024]))),
+            Ok(Frame::data(Bytes::from(vec![0xee; 32 * 1024]))),
+            Err(std::io::Error::other("upstream broke")),
+        ];
+        let body = http_body_util::StreamBody::new(futures_util::stream::iter(frames));
+        let response = http::Response::builder().status(200).body(body).unwrap();
+        let policy = policy_for(&response);
+        let url = "http://example.test/err".parse::<http_cache::Url>().unwrap();
+        let result = m
+            .put("err".to_string(), response, policy, url, None)
+            .await
+            .expect("tee put returns immediately (background task surfaces the error)");
+
+        // Drain. We expect to see partial bytes followed by an error.
+        use http_body_util::BodyExt;
+        let collected = result.into_body().collect().await;
+        assert!(
+            collected.is_err(),
+            "consumer should see the upstream error, got Ok"
+        );
+
+        // Wait for the background task to clean up.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let entry = cacache::metadata(dir.path(), "err").await.unwrap();
+        assert!(entry.is_none(), "errored stream should not be cached");
+    }
+
+    /// Tee path: a chunked response that turns out small enough still
+    /// gets promoted to the mem tier (the per_entry_mem accumulator).
+    #[tokio::test]
+    async fn tee_promotes_small_chunked_to_mem() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = tmp_config(dir.path());
+        // tmp_config sets max_memory_cache_bytes = Some(64 KiB), so
+        // per_entry_mem ≈ 3.2 KiB. Bump it up so our 2-KiB-frame body
+        // fits.
+        cfg.max_memory_cache_bytes = Some(1024 * 1024); // 1 MiB → per_entry_mem = 50 KiB
+        let m = PqcStreamingCacheManager::new(&cfg).unwrap();
+        // 3 frames × 8 KiB = 24 KiB total, under per_entry_mem.
+        let response = streaming_response(3, 8 * 1024, 0x77);
+        let policy = policy_for(&response);
+        let url = "http://example.test/small-chunked"
+            .parse::<http_cache::Url>()
+            .unwrap();
+        let result = m
+            .put("small-chunked".to_string(), response, policy, url, None)
+            .await
+            .unwrap();
+        // Drain to drive the tee task to EOF.
+        use http_body_util::BodyExt;
+        let _ = result.into_body().collect().await.unwrap();
+
+        // Wait for commit + mem insert.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if m.read_mem("small-chunked").await.is_some() {
+                break;
+            }
+        }
+        let from_mem = m.read_mem("small-chunked").await;
+        assert!(
+            from_mem.is_some(),
+            "small chunked body should be promoted to mem tier after tee commit"
+        );
+        assert_eq!(from_mem.unwrap().len(), 3 * 8 * 1024);
     }
 }
