@@ -59,4 +59,29 @@ Pod::Spec.new do |s|
   # re-export the XCFramework's `pqcFFI` module, so `import PqcCore` compiles
   # but links with `Undefined symbol: _$s6pqcFFI...`.
   s.static_framework = true
+
+  # Make the Swift Compatibility Header (`PqcCore-Swift.h`) findable from
+  # Objective-C / Objective-C++ consumers via `#import "PqcCore-Swift.h"`
+  # (quote form, no modules). CocoaPods synthesises this header from the
+  # `@objc public` Swift API surface in `PqcURLProtocol.swift` etc., but
+  # places it at `$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header/`
+  # which is NOT in the consumer's default HEADER_SEARCH_PATHS.
+  #
+  # Why this matters: React Native AppDelegate is `.mm` (Objective-C++).
+  # `@import PqcCore;` works only with `-fcxx-modules` in OTHER_CPLUSPLUSFLAGS,
+  # which RN does not enable by default. The Pod's own synthesised modulemap
+  # declares `module PqcCore.Swift { requires objc }` — the `requires objc`
+  # clause explicitly blocks `@import` from ObjC++. And the framework-style
+  # `#import <PqcCore/PqcCore-Swift.h>` doesn't resolve in non-`use_frameworks!`
+  # mode because there's no `PqcCore.framework` bundle, only flat artifacts.
+  #
+  # `user_target_xcconfig` adds the path to the CONSUMER's HEADER_SEARCH_PATHS
+  # (not the Pod's own), so subclassing `PqcURLProtocol` in a Swift bridge
+  # class and calling it from `AppDelegate.mm` works out of the box —
+  # consumers do NOT need to touch their own xcconfig or pbxproj.
+  #
+  # See `docs/ios.md §6` for the consumer pattern.
+  s.user_target_xcconfig = {
+    'HEADER_SEARCH_PATHS' => '"$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header"',
+  }
 end

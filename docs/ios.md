@@ -296,9 +296,18 @@ If your RN template uses the Objective-C++ AppDelegate (`.mm`) instead of Swift,
 ```objc++
 // AppDelegate.mm
 
-// 1) Framework module FIRST — declares PqcURLProtocol (the superclass that
-//    your <AppName>-Swift.h is about to reference for your bridge subclass).
-@import PqcCore;
+// 1) PqcCore's Swift Compatibility Header FIRST — declares
+//    PqcURLProtocol (the superclass that <AppName>-Swift.h is about
+//    to reference for your bridge subclass).
+//
+//    Quote-form `#import "PqcCore-Swift.h"` is deliberate: `.mm` is
+//    Objective-C++, and `@import PqcCore;` would require
+//    `-fcxx-modules` in OTHER_CPLUSPLUSFLAGS — a build setting React
+//    Native does not enable. The PqcCore podspec adds the Swift
+//    Compatibility Header path to HEADER_SEARCH_PATHS via
+//    `user_target_xcconfig`, so this import resolves with no consumer
+//    xcconfig or pbxproj changes.
+#import "PqcCore-Swift.h"
 
 // 2) App's auto-generated Swift header AFTER — exposes AppPqcURLProtocol.
 //    Replace "MyApp" with your actual product module name.
@@ -332,7 +341,7 @@ public class AppPqcURLProtocol: PqcURLProtocol {
 
 **Why `registerIfNeededInto:` (with the `Into:` suffix)?** The Swift method is `registerIfNeeded(into:)`; the framework exports it via `@objc(registerIfNeededInto:)` so ObjC++ sees it as `+ registerIfNeededInto:`. Same for `register(into:)` → `+ registerInto:`.
 
-> **Available since 0.8.1.** Earlier versions did not annotate the static helpers with `@objc`; if you're on 0.8.0, either upgrade or add a thin Swift `@objc` wrapper on your subclass.
+> **Available since 0.8.1.** Earlier versions did not annotate the static helpers with `@objc`; if you're on 0.8.0, either upgrade or add a thin Swift `@objc` wrapper on your subclass. The podspec's `user_target_xcconfig` (which puts `PqcCore-Swift.h` on the consumer's HEADER_SEARCH_PATHS) is also 0.8.1+.
 
 ### Direct use of `PqcHttpClient` from Objective-C++
 
