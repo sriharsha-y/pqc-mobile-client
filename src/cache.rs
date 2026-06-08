@@ -114,9 +114,20 @@ fn per_entry_mem_cap(mem_total: u64) -> u64 {
 }
 
 /// Postcard-serialized cache record, stored in the cacache entry's
-/// `raw_metadata`. On-disk format is private to this module. Body size
-/// is NOT stored here — cacache's own `Metadata.size` is the
-/// authoritative body length, returned alongside this struct.
+/// `raw_metadata`. On-disk format is private to this module.
+///
+/// `body_size` is the authoritative body length for read paths.
+/// `None` is a sentinel meaning "tee write in progress" — written by
+/// `put_tee`'s initial commit (which doesn't yet know the body size),
+/// overwritten with `Some(total)` by the post-commit index reinsert
+/// once the upstream EOFs. `get` treats `None` as a cache miss so a
+/// concurrent fetch during the (microsecond) commit→reinsert window
+/// falls through to the network instead of returning an empty body.
+/// Also acts as a permanent-broken marker if the reinsert fails:
+/// future gets keep missing and fetch fresh.
+///
+/// `put_buffered` always sets `Some(len)` since the size is known
+/// up front (no race window).
 #[derive(Serialize, Deserialize)]
 struct CacheMetadata {
     status: u16,
@@ -127,6 +138,10 @@ struct CacheMetadata {
     policy: CachePolicy,
     #[serde(default)]
     user_metadata: Option<Vec<u8>>,
+    /// Body size in bytes when known, `None` during a tee in-flight
+    /// commit. See struct doc above.
+    #[serde(default)]
+    body_size: Option<u64>,
 }
 
 fn version_to_u8(v: Version) -> u8 {
@@ -516,18 +531,35 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             }
         };
 
+        // Race-window / broken-entry guard: `put_tee` writes the
+        // initial index entry with `body_size: None` (since it doesn't
+        // know the size until upstream EOFs), then re-inserts the
+        // index with `body_size: Some(total)` post-commit. Between
+        // those two appends, a concurrent get would otherwise read
+        // `entry.size = 0` and return a zero-byte body. Treat
+        // `body_size: None` as a cache miss so the consumer falls
+        // through to a network fetch — and so the same applies
+        // permanently if the reinsert ever fails (rare disk EIO).
+        let body_size = match meta.body_size {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
         // Build the body. Memory tier first — if hit, the entire body is
         // already resident; no disk syscall needed.
         let body = if let Some(b) = self.read_mem(cache_key).await {
             PqcCachedBody::Buffered { data: b }
         } else {
             // Open a streaming reader by the same key the writer used.
+            // `remaining` uses `body_size` from raw_metadata (authoritative)
+            // instead of `entry.size` (which may be 0 in the tee race
+            // window — see body_size guard above).
             match cacache::Reader::open(&disk.path, cache_key).await {
                 Ok(reader) => PqcCachedBody::Cached {
                     reader: Box::pin(reader),
                     buf: BytesMut::with_capacity(STREAM_CHUNK_SIZE),
                     done: false,
-                    remaining: entry.size as u64,
+                    remaining: body_size,
                 },
                 Err(_) => {
                     // Index entry exists but content blob doesn't (rare;
@@ -757,7 +789,11 @@ impl PqcStreamingCacheManager {
         // Disk tier: write iff within both the per-entry and total caps.
         if let Some(disk) = &self.disk {
             if body_size <= self.per_entry_disk && body_size <= disk.max_bytes {
-                let meta_blob = serialize_cache_metadata(&parts, policy, metadata)?;
+                // Body size is known up-front for the buffered path, so
+                // raw_metadata gets `body_size: Some(len)` directly — no
+                // race window like put_tee.
+                let meta_blob =
+                    serialize_cache_metadata(&parts, policy, metadata, Some(body_size))?;
                 let mut writer = cacache::WriteOpts::new()
                     .raw_metadata(meta_blob)
                     .size(body_bytes.len())
@@ -826,16 +862,25 @@ impl PqcStreamingCacheManager {
             .as_ref()
             .expect("put_tee must only be invoked when disk tier is present");
 
-        // Serialize metadata up-front so a malformed CachePolicy fails
-        // synchronously (BEFORE we hand the consumer a body that the
-        // background task can't complete). Two clones: one consumed by
-        // the WriteOpts opening the writer, one held back for the
-        // post-commit index re-insert (see commit phase in the task —
-        // cacache's commit() writes size=0 because we can't pass
-        // `.size()` to a streaming writer; we have to overwrite the
-        // index entry with the correct size once we know it).
-        let meta_blob = serialize_cache_metadata(&parts, policy, metadata)?;
-        let meta_blob_for_reinsert = meta_blob.clone();
+        // Serialize the initial metadata blob with `body_size: None` —
+        // the sentinel for "tee write in progress". A concurrent get()
+        // sees this and treats the entry as a miss (falls through to
+        // network) rather than reading an empty body. Once the upstream
+        // EOFs and `total` is known, the post-commit index re-insert
+        // overwrites raw_metadata with `body_size: Some(total)`. If
+        // that reinsert ever fails, the entry stays at `None` forever
+        // → gets keep missing → consumer refetches. No empty-body
+        // failure mode. Validates synchronously so a malformed
+        // CachePolicy fails BEFORE we hand the consumer a body the
+        // background task can't complete. Headers/policy/metadata are
+        // cloned (cheap — Vec<u8> + HashMap + Vec<u8>) so the task can
+        // re-serialize with body_size=Some(total) on commit.
+        let meta_blob = serialize_cache_metadata(&parts, policy.clone(), metadata.clone(), None)?;
+        let task_parts_headers = parts.headers.clone();
+        let task_status = parts.status;
+        let task_version = parts.version;
+        let task_policy = policy.clone();
+        let task_metadata = metadata.clone();
 
         // Snapshot of disk-tier state for the spawned task — we can't
         // hold &self across the spawn boundary.
@@ -970,19 +1015,35 @@ impl PqcStreamingCacheManager {
                     }
                 };
                 // The commit above wrote the index entry with size=0
-                // (cacache only stores `Metadata.size` if `WriteOpts::size`
-                // was set, and for streaming bodies we don't know the
-                // total up front). Re-insert the index entry now that
-                // we know `total` — this is what makes get()'s
-                // `remaining: entry.size` deliver the full body, and
-                // what makes eviction's `cacache::list_sync` see the
-                // real on-disk footprint. Both ops are sequential
-                // atomic appends to the cacache index bucket — small
-                // observable window where the entry has size=0, but
-                // get() also reads our raw_metadata so consumers don't
-                // observe a half-written entry.
+                // AND raw_metadata's body_size = None (the in-flight
+                // sentinel). Now that `total` is known, re-serialize
+                // raw_metadata with `body_size: Some(total)` and
+                // reinsert with the correct cacache `size` — this is
+                // what makes get() deliver the full body (read off
+                // body_size, not entry.size — see the body_size guard
+                // in get()) and what makes eviction's list_sync see
+                // the real on-disk footprint.
+                let headers_for_meta: Vec<(String, Vec<u8>)> = task_parts_headers
+                    .iter()
+                    .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_owned()))
+                    .collect();
+                let final_meta = CacheMetadata {
+                    status: task_status.as_u16(),
+                    version: version_to_u8(task_version),
+                    headers: headers_for_meta,
+                    policy: task_policy,
+                    user_metadata: task_metadata,
+                    body_size: Some(total),
+                };
+                let final_meta_blob = match postcard::to_allocvec(&final_meta) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("pqc cache: tee final meta serialize failed: {e}");
+                        return;
+                    }
+                };
                 let reinsert_opts = cacache::WriteOpts::new()
-                    .raw_metadata(meta_blob_for_reinsert)
+                    .raw_metadata(final_meta_blob)
                     .size(total as usize)
                     .integrity(integrity);
                 if let Err(e) = cacache::index::insert_async(
@@ -1031,6 +1092,7 @@ fn serialize_cache_metadata(
     parts: &http::response::Parts,
     policy: CachePolicy,
     user_metadata: Option<Vec<u8>>,
+    body_size: Option<u64>,
 ) -> HttpCacheResult<Vec<u8>> {
     let headers: Vec<(String, Vec<u8>)> = parts
         .headers
@@ -1043,6 +1105,7 @@ fn serialize_cache_metadata(
         headers,
         policy,
         user_metadata,
+        body_size,
     };
     let blob = postcard::to_allocvec(&meta)
         .map_err(|e| HttpCacheError::cache(format!("meta serialize: {e}")))?;
@@ -1200,6 +1263,7 @@ mod tests {
             headers: vec![],
             policy,
             user_metadata: None,
+            body_size: Some(body.len() as u64),
         };
         let blob = postcard::to_allocvec(&meta).unwrap();
 
@@ -1693,6 +1757,61 @@ mod tests {
 
         let entry = cacache::metadata(dir.path(), "err").await.unwrap();
         assert!(entry.is_none(), "errored stream should not be cached");
+    }
+
+    /// Regression for the put_tee commit/reinsert race window. Write
+    /// an entry directly (bypassing put_tee) with `body_size: None`
+    /// to simulate the in-flight state. get() must treat it as a miss
+    /// — without this, get would set `remaining: entry.size = 0` and
+    /// return a successful response with an empty body to concurrent
+    /// readers during the (microsecond) window between writer.commit()
+    /// and the size-fixing index reinsert.
+    #[tokio::test]
+    async fn get_treats_body_size_none_as_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let disk = m.disk.as_ref().unwrap();
+
+        // Hand-write an entry with body_size = None — the same state
+        // the cacache index has between writer.commit() and the
+        // post-commit reinsert in put_tee.
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let resp = http::Response::builder().status(200).body(()).unwrap();
+        let policy = CachePolicy::new_options(
+            &req.into_parts().0,
+            &resp.into_parts().0,
+            now,
+            http_cache_semantics::CacheOptions::default(),
+        );
+        let meta = CacheMetadata {
+            status: 200,
+            version: 11,
+            headers: vec![],
+            policy,
+            user_metadata: None,
+            body_size: None, // in-flight sentinel
+        };
+        let blob = postcard::to_allocvec(&meta).unwrap();
+        let body = b"actual body bytes here";
+        let mut writer = cacache::WriteOpts::new()
+            .raw_metadata(blob)
+            // Mirror put_tee's initial commit: no .size() hint.
+            .open(&disk.path, "in-flight")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, body)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
+
+        // get() must return None — not a successful response with an
+        // empty body — even though the entry is "present" in cacache.
+        let hit = m.get("in-flight").await.unwrap();
+        assert!(
+            hit.is_none(),
+            "get must return None for entries with body_size=None (race-window sentinel)"
+        );
     }
 
     /// Tee path: a chunked response that turns out small enough still
