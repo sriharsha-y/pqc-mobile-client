@@ -282,18 +282,41 @@ final class InputStreamBodyProvider: BodyProvider {
     private let stream: InputStream
     private var opened = false
     private var closed = false
+    private let lock = NSLock()
 
     init(stream: InputStream) {
         self.stream = stream
     }
 
     deinit {
+        // Safety net in case cancel() isn't called (e.g. an old build
+        // of the Rust client). Holds the lock to make sure no
+        // concurrent nextChunk is mid-read on the InputStream.
+        lock.lock()
+        defer { lock.unlock() }
         if opened && !closed {
             stream.close()
+            closed = true
         }
     }
 
+    func cancel() {
+        // Idempotent — Rust may call multiple times. Synchronously
+        // closes the InputStream so a file-backed body releases its
+        // file descriptor immediately on upload abort (don't wait for
+        // the Rust Arc<dyn BodyProvider> to drop, which could be
+        // delayed by buffered chunks in flight).
+        lock.lock()
+        defer { lock.unlock() }
+        if opened && !closed {
+            stream.close()
+        }
+        closed = true
+    }
+
     func nextChunk() throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
         if closed { return nil }
         if !opened {
             stream.open()

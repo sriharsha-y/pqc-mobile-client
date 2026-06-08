@@ -829,6 +829,28 @@ fn body_provider_stream(provider: Arc<dyn BodyProvider>) -> BodyProviderStream {
     }
 }
 
+impl Drop for BodyProviderStream {
+    /// Signal the foreign-side `BodyProvider` to release any resources
+    /// it's holding (file descriptors, writer threads, okio.Pipe
+    /// buffers). Triggers when:
+    ///   - The reqwest upload completes normally → reqwest drops the
+    ///     wrapped Body → we drop here.
+    ///   - The request errors before consuming all chunks (TLS
+    ///     handshake failure, semaphore unavailable, malformed URL).
+    ///   - The caller drops the PqcResponse mid-upload.
+    ///
+    /// Without this, the Android `OkHttpBodyProviderAdapter` writer
+    /// thread would block forever on `sink.write()` once the 256 KiB
+    /// pipe buffer filled, leaking one daemon thread + the caller's
+    /// RequestBody (often a FileInputStream) per failed upload —
+    /// observable on a retry loop against a failing host.
+    /// `cancel()` is required to be idempotent and synchronous; we
+    /// don't await anything.
+    fn drop(&mut self) {
+        self.provider.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Guard the pinning marker substring against drift (a rename would

@@ -308,42 +308,55 @@ private class OkHttpBodyProviderAdapter(private val body: RequestBody) : BodyPro
 
     // Captured if the writer thread's RequestBody.writeTo() throws —
     // surfaced by nextChunk after the already-buffered bytes drain.
-    // Without this, a mid-upload failure (file-source disk error,
-    // encryption body cipher failure, etc.) would silently close the
-    // pipe and Rust/reqwest would treat the truncated payload as a
-    // successful upload — the server might accept corrupt data and
-    // return 200, violating OkHttp's contract that upload errors
-    // must surface as IOException to the caller.
     @Volatile
     private var writeError: Throwable? = null
 
-    init {
-        // One-shot writer: pumps the RequestBody into the pipe sink and
-        // closes it on EOF or error. The Throwable is captured for the
-        // reader thread to throw via PqcException — see nextChunk.
-        val sink = pipe.sink.buffer()
-        WRITER_POOL.execute {
-            try {
-                body.writeTo(sink)
-                sink.flush()
-            } catch (t: Throwable) {
-                writeError = t
-            } finally {
-                try { sink.close() } catch (_: Throwable) {}
+    // Lazy-start the writer thread so an upload aborted BEFORE any
+    // nextChunk call (TLS handshake error, semaphore error, malformed
+    // URL) never spawns a thread that would block on sink.write() with
+    // the pipe full. AtomicBoolean for thread safety on the first call.
+    private val writerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // Set when cancel() runs to make a future nextChunk a no-op even
+    // if a stale concurrent call sneaks in.
+    @Volatile
+    private var cancelled = false
+
+    private fun ensureWriterStarted() {
+        if (writerStarted.compareAndSet(false, true)) {
+            // First nextChunk — kick off the writer. RequestBody.writeTo
+            // is a PUSH interface; we adapt it to BodyProvider's PULL
+            // contract via okio.Pipe. The 256 KiB pipe buffer provides
+            // backpressure: when full, sink.write() blocks until
+            // source.read() drains it. If cancel() runs while the
+            // writer is parked, pipe.source.close() unblocks it
+            // (sink.write throws IOException → caught → finally closes).
+            val sink = pipe.sink.buffer()
+            WRITER_POOL.execute {
+                try {
+                    body.writeTo(sink)
+                    sink.flush()
+                } catch (t: Throwable) {
+                    writeError = t
+                } finally {
+                    try { sink.close() } catch (_: Throwable) {}
+                }
             }
         }
     }
 
     override fun nextChunk(): ByteArray? {
+        if (cancelled) return null
+        ensureWriterStarted()
         readBuf.clear()
         val n = try {
             source.read(readBuf, CHUNK_SIZE.toLong())
         } catch (_: Throwable) {
-            // Pipe closed mid-read (writer errored or completed). Fall
-            // through to the writeError check below — if the writer
-            // captured a real error, surface it as PqcException so the
-            // Rust client aborts the request; otherwise it's a normal
-            // close and the next read would return -1 anyway.
+            // Pipe closed mid-read (writer errored or completed, or
+            // cancel() closed our source). Fall through to the
+            // writeError check below — if the writer captured a real
+            // error, surface it as PqcException; otherwise it's a
+            // normal close and the next read would return -1 anyway.
             -1L
         }
         if (n <= 0L) {
@@ -359,6 +372,20 @@ private class OkHttpBodyProviderAdapter(private val body: RequestBody) : BodyPro
             return null
         }
         return readBuf.readByteArray()
+    }
+
+    override fun cancel() {
+        // Idempotent — Rust may call multiple times across the Drop
+        // chain. Close the pipe's source side, which causes any
+        // parked sink.write() on the writer thread to fail with an
+        // IOException. The writer's try/catch swallows it, finally
+        // closes the sink, and the thread exits. Without this, a
+        // streaming upload aborted before completion would leave the
+        // writer thread blocked forever on a full pipe — daemon
+        // thread + 256 KiB buffer + caller's RequestBody (often a
+        // FileInputStream) leaked per failed upload.
+        cancelled = true
+        try { source.close() } catch (_: Throwable) {}
     }
 
     companion object {

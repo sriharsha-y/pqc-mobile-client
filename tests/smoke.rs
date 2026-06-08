@@ -280,6 +280,11 @@ impl BodyProvider for VecBodyProvider {
     fn next_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
         Ok(self.chunks.lock().expect("provider lock poisoned").pop_front())
     }
+    fn cancel(&self) {
+        // Drop any remaining chunks so a re-poll after cancel sees EOF.
+        // The in-memory provider has nothing else to release.
+        self.chunks.lock().expect("provider lock poisoned").clear();
+    }
 }
 
 /// Streaming POST: send a body via `BodyProvider` (chunks pulled by

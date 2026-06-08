@@ -48,6 +48,23 @@ pub trait BodyProvider: Send + Sync {
     /// vecs are also treated as EOF (lets callers signal end-of-stream
     /// without keeping an Option flag).
     fn next_chunk(&self) -> Result<Option<Vec<u8>>, PqcError>;
+
+    /// Abort the upload and release foreign-side resources. Called by
+    /// the Rust client when the request errors before all chunks have
+    /// been pulled, when the caller drops the in-flight `PqcResponse`,
+    /// or when the request completes normally.
+    ///
+    /// Implementations must:
+    ///   - Be idempotent (may be called multiple times).
+    ///   - Be safe to call from any thread, including before
+    ///     `next_chunk` has been invoked.
+    ///   - Synchronously release I/O handles (e.g. close an
+    ///     `okio.Pipe.source` to unblock the writer thread, close an
+    ///     `InputStream`) — without this signal, a writer thread that
+    ///     fills its pipe buffer would park forever on `sink.write()`
+    ///     and the file descriptor / thread / buffer would leak per
+    ///     aborted upload until process exit.
+    fn cancel(&self);
 }
 
 #[derive(Clone, uniffi::Record)]
