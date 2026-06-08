@@ -30,10 +30,25 @@ let package = Package(
         // UniFFI-generated Swift binding under Sources/PqcCore, refreshed by
         // `publish-swiftpm` each release. Its `import pqcFFI` matches the
         // xcframework modulemap and the binaryTarget name above.
+        //
+        // linkerSettings: the vendored static archive references symbols
+        // from Apple frameworks that don't auto-link (no LC_LINKER_OPTION
+        // on .a files). Security: rustls-platform-verifier's SecTrust*
+        // / SecKey* calls. SystemConfiguration: hickory-resolver's
+        // transitive `system-configuration` Rust crate, which references
+        // SCDynamicStore* / SCNetworkReachability* / kSCNetworkInterfaceType*
+        // (added when the streaming refactor introduced the opt-in
+        // Hickory DNS path). Both linkedFramework decls propagate to
+        // consumer targets so `import PqcCore` is enough — no manual
+        // "Link Binary With Libraries" tweak on the consumer side.
         .target(
             name: "PqcCore",
             dependencies: ["pqcFFI"],
-            path: "Sources/PqcCore"
+            path: "Sources/PqcCore",
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("SystemConfiguration"),
+            ]
         )
     ]
 )

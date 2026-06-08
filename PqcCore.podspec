@@ -34,13 +34,20 @@ Pod::Spec.new do |s|
   s.vendored_frameworks = 'PqcCore.xcframework'
   s.preserve_paths    = 'PqcCore.xcframework'
 
-  # The vendored static archive references Security.framework symbols
-  # (rustls-platform-verifier's SecTrust* / SecKey* calls). Static .a files
-  # don't carry LC_LINKER_OPTION like dylibs, so without this the consumer
-  # fails to link with "Undefined symbol: _kSecKeyAlgorithm...".
-  # `nm -u` on both slices confirms the only Apple-framework symbols are
-  # _kSec* (Security) and _CCR* (CommonCrypto, auto-linked via libSystem).
-  s.frameworks = 'Security'
+  # The vendored static archive references symbols from two Apple
+  # frameworks. Static .a files don't carry LC_LINKER_OPTION like
+  # dylibs, so each must be declared here — otherwise the consumer's
+  # app fails at link time with "Undefined symbol: …".
+  #
+  # - Security: rustls-platform-verifier's SecTrust* / SecKey* calls
+  #   (_kSecKeyAlgorithm*).
+  # - SystemConfiguration: hickory-resolver (added when the streaming
+  #   refactor introduced the opt-in Hickory DNS path) transitively
+  #   pulls in the `system-configuration` Rust crate, which references
+  #   SCDynamicStoreCreate, SCNetworkReachabilityCreateWithName,
+  #   kSCNetworkInterfaceType* constants, etc. These ship in
+  #   SystemConfiguration.framework, which Apple does NOT auto-link.
+  s.frameworks = 'Security', 'SystemConfiguration'
 
   # aws-lc-sys's C++ runtime support symbols come from libc++ on Apple
   # platforms. s.libraries is the idiomatic, link-phase-correct form.

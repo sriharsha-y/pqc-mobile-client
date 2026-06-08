@@ -92,6 +92,23 @@ Behind the scenes: SPM resolves the version you pin to the matching `vX.Y.Z` git
 
 `Package.swift` at the repo root is auto-maintained by the release workflow's `publish-swiftpm` job, which rewrites it with the latest version + URL + checksum on every release and re-points the release tag to the resulting commit.
 
+### Apple framework dependencies
+
+The vendored static archive references symbols from two Apple frameworks. The release artifacts declare these on the consumer's behalf — you should **not** need to add them manually on either packaging path — but the underlying reason is worth knowing in case you switch to a manual XCFramework drop or hit a stripped-down build configuration:
+
+| Framework | Why it's needed |
+|---|---|
+| `Security` | `rustls-platform-verifier`'s `SecTrust*` / `SecKey*` calls (`kSecKeyAlgorithm*` constants). |
+| `SystemConfiguration` | Pulled in transitively by `hickory-resolver` (added with the opt-in Hickory DNS path) via the `system-configuration` Rust crate; references `SCDynamicStore*` / `SCNetworkReachability*` / `kSCNetworkInterfaceType*`. |
+
+How each path declares them:
+
+- **CocoaPods**: `PqcCore.podspec`'s `s.frameworks = 'Security', 'SystemConfiguration'`. Picked up automatically by `pod install`.
+- **Swift Package Manager**: `Package.swift`'s `PqcCore` target declares `linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]`. Propagates to consumer targets via the standard SPM mechanism.
+- **Manual XCFramework drop / tarball**: add both frameworks under your app target's **Build Settings → Other Linker Flags** (`-framework Security -framework SystemConfiguration`) or **Build Phases → Link Binary With Libraries**. Without this you'll see `Undefined symbol: _kSCNetworkInterfaceTypeWWAN` or similar at link time.
+
+Static archives don't carry `LC_LINKER_OPTION` like dylibs do, which is why each consumer-side framework must be explicitly declared.
+
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 
 `URLProtocol` is the iOS hook. `PqcCore` ships an `open` base class `PqcURLProtocol` that contains the request/response plumbing and a `PqcHttpClient` whose defaults match `URLSessionConfiguration.default` (60 s request timeout, 10 s connect, cookies on, RFC 9111 cache on with a 20 MiB cap in `.cachesDirectory/pqc-http`, 20-redirect limit). Subclass it to customise just the knobs you care about; the rest of the app keeps using `URLSession` unchanged.
