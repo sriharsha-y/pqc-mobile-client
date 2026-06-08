@@ -403,6 +403,27 @@ fn content_length_of(headers: &http::HeaderMap) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
+/// Rebuild a `Response<PqcCachedBody>` from the upstream response's
+/// parts + an already-shaped `PqcCachedBody`. Single source of truth
+/// for status/version/headers/extensions copying so a future Parts
+/// field (trailers, h2 settings) only needs to be plumbed once.
+fn build_response_with_body(
+    parts: http::response::Parts,
+    body: PqcCachedBody,
+) -> HttpCacheResult<Response<PqcCachedBody>> {
+    let mut b = Response::builder()
+        .status(parts.status)
+        .version(parts.version);
+    for (name, value) in parts.headers.iter() {
+        b = b.header(name, value);
+    }
+    let mut resp = b
+        .body(body)
+        .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
+    *resp.extensions_mut() = parts.extensions;
+    Ok(resp)
+}
+
 /// Build a `Response<PqcCachedBody>` whose body is a `Passthrough`
 /// wrapping the upstream body type-erased. The upstream body's
 /// `Data`/`Error` are mapped to `Bytes`/`StreamingError` via
@@ -431,20 +452,12 @@ where
                 d.copy_to_bytes(len)
             })
         });
-
-    let mut b = Response::builder()
-        .status(parts.status)
-        .version(parts.version);
-    for (name, value) in parts.headers.iter() {
-        b = b.header(name, value);
-    }
-    let mut resp = b
-        .body(PqcCachedBody::Passthrough {
+    build_response_with_body(
+        parts,
+        PqcCachedBody::Passthrough {
             body: Box::pin(mapped),
-        })
-        .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
-    *resp.extensions_mut() = parts.extensions;
-    Ok(resp)
+        },
+    )
 }
 
 impl StreamingCacheManager for PqcStreamingCacheManager {
@@ -616,17 +629,7 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         // Return the response to the caller with our Body type.
         // It's Buffered regardless of cacheability — the caller drains
         // it the same way; cacheable vs not is invisible at this point.
-        let mut b = Response::builder()
-            .status(parts.status)
-            .version(parts.version);
-        for (name, value) in parts.headers.iter() {
-            b = b.header(name, value);
-        }
-        let mut resp = b
-            .body(PqcCachedBody::Buffered { data: body_bytes })
-            .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
-        *resp.extensions_mut() = parts.extensions;
-        Ok(resp)
+        build_response_with_body(parts, PqcCachedBody::Buffered { data: body_bytes })
     }
 
     async fn convert_body<B>(&self, response: Response<B>) -> HttpCacheResult<Response<Self::Body>>

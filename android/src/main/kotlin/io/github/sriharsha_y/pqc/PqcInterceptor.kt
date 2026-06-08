@@ -306,17 +306,28 @@ private class OkHttpBodyProviderAdapter(private val body: RequestBody) : BodyPro
     private val source = pipe.source.buffer()
     private val readBuf = Buffer()
 
+    // Captured if the writer thread's RequestBody.writeTo() throws —
+    // surfaced by nextChunk after the already-buffered bytes drain.
+    // Without this, a mid-upload failure (file-source disk error,
+    // encryption body cipher failure, etc.) would silently close the
+    // pipe and Rust/reqwest would treat the truncated payload as a
+    // successful upload — the server might accept corrupt data and
+    // return 200, violating OkHttp's contract that upload errors
+    // must surface as IOException to the caller.
+    @Volatile
+    private var writeError: Throwable? = null
+
     init {
         // One-shot writer: pumps the RequestBody into the pipe sink and
-        // closes it on EOF. Errors propagate via pipe.fold/cancel; the
-        // source-side read then surfaces them to Rust as an EOF.
+        // closes it on EOF or error. The Throwable is captured for the
+        // reader thread to throw via PqcException — see nextChunk.
         val sink = pipe.sink.buffer()
         WRITER_POOL.execute {
             try {
                 body.writeTo(sink)
                 sink.flush()
             } catch (t: Throwable) {
-                // Close the pipe to signal EOF/error to the reader.
+                writeError = t
             } finally {
                 try { sink.close() } catch (_: Throwable) {}
             }
@@ -325,13 +336,29 @@ private class OkHttpBodyProviderAdapter(private val body: RequestBody) : BodyPro
 
     override fun nextChunk(): ByteArray? {
         readBuf.clear()
-        return try {
-            val n = source.read(readBuf, CHUNK_SIZE.toLong())
-            if (n <= 0L) null else readBuf.readByteArray()
+        val n = try {
+            source.read(readBuf, CHUNK_SIZE.toLong())
         } catch (_: Throwable) {
-            // Pipe closed mid-read (writer errored or completed).
-            null
+            // Pipe closed mid-read (writer errored or completed). Fall
+            // through to the writeError check below — if the writer
+            // captured a real error, surface it as PqcException so the
+            // Rust client aborts the request; otherwise it's a normal
+            // close and the next read would return -1 anyway.
+            -1L
         }
+        if (n <= 0L) {
+            // EOF. If the writer thread captured an error, throw now
+            // so BodyProvider.next_chunk → BodyProviderStream sees Err
+            // and reqwest aborts the upload instead of finishing with
+            // a truncated body.
+            writeError?.let { t ->
+                throw PqcException.InvalidRequest(
+                    "upload body source failed: ${t.message ?: t.javaClass.simpleName}"
+                )
+            }
+            return null
+        }
+        return readBuf.readByteArray()
     }
 
     companion object {

@@ -239,7 +239,7 @@ let task = Task {
 }
 
 // Some time later, the user backs out of the view:
-await pqcResp.cancel()      // releases the underlying connection
+resp.cancel()               // sync — releases the underlying connection
 task.cancel()               // cancels the Swift Task (Rust side already aborted)
 ```
 
