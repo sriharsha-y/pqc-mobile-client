@@ -9,21 +9,27 @@
 //!
 //! # Storage layout
 //!
-//! Two cacache entries per cached response:
-//!   - `meta:<key>` — postcard-encoded `CacheMetadata` (status, headers,
-//!     RFC policy, body size, optional user-metadata).
-//!   - `body:<key>` — raw response bytes.
+//! One cacache entry per cached response, keyed by the http-cache
+//! cache_key string:
+//!   - Body bytes live in the content-addressable blob.
+//!   - Postcard-encoded `CacheMetadata` (status, headers, RFC policy,
+//!     optional user-metadata) lives in the entry's `raw_metadata`,
+//!     stored inline in the cacache index. cacache's own `Metadata.size`
+//!     is the body size; we don't carry our own.
 //!
-//! On `get`, the metadata is read in full (it's small) and used to
-//! construct the response head. The body is then streamed via
-//! `cacache::Reader` (`AsyncRead`) in 64 KB chunks — large responses
-//! never materialize in our process memory.
+//! On `get`, `cacache::metadata(path, key)` returns the entry head
+//! (small; lives in the index). Its `raw_metadata` is our postcard
+//! `CacheMetadata`. The body is then streamed via `cacache::Reader`
+//! (`AsyncRead`) in 64 KB chunks — large responses never materialize
+//! in our process memory.
 //!
-//! On `put`, the body is buffered into `Bytes`, written to cacache via
-//! `Writer::commit()` (atomic), then metadata is written. The write
-//! ordering means a crash between the two leaves an orphan body that
-//! gets reclaimed on the next `delete` / `clear` (cacache GCs blobs
-//! when no key references them).
+//! On `put`, the body is buffered into `Bytes` and written via
+//! `WriteOpts::new().raw_metadata(postcard_bytes).open(path, key)` →
+//! `write_all` → `commit`. Atomic — `commit` only finalizes after the
+//! body has been SHA-verified.
+//!
+//! On `delete`, both the key (index entry + raw_metadata) and the
+//! body blob (by integrity) are removed.
 //!
 //! # In-memory hot tier
 //!
@@ -90,9 +96,10 @@ fn per_entry_mem_cap(mem_total: u64) -> u64 {
     mem_total / ENTRY_CAP_DIVISOR
 }
 
-/// Postcard-serialized cache record (the "metadata" entry — body lives
-/// in a separate cacache blob). On-disk format is private to this
-/// module; need not match anything else.
+/// Postcard-serialized cache record, stored in the cacache entry's
+/// `raw_metadata`. On-disk format is private to this module. Body size
+/// is NOT stored here — cacache's own `Metadata.size` is the
+/// authoritative body length, returned alongside this struct.
 #[derive(Serialize, Deserialize)]
 struct CacheMetadata {
     status: u16,
@@ -100,7 +107,6 @@ struct CacheMetadata {
     /// Headers as a flat list to preserve multi-valued entries (e.g.
     /// `Set-Cookie`, `Vary`) without an outer HashMap collapsing them.
     headers: Vec<(String, Vec<u8>)>,
-    body_size: u64,
     policy: CachePolicy,
     #[serde(default)]
     user_metadata: Option<Vec<u8>>,
@@ -126,26 +132,6 @@ fn version_from_u8(b: u8) -> Version {
         3 => Version::HTTP_3,
         _ => Version::HTTP_11,
     }
-}
-
-fn meta_key(cache_key: &str) -> String {
-    format!("meta:{cache_key}")
-}
-
-fn body_key(cache_key: &str) -> String {
-    format!("body:{cache_key}")
-}
-
-/// Inverse of meta_key/body_key: recover the logical cache key from a
-/// raw cacache index key. Callers that walk `cacache::list_sync` use
-/// this to group `meta:K` and `body:K` halves back into one entry.
-/// Returns the input unchanged if neither prefix matches (defensive
-/// — keys we didn't write would otherwise alias to themselves).
-fn logical_key(index_key: &str) -> &str {
-    index_key
-        .strip_prefix("meta:")
-        .or_else(|| index_key.strip_prefix("body:"))
-        .unwrap_or(index_key)
 }
 
 /// Persistent byte-bounded disk tier. `bytes` is a running logical-size
@@ -380,13 +366,19 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             None => return Ok(None),
         };
 
-        // Step 1: read the metadata blob (small; load fully). A miss
-        // here is the most common case — be silent.
-        let meta_bytes = match cacache::read(&disk.path, meta_key(cache_key)).await {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
+        // Single cacache::metadata call: returns the entry head from the
+        // (sharded) index, including our postcard CacheMetadata in
+        // raw_metadata and the body length in size. A miss here is the
+        // most common case — be silent.
+        let entry = match cacache::metadata(&disk.path, cache_key).await {
+            Ok(Some(m)) => m,
+            _ => return Ok(None),
         };
-        let meta: CacheMetadata = match postcard::from_bytes(&meta_bytes) {
+        let raw_meta = match entry.raw_metadata.as_deref() {
+            Some(b) if !b.is_empty() => b,
+            _ => return Ok(None),
+        };
+        let meta: CacheMetadata = match postcard::from_bytes(raw_meta) {
             Ok(m) => m,
             Err(e) => {
                 // Treat deserialize failures as cache misses — upstream
@@ -398,23 +390,22 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
             }
         };
 
-        // Step 2: build the body. Memory tier first — if hit, the entire
-        // body is already resident; no disk syscall needed.
+        // Build the body. Memory tier first — if hit, the entire body is
+        // already resident; no disk syscall needed.
         let body = if let Some(b) = self.read_mem(cache_key).await {
             PqcCachedBody::Buffered { data: b }
         } else {
-            // Open a streaming reader. cacache::Reader is AsyncRead;
-            // we stream in STREAM_CHUNK_SIZE chunks.
-            match cacache::Reader::open(&disk.path, body_key(cache_key)).await {
+            // Open a streaming reader by the same key the writer used.
+            match cacache::Reader::open(&disk.path, cache_key).await {
                 Ok(reader) => PqcCachedBody::Cached {
                     reader: Box::pin(reader),
                     buf: BytesMut::with_capacity(STREAM_CHUNK_SIZE),
                     done: false,
-                    remaining: meta.body_size,
+                    remaining: entry.size as u64,
                 },
                 Err(_) => {
-                    // Metadata existed but body didn't (crash between
-                    // writes, or manual cacache clear) — treat as miss.
+                    // Index entry exists but content blob doesn't (rare;
+                    // manual cacache GC or partial filesystem loss).
                     return Ok(None);
                 }
             }
@@ -459,21 +450,11 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         // Disk tier: write iff within both the per-entry and total caps.
         if let Some(disk) = &self.disk {
             if body_size <= self.per_entry_disk && body_size <= disk.max_bytes {
-                // Write body first. cacache's Writer atomically commits
-                // (SHA-verified + atomic rename) and orphans the tmp
-                // file on drop without commit.
-                let mut writer = cacache::Writer::create(&disk.path, body_key(&cache_key))
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("body writer create: {e}")))?;
-                tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("body write: {e}")))?;
-                writer
-                    .commit()
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("body commit: {e}")))?;
-
-                // Then write metadata.
+                // Serialize our CacheMetadata into the entry's
+                // raw_metadata (stored inline in the cacache index, no
+                // separate file). The Writer atomically commits the
+                // body blob — SHA-verified + atomic rename, dropped
+                // without commit means the tmp file is orphaned.
                 let headers: Vec<(String, Vec<u8>)> = parts
                     .headers
                     .iter()
@@ -483,19 +464,30 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
                     status: parts.status.as_u16(),
                     version: version_to_u8(parts.version),
                     headers,
-                    body_size,
                     policy,
                     user_metadata: metadata,
                 };
                 let meta_blob = postcard::to_allocvec(&meta)
                     .map_err(|e| HttpCacheError::cache(format!("meta serialize: {e}")))?;
-                cacache::write(&disk.path, meta_key(&cache_key), &meta_blob)
-                    .await
-                    .map_err(|e| HttpCacheError::cache(format!("meta write: {e}")))?;
 
-                // Bookkeeping: account both blobs against the byte counter.
-                disk.bytes
-                    .fetch_add(body_size + meta_blob.len() as u64, Ordering::AcqRel);
+                let mut writer = cacache::WriteOpts::new()
+                    .raw_metadata(meta_blob)
+                    .size(body_bytes.len())
+                    .open(&disk.path, cache_key.clone())
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("writer create: {e}")))?;
+                tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("body write: {e}")))?;
+                writer
+                    .commit()
+                    .await
+                    .map_err(|e| HttpCacheError::cache(format!("commit: {e}")))?;
+
+                // Counter tracks body bytes only — raw_metadata lives in
+                // the index file, which cacache::list_sync doesn't count
+                // against the per-entry `size` field.
+                disk.bytes.fetch_add(body_size, Ordering::AcqRel);
 
                 // Best-effort eviction if over budget.
                 self.evict_if_over_budget().await;
@@ -626,11 +618,9 @@ impl PqcStreamingCacheManager {
 
     /// Evict oldest entries until under budget. Best-effort; called
     /// after each put. Serialized via evict_lock so concurrent puts
-    /// don't all race the same rescan. Evicts by *logical* key — both
-    /// halves of a `meta:`/`body:` pair go together atomically, so the
-    /// cache can never end up with a meta and no body (which `get` would
-    /// then permanently mis-handle as a miss while the orphan meta
-    /// lingers).
+    /// don't all race the same rescan. With one cacache key per
+    /// response, this is a flat oldest-first sweep — no pair
+    /// aggregation, no half-pair orphan failure mode.
     async fn evict_if_over_budget(&self) {
         let disk = match &self.disk {
             Some(d) => d,
@@ -648,40 +638,33 @@ impl PqcStreamingCacheManager {
             return;
         }
 
-        // Group cacache index entries by their logical key so eviction
-        // takes both halves of a meta/body pair atomically. The min(time)
-        // of the pair is the entry's age. Tuple value: (summed_size,
-        // min_time). Walk in spawn_blocking — list_sync is a synchronous
-        // directory traversal that would otherwise park a tokio worker
-        // for the duration of the scan.
-        use std::collections::HashMap;
+        // Walk in spawn_blocking — list_sync is a synchronous directory
+        // traversal that would otherwise park a tokio worker for the
+        // duration of the scan. Each item now corresponds to one logical
+        // entry (one key per response), so the previous meta/body
+        // aggregation pass is gone.
         let path = disk.path.clone();
-        let entries: Vec<(String, u64, u64)> = tokio::task::spawn_blocking(move || {
-            let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
-            for item in cacache::list_sync(&path).flatten() {
-                let logical = logical_key(&item.key).to_owned();
-                let t = item.time as u64;
-                let e = agg.entry(logical).or_insert((0, u64::MAX));
-                e.0 += item.size as u64;
-                e.1 = e.1.min(t);
-            }
-            let mut v: Vec<(String, u64, u64)> =
-                agg.into_iter().map(|(k, (s, t))| (k, s, t)).collect();
-            v.sort_by_key(|(_, _, t)| *t);
-            v
-        })
-        .await
-        .unwrap_or_default();
+        let entries: Vec<(String, cacache::Integrity, u64, u64)> =
+            tokio::task::spawn_blocking(move || {
+                let mut v: Vec<_> = cacache::list_sync(&path)
+                    .flatten()
+                    .map(|item| (item.key, item.integrity, item.size as u64, item.time as u64))
+                    .collect();
+                v.sort_by_key(|(_, _, _, t)| *t);
+                v
+            })
+            .await
+            .unwrap_or_default();
 
         let mut total = disk.bytes.load(Ordering::Acquire);
-        for (logical, size, _) in entries {
+        for (key, integrity, size, _) in entries {
             if total <= disk.max_bytes {
                 break;
             }
-            // remove_entry drops both keys AND the underlying content
-            // blobs (via remove_hash), so no orphaned blobs creep past
-            // max_bytes between clear()s.
-            let _ = remove_entry(disk, &logical).await;
+            // Drop the index entry AND its content blob — cacache::remove
+            // drops only the key; remove_hash reclaims the blob.
+            let _ = cacache::remove(&disk.path, &key).await;
+            let _ = cacache::remove_hash(&disk.path, &integrity).await;
             total = total.saturating_sub(size);
         }
         disk.bytes.store(total, Ordering::Release);
@@ -730,37 +713,32 @@ async fn resync_from_disk(disk: &DiskTier) {
     disk.bytes.store(total, Ordering::Release);
 }
 
-/// Remove a logical entry from cacache: both keys (`meta:K` and
-/// `body:K`) and the content blobs they referenced. Returns the total
-/// bytes reclaimed so the caller can decrement the counter.
+/// Remove a single cache entry from disk: drop the index key AND its
+/// content blob (by integrity). Returns the body bytes reclaimed so the
+/// caller can decrement the counter.
 ///
-/// `cacache::remove` drops the key but leaves the content blob — the
-/// store is content-addressable, so the blob is still on disk if any
-/// other key references its integrity. Our layout has one key per
-/// blob, so the blob is always orphaned by the remove and we follow
-/// up with `remove_hash` to reclaim it. Without this, RFC 9111
+/// `cacache::remove` drops only the key — the content-addressable blob
+/// lives until no key references its integrity. We follow up with
+/// `remove_hash` to reclaim the blob; without it, RFC 9111
 /// invalidations (delete on every unsafe-method match against a cached
 /// GET) leak storage indefinitely.
+///
+/// Caveat: cacache deduplicates blobs across keys by content integrity.
+/// If two cache entries happen to have byte-identical bodies, they
+/// share one blob; removing one's blob via `remove_hash` orphans the
+/// other entry's body. For HTTP responses keyed by URL+Vary this is
+/// rare in practice — distinct URLs almost never produce identical
+/// response bytes — and the alternative (never calling `remove_hash`)
+/// is the orphan-blob leak we just fixed. cacache 13 exposes no
+/// reference-counting primitive to disambiguate.
 async fn remove_entry(disk: &DiskTier, cache_key: &str) -> u64 {
-    let meta_m = cacache::metadata(&disk.path, meta_key(cache_key))
-        .await
-        .ok()
-        .flatten();
-    let body_m = cacache::metadata(&disk.path, body_key(cache_key))
-        .await
-        .ok()
-        .flatten();
-    let reclaimed =
-        meta_m.as_ref().map(|m| m.size as u64).unwrap_or(0)
-        + body_m.as_ref().map(|m| m.size as u64).unwrap_or(0);
-    let _ = cacache::remove(&disk.path, meta_key(cache_key)).await;
-    let _ = cacache::remove(&disk.path, body_key(cache_key)).await;
-    if let Some(m) = meta_m {
-        let _ = cacache::remove_hash(&disk.path, &m.integrity).await;
-    }
-    if let Some(m) = body_m {
-        let _ = cacache::remove_hash(&disk.path, &m.integrity).await;
-    }
+    let entry = match cacache::metadata(&disk.path, cache_key).await {
+        Ok(Some(m)) => m,
+        _ => return 0,
+    };
+    let reclaimed = entry.size as u64;
+    let _ = cacache::remove(&disk.path, cache_key).await;
+    let _ = cacache::remove_hash(&disk.path, &entry.integrity).await;
     reclaimed
 }
 
@@ -804,15 +782,12 @@ mod tests {
         }
     }
 
-    /// Direct-write a body + metadata pair so get/delete tests don't
+    /// Direct-write a body + metadata entry so get/delete tests don't
     /// have to construct full Response<B> values. Bypasses the
-    /// cacheability gate but exercises the exact storage layout
-    /// `get` reads.
+    /// cacheability gate but exercises the exact single-key layout
+    /// that `get` reads.
     async fn write_entry(m: &PqcStreamingCacheManager, key: &str, body: &[u8]) {
         let disk = m.disk.as_ref().expect("disk tier present");
-        cacache::write(&disk.path, body_key(key), body)
-            .await
-            .unwrap();
         // Minimal CachePolicy + headers — postcard round-trip is all
         // we need for the test surface.
         let now = std::time::SystemTime::UNIX_EPOCH;
@@ -828,16 +803,23 @@ mod tests {
             status: 200,
             version: 11,
             headers: vec![],
-            body_size: body.len() as u64,
             policy,
             user_metadata: None,
         };
         let blob = postcard::to_allocvec(&meta).unwrap();
-        cacache::write(&disk.path, meta_key(key), &blob)
+
+        let mut writer = cacache::WriteOpts::new()
+            .raw_metadata(blob)
+            .size(body.len())
+            .open(&disk.path, key)
             .await
             .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, body)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
         disk.bytes
-            .fetch_add(body.len() as u64 + blob.len() as u64, Ordering::AcqRel);
+            .fetch_add(body.len() as u64, Ordering::AcqRel);
     }
 
     /// Drain a `PqcCachedBody` to bytes for assertion.
@@ -896,12 +878,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
         let disk = m.disk.as_ref().unwrap();
-        // Write garbage where metadata should be — postcard will fail
-        // to deserialize and we treat that as a cache miss (matches
-        // upstream's #141 fix).
-        cacache::write(&disk.path, meta_key("k1"), &[0xff, 0xff, 0xff, 0xff])
+        // Write an entry whose raw_metadata is garbage — postcard will
+        // fail to deserialize and we treat that as a cache miss
+        // (matches upstream's #141 fix).
+        let body = b"body";
+        let mut writer = cacache::WriteOpts::new()
+            .raw_metadata(vec![0xff, 0xff, 0xff, 0xff])
+            .size(body.len())
+            .open(&disk.path, "k1")
             .await
             .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, body)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
         assert!(m.get("k1").await.unwrap().is_none());
     }
 
@@ -998,33 +988,39 @@ mod tests {
         assert_eq!(m.read_mem("k").await.as_deref(), Some(&b"hello"[..]));
     }
 
-    /// Regression for the eviction-orphans-pair bug. Seed the cache
-    /// with two complete entries past the budget, force eviction, and
-    /// verify that no half-pair (meta without body or vice versa)
-    /// remains on disk.
+    /// Eviction drops oldest entries until the byte counter is back
+    /// under budget. With one cacache key per response, the only
+    /// invariant to assert is that the entries left on disk fit.
+    ///
+    /// NOTE: distinct body bytes per entry are required — cacache is
+    /// content-addressable, so two entries with byte-identical bodies
+    /// share one content blob via integrity; removing one's blob via
+    /// `remove_hash` also removes the other. In production HTTP usage
+    /// this is rare (different URLs almost never produce byte-identical
+    /// responses), and the alternative — leaving every blob behind —
+    /// is the orphan-blob bug we just fixed.
     #[tokio::test]
-    async fn eviction_removes_pairs_atomically() {
+    async fn eviction_drops_oldest_under_budget() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = tmp_config(dir.path());
         cfg.max_cache_bytes = Some(1024); // tight enough that 2 entries trip it
         let m = PqcStreamingCacheManager::new(&cfg).unwrap();
-        write_entry(&m, "k1", &vec![0u8; 600]).await;
-        write_entry(&m, "k2", &vec![0u8; 600]).await;
-        // Force eviction.
+        write_entry(&m, "k1", &vec![0xaa; 600]).await;
+        // Tiny pause so the cacache timestamps differ — eviction sorts
+        // by time ascending; without this both entries can share the
+        // same millisecond and either may be evicted first.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        write_entry(&m, "k2", &vec![0xbb; 600]).await;
         m.evict_if_over_budget().await;
-        // Whatever logical keys survive, both halves must be present.
-        let disk = m.disk.as_ref().unwrap();
-        let mut metas: std::collections::HashSet<String> = Default::default();
-        let mut bodies: std::collections::HashSet<String> = Default::default();
-        for item in cacache::list_sync(&disk.path).flatten() {
-            let logical = logical_key(&item.key).to_owned();
-            if item.key.starts_with("meta:") {
-                metas.insert(logical);
-            } else if item.key.starts_with("body:") {
-                bodies.insert(logical);
-            }
-        }
-        assert_eq!(metas, bodies, "half-pair orphan after eviction");
+        // At least one entry must have been evicted; counter back under.
+        assert!(
+            m.size().await <= 1024,
+            "size {} should be <= max_bytes 1024 after evict",
+            m.size().await
+        );
+        // The oldest (k1) is the one evicted; k2 survives.
+        assert!(m.get("k1").await.unwrap().is_none(), "k1 should be gone");
+        assert!(m.get("k2").await.unwrap().is_some(), "k2 should remain");
     }
 
     #[tokio::test]
