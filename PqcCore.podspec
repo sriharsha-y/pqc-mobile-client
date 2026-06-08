@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'PqcCore'
-  s.version          = '0.7.1' # x-release-please-version
+  s.version          = '0.8.0' # x-release-please-version
   s.summary          = 'Post-Quantum TLS HTTPS client (Rust + UniFFI) — iOS XCFramework + Swift bindings.'
   s.description      = <<-DESC
     Vendors PqcCore.xcframework (rustls + rustls-post-quantum + aws-lc-rs)

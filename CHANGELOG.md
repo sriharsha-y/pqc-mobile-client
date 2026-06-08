@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.8.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.7.1...v0.8.0) (2026-06-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **client:** BodyProvider.cancel() to release foreign upload resources
+* **client:** streaming upload bodies via BodyProvider foreign trait
+* **client:** synchronous PqcResponse.cancel()
+* stream response bodies via PqcResponse object
+
+### Features
+
+* **cache:** expose max_memory_cache_bytes, enable mem tier on Android ([423b7b5](https://github.com/sriharsha-y/pqc-mobile-client/commit/423b7b56cd65669ad5fa4a43a982e565459f854a))
+* **client:** add read_idle_timeout_ms (OkHttp readTimeout parity) ([996db35](https://github.com/sriharsha-y/pqc-mobile-client/commit/996db35268d5042e1b958a24a7a294ed50239bb3))
+* **client:** BodyProvider.cancel() to release foreign upload resources ([5363d69](https://github.com/sriharsha-y/pqc-mobile-client/commit/5363d69bb5532db43c379ab315d7246b66c0a251))
+* **client:** opt-in hickory-dns resolver for Happy Eyeballs ([b098649](https://github.com/sriharsha-y/pqc-mobile-client/commit/b098649b27932ddd22795ca0c85bd6286977a0f9))
+* **client:** per-host + global in-flight semaphore (OkHttp parity) ([dee6878](https://github.com/sriharsha-y/pqc-mobile-client/commit/dee687859072f0850521986f4142dbcf1d587e86))
+* **client:** streaming upload bodies via BodyProvider foreign trait ([6c5169e](https://github.com/sriharsha-y/pqc-mobile-client/commit/6c5169e556f6365199ac2adc8578d52142c86b6b))
+* **client:** synchronous PqcResponse.cancel() ([4c0a778](https://github.com/sriharsha-y/pqc-mobile-client/commit/4c0a7782c07b0eab286b8f6f5e17b8f5b911b851))
+* stream response bodies via PqcResponse object ([ef84279](https://github.com/sriharsha-y/pqc-mobile-client/commit/ef842793a884d4fdc789e803771e4fc69a8d8d87))
+
+
+### Bug Fixes
+
+* **android,docs,cache:** code-review followups for last 4 commits ([534113d](https://github.com/sriharsha-y/pqc-mobile-client/commit/534113d5692ee444ea8db4aadd50b78be81ae129))
+* **android:** bump jni 0.21 → 0.22 for rustls-platform-verifier 0.7 compat ([db5141e](https://github.com/sriharsha-y/pqc-mobile-client/commit/db5141e66b08125f26c1fbc00ab763fbfcd9e718))
+* **android:** surface upload writer errors instead of silent truncation ([534113d](https://github.com/sriharsha-y/pqc-mobile-client/commit/534113d5692ee444ea8db4aadd50b78be81ae129))
+* **android:** use Source.buffer() extension, not okio.buffer() top-level ([fa44117](https://github.com/sriharsha-y/pqc-mobile-client/commit/fa441173fb0a42da0bd03aa1f9f3e877d4260d26))
+* **cache:** close put_tee commit/reinsert race via body_size sentinel ([c9b2f02](https://github.com/sriharsha-y/pqc-mobile-client/commit/c9b2f02d8200f54875886bb03571262c5a648752))
+* **cache:** close regressions from the streaming refactor ([8020b32](https://github.com/sriharsha-y/pqc-mobile-client/commit/8020b32d86357ce3457d785de18e261233501363))
+* **ios:** cancel PqcResponse on URLProtocol.stopLoading ([21eceeb](https://github.com/sriharsha-y/pqc-mobile-client/commit/21eceeb3ccf850e896344e4c3611b4ef6e061d1c))
+* **sample:** NativeIos against the streaming PqcResponse API ([f383ea0](https://github.com/sriharsha-y/pqc-mobile-client/commit/f383ea0726f862c682a33edbb364bac2ce556303))
+
+
+### Performance Improvements
+
+* **cache:** bypass buffering for known-oversized responses ([dd60060](https://github.com/sriharsha-y/pqc-mobile-client/commit/dd600606580246fc7155e3bbb4a313068889a006))
+* **cache:** tee-stream chunked cache misses without buffering ([022ca52](https://github.com/sriharsha-y/pqc-mobile-client/commit/022ca52240ce81173fd9352f66d30a89cde55155))
+* **client:** cap pool_max_idle_per_host at 5 (OkHttp parity) ([094bdb5](https://github.com/sriharsha-y/pqc-mobile-client/commit/094bdb5ded6f1f4fe14bee5055b23441f17f2eab))
+* **client:** drop TCP keep-alive, add HTTP/2 PING for dead-peer detection ([7a832d8](https://github.com/sriharsha-y/pqc-mobile-client/commit/7a832d83a27c293352d4397fbab87b2d9ddfb647))
+* **client:** extend pool_idle_timeout 60s to 300s ([f5f2a25](https://github.com/sriharsha-y/pqc-mobile-client/commit/f5f2a25eca006d9d695587b9254b3a4279c705ac))
+
 ## [0.7.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.7.0...v0.7.1) (2026-06-01)
 
 
