@@ -410,7 +410,9 @@ impl PqcStreamingCacheManager {
     /// without the body, so fall through to the existing buffered path
     /// (which the `tee-stream middleware` follow-up will fix).
     fn known_too_big_for_all_tiers(&self, content_length: Option<u64>) -> bool {
-        let Some(len) = content_length else { return false };
+        let Some(len) = content_length else {
+            return false;
+        };
         let disk_rejects = self
             .disk
             .as_ref()
@@ -611,8 +613,8 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         //     simpler and faster.
         //   - no disk tier: mem-only caching requires the full body in
         //     memory anyway, so streaming buys nothing.
-        let should_buffer = self.disk.is_none()
-            || content_len.map_or(false, |n| n <= INLINE_BUFFERED_THRESHOLD);
+        let should_buffer =
+            self.disk.is_none() || content_len.map_or(false, |n| n <= INLINE_BUFFERED_THRESHOLD);
         if should_buffer {
             return self
                 .put_buffered(cache_key, parts, body, policy, metadata)
@@ -949,12 +951,11 @@ impl PqcStreamingCacheManager {
             // bodies that turn out to be small can still hit the mem
             // tier on subsequent gets. Dropped if total grows past the
             // cap, so the buffer never exceeds per_entry_mem.
-            let mut mem_buf: Option<BytesMut> =
-                if mem.is_some() && per_entry_mem > 0 {
-                    Some(BytesMut::with_capacity(STREAM_CHUNK_SIZE))
-                } else {
-                    None
-                };
+            let mut mem_buf: Option<BytesMut> = if mem.is_some() && per_entry_mem > 0 {
+                Some(BytesMut::with_capacity(STREAM_CHUNK_SIZE))
+            } else {
+                None
+            };
 
             loop {
                 let frame_opt = body.as_mut().frame().await;
@@ -1066,12 +1067,8 @@ impl PqcStreamingCacheManager {
                     .raw_metadata(final_meta_blob)
                     .size(total as usize)
                     .integrity(integrity);
-                if let Err(e) = cacache::index::insert_async(
-                    &disk_path,
-                    &task_cache_key,
-                    reinsert_opts,
-                )
-                .await
+                if let Err(e) =
+                    cacache::index::insert_async(&disk_path, &task_cache_key, reinsert_opts).await
                 {
                     log::warn!("pqc cache: tee index re-insert failed: {e}");
                     // Without this cleanup, the body blob committed
@@ -1159,10 +1156,7 @@ struct ReceiverFrameStream {
 
 impl futures_core::Stream for ReceiverFrameStream {
     type Item = Result<Frame<Bytes>, StreamingError>;
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
@@ -1315,8 +1309,7 @@ mod tests {
             .await
             .unwrap();
         writer.commit().await.unwrap();
-        disk.bytes
-            .fetch_add(body.len() as u64, Ordering::AcqRel);
+        disk.bytes.fetch_add(body.len() as u64, Ordering::AcqRel);
     }
 
     /// Drain a `PqcCachedBody` to bytes for assertion.
@@ -1651,9 +1644,7 @@ mod tests {
         fill: u8,
     ) -> http::Response<
         http_body_util::StreamBody<
-            futures_util::stream::Iter<
-                std::vec::IntoIter<Result<Frame<Bytes>, std::io::Error>>,
-            >,
+            futures_util::stream::Iter<std::vec::IntoIter<Result<Frame<Bytes>, std::io::Error>>>,
         >,
     > {
         let frames: Vec<Result<Frame<Bytes>, std::io::Error>> = (0..n_frames)
@@ -1742,7 +1733,9 @@ mod tests {
         let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
         let response = streaming_response(20, 32 * 1024, 0xcc); // 640 KiB
         let policy = policy_for(&response);
-        let url = "http://example.test/drop".parse::<http_cache::Url>().unwrap();
+        let url = "http://example.test/drop"
+            .parse::<http_cache::Url>()
+            .unwrap();
         let result = m
             .put("drop".to_string(), response, policy, url, None)
             .await
@@ -1776,7 +1769,9 @@ mod tests {
         let body = http_body_util::StreamBody::new(futures_util::stream::iter(frames));
         let response = http::Response::builder().status(200).body(body).unwrap();
         let policy = policy_for(&response);
-        let url = "http://example.test/err".parse::<http_cache::Url>().unwrap();
+        let url = "http://example.test/err"
+            .parse::<http_cache::Url>()
+            .unwrap();
         let result = m
             .put("err".to_string(), response, policy, url, None)
             .await

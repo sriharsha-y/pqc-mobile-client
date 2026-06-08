@@ -278,7 +278,11 @@ impl VecBodyProvider {
 
 impl BodyProvider for VecBodyProvider {
     fn next_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
-        Ok(self.chunks.lock().expect("provider lock poisoned").pop_front())
+        Ok(self
+            .chunks
+            .lock()
+            .expect("provider lock poisoned")
+            .pop_front())
     }
     fn cancel(&self) {
         // Drop any remaining chunks so a re-poll after cancel sees EOF.
@@ -315,8 +319,7 @@ async fn streaming_post_body_round_trips() {
     let mut got_resp: Option<Arc<PqcResponse>> = None;
     for url in endpoints {
         // Each retry needs a FRESH provider — streams aren't rewindable.
-        let provider: Arc<dyn BodyProvider> =
-            Arc::new(VecBodyProvider::new(chunks.clone()));
+        let provider: Arc<dyn BodyProvider> = Arc::new(VecBodyProvider::new(chunks.clone()));
         let req = HttpRequest {
             method: HttpMethod::Post,
             url: url.to_string(),
