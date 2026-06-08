@@ -207,6 +207,8 @@
 					"-lc++",
 					"-framework",
 					Security,
+					"-framework",
+					SystemConfiguration,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.sriharsha-y.PqcNativeIos";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -235,6 +237,8 @@
 					"-lc++",
 					"-framework",
 					Security,
+					"-framework",
+					SystemConfiguration,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.sriharsha-y.PqcNativeIos";
 				PRODUCT_NAME = "$(TARGET_NAME)";

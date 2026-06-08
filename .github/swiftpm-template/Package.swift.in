@@ -30,10 +30,19 @@ let package = Package(
         // UniFFI-generated Swift binding under Sources/PqcCore, refreshed by
         // `publish-swiftpm` each release. Its `import pqcFFI` matches the
         // xcframework modulemap and the binaryTarget name above.
+        //
+        // linkerSettings: static .a files don't auto-link Apple frameworks.
+        // Security: rustls-platform-verifier. SystemConfiguration:
+        // hickory-resolver via the system-configuration crate. Propagates
+        // to consumer targets — no manual link step needed.
         .target(
             name: "PqcCore",
             dependencies: ["pqcFFI"],
-            path: "Sources/PqcCore"
+            path: "Sources/PqcCore",
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("SystemConfiguration"),
+            ]
         )
     ]
 )

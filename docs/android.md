@@ -18,13 +18,7 @@ The Rust core, the `.so` files, and the generated Kotlin bindings are the same r
 
 ## 1. Build outputs
 
-> **Note on regenerating bindings manually.** The build script invokes
-> `cargo run --release --features cli --bin uniffi-bindgen -- generate ...`.
-> The `--features cli` flag is mandatory — the uniffi-bindgen binary is
-> gated behind a `cli` cargo feature so its dep tree (clap, goblin,
-> uniffi_bindgen itself) never gets linked into the mobile cross-compiled
-> archive. Running `cargo run --bin uniffi-bindgen ...` without the flag
-> errors with `target uniffi-bindgen requires the features: cli`.
+> Regenerating bindings manually requires `--features cli` — the `uniffi-bindgen` binary is gated behind it so its deps (clap, goblin, uniffi_bindgen) stay out of the mobile archive.
 
 After `make android` at the repo root:
 
@@ -337,11 +331,9 @@ val bytes: ULong = client.cacheSizeBytes()  // e.g. to render "Clear cache (1.2 
 
 **Use exactly one cache.** Leave OkHttp's `Cache` unset when this is enabled — the interceptor already bypasses it, so the core's cache is the single source of truth and there's no double storage.
 
-### What gets cached (it's not about file type)
+### What gets cached
 
-Cacheability is decided by **request method + response status + cache headers** — never by extension or `Content-Type`. A `.json`, `.html`, `.svg`, or image are all cached identically *if and only if* their headers allow it. In practice CDN assets sent with `Cache-Control: max-age=…` cache; API responses sent with `Cache-Control: no-store` (typical for account/balance/transaction endpoints) do not.
-
-This is a **private** cache (`shared = false`), so — exactly like OkHttp/`URLCache` — it will cache responses to `Authorization`-bearing requests when their headers permit. To keep a sensitive endpoint out of the cache, have the server send `Cache-Control: no-store` (or `no-cache` to force revalidation). `clearCache()` on logout is the belt-and-suspenders backstop.
+Cacheability is decided by method + status + cache headers — not by extension or `Content-Type`. This is a **private** cache (`shared = false`), so it will cache `Authorization`-bearing responses when their headers permit (same as OkHttp/`URLCache`). Use `Cache-Control: no-store` server-side to keep sensitive endpoints out; `clearCache()` on logout is the backstop.
 
 ### Notes / behavior vs. native
 
@@ -426,3 +418,26 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 | `maxInflightPerHost` | `5uL` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
 | `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
 | `dnsResolver` | `null` (= `System`) | See §12. |
+
+## 15. Consuming from Java (not Kotlin)
+
+The Kotlin-only sugar (`PqcConfig.platformDefault`, default-arg shortcuts, `suspend fun` on `PqcHttpClient.request`) interoperates with Java but requires a few adjustments:
+
+- **`PqcConfig.platformDefault(...)`** is a top-level extension function on `PqcConfig.Companion`. From Java it lives at `PqcConfigDefaultsKt.platformDefault(context, …)`. Kotlin default-arg synthesis isn't exposed to Java, so **you must pass every parameter explicitly**; pass `null` for the optional `*_ms` / pin / UA / etc. parameters where you want the defaults to apply. Easier alternative: build a `PqcConfig` via its full constructor (UniFFI-generated; all fields visible from Java).
+- **`PqcHttpClient.request(req)` is `suspend fun`**, which UniFFI 0.29 does **not** auto-bridge to Java (no `CompletableFuture` variant is generated). Write a small Kotlin facade and call it from Java:
+   ```kotlin
+   // PqcClientJavaBridge.kt
+   import kotlinx.coroutines.GlobalScope
+   import kotlinx.coroutines.future.future
+   import java.util.concurrent.CompletableFuture
+
+   object PqcClientJavaBridge {
+       @JvmStatic
+       fun requestAsync(client: PqcHttpClient, req: HttpRequest): CompletableFuture<PqcResponse> =
+           GlobalScope.future { client.request(req) }
+   }
+   ```
+   Add `implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.7.x")` once. From Java: `PqcClientJavaBridge.requestAsync(client, req).get()` (blocking) or `.thenApply(...)` (callback). Calling the raw `suspend fun` from Java requires hand-constructing a `Continuation` — possible but error-prone; keep the suspension boundary on the Kotlin side.
+- **`PqcException` is sealed** in Kotlin; Java sees it as a regular exception hierarchy (`PqcException.Network`, `PqcException.Tls`, `PqcException.PinningFailure`, `PqcException.TrustVerification`, `PqcException.Timeout`, `PqcException.InvalidRequest`). Catch the base or the specific subclass.
+- **`PqcInterceptor` subclassing from Java** works — it's a Kotlin `open class`. Override `makeConfig(Context)` to return your `PqcConfig`. The interceptor is then added to OkHttp via `OkHttpClient.Builder.addInterceptor(pqcInterceptor)` the same way as in Kotlin.
+- **`BodyProvider` is a Kotlin interface** with two methods (`nextChunk(): ByteArray?` and `cancel(): Unit`); Java implementations are straightforward — implement both.

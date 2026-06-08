@@ -18,8 +18,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use tokio::sync::OwnedSemaphorePermit;
 
-/// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
-/// handover: absorbs one SYN retry, still fails fast.
+/// Sized for cell handover: absorbs one SYN retry, still fails fast.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Plain = bare reqwest client (default). Cached = RFC 9111 middleware wrap
@@ -150,10 +149,10 @@ impl PqcHttpClient {
                     }
                     None => true,
                 };
-                if same_origin && attempt.previous().len() < 10 {
-                    attempt.follow()
-                } else if !same_origin {
+                if !same_origin {
                     attempt.stop()
+                } else if attempt.previous().len() < 10 {
+                    attempt.follow()
                 } else {
                     attempt.error("too many redirects")
                 }
@@ -230,8 +229,6 @@ impl PqcHttpClient {
 // `async_runtime = "tokio"` makes UniFFI drive these exports on a real tokio
 // runtime; without it reqwest/hyper panic ("there is no reactor running")
 // when called through the FFI bridge (tests mask it via #[tokio::test]).
-// The sync constructor is exported from a separate #[uniffi::export] block
-// above (async_runtime applies only to the async methods here).
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcHttpClient {
     pub async fn request(&self, req: HttpRequest) -> Result<Arc<PqcResponse>, PqcError> {
@@ -243,9 +240,6 @@ impl PqcHttpClient {
         // Global first, then per-host: a request "in flight" includes time
         // queued waiting for the per-host gate. Acquisition is `.await` —
         // queued requests park, never spin.
-        //
-        // OwnedSemaphorePermit's Drop releases the slot. The bindings
-        // are unused on purpose; the lifetimes are what matter.
         let _global_permit = match &self.global_inflight {
             Some(s) => Some(
                 s.clone()
@@ -290,8 +284,6 @@ impl PqcHttpClient {
         let timeout_ms = req
             .timeout_ms
             .or(self.default_timeout.map(|d| d.as_millis() as u64));
-        // Moved (not cloned) into whichever match arm runs — cloning would
-        // copy the entire upload on every request.
         let body = req.body;
         let body_stream = req.body_stream.clone();
         let body_stream_length = req.body_stream_length;
@@ -456,8 +448,6 @@ impl PqcHttpClient {
 /// `Source.close()` can call it without `Task { … }` or `runBlocking`.
 #[derive(uniffi::Object)]
 pub struct PqcResponse {
-    // (Debug impl is manual below — the body field's mutex contents
-    // include reqwest::Response which isn't Debug.)
     status: u16,
     headers: HashMap<String, Vec<String>>,
     final_url: String,
@@ -485,6 +475,7 @@ pub struct PqcResponse {
     _host_permit: Option<OwnedSemaphorePermit>,
 }
 
+// Manual Debug: `body` holds `reqwest::Response` (not Debug).
 impl std::fmt::Debug for PqcResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PqcResponse")
@@ -674,20 +665,23 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
 
     let url_str = e.url().map(|u| u.to_string());
 
+    let chain = || {
+        std::iter::successors(Some(&e as &(dyn std::error::Error + 'static)), |err| {
+            err.source()
+        })
+    };
+
     // Pass 1: typed downcast. `rustls::Error` is the authoritative shape.
-    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
-    while let Some(err) = src {
+    for err in chain() {
         if let Some(rustls_err) = err.downcast_ref::<rustls::Error>() {
             return classify_rustls_error(rustls_err);
         }
-        src = err.source();
     }
 
     // Pass 2: substring fallback for the pinning marker and any rustls error
     // surfaced only via reqwest's wrapping. The outer reqwest Display embeds
     // the request URL — strip it first so it can't contaminate the match.
-    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(&e);
-    while let Some(err) = src {
+    for err in chain() {
         let mut msg = err.to_string();
         if let Some(ref u) = url_str {
             msg = msg.replace(u, "");
@@ -702,7 +696,6 @@ fn map_reqwest_err(e: reqwest::Error) -> PqcError {
         if lower.contains("handshake") || lower.contains(" tls ") || lower.starts_with("tls ") {
             return PqcError::Tls;
         }
-        src = err.source();
     }
     PqcError::Network
 }

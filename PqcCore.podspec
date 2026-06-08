@@ -34,13 +34,10 @@ Pod::Spec.new do |s|
   s.vendored_frameworks = 'PqcCore.xcframework'
   s.preserve_paths    = 'PqcCore.xcframework'
 
-  # The vendored static archive references Security.framework symbols
-  # (rustls-platform-verifier's SecTrust* / SecKey* calls). Static .a files
-  # don't carry LC_LINKER_OPTION like dylibs, so without this the consumer
-  # fails to link with "Undefined symbol: _kSecKeyAlgorithm...".
-  # `nm -u` on both slices confirms the only Apple-framework symbols are
-  # _kSec* (Security) and _CCR* (CommonCrypto, auto-linked via libSystem).
-  s.frameworks = 'Security'
+  # Static .a files don't auto-link Apple frameworks. Security:
+  # rustls-platform-verifier. SystemConfiguration: hickory-resolver
+  # via the system-configuration Rust crate.
+  s.frameworks = 'Security', 'SystemConfiguration'
 
   # aws-lc-sys's C++ runtime support symbols come from libc++ on Apple
   # platforms. s.libraries is the idiomatic, link-phase-correct form.
@@ -52,4 +49,12 @@ Pod::Spec.new do |s|
   # re-export the XCFramework's `pqcFFI` module, so `import PqcCore` compiles
   # but links with `Undefined symbol: _$s6pqcFFI...`.
   s.static_framework = true
+
+  # Put PqcCore-Swift.h on consumer HEADER_SEARCH_PATHS so ObjC++
+  # (RN AppDelegate.mm) can `#import "PqcCore-Swift.h"`. Static-libs
+  # layout; under `use_frameworks!` use the framework-form import.
+  # See docs/ios.md §6.
+  s.user_target_xcconfig = {
+    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header"',
+  }
 end

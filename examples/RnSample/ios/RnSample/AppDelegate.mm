@@ -3,8 +3,10 @@
 #import <React/RCTBundleURLProvider.h>
 #import <React/RCTHTTPRequestHandler.h>
 
-// RnSamplePqcURLProtocol is a Swift subclass, @objc-visible via the
-// auto-generated module header.
+// PqcCore-Swift.h must precede RnSample-Swift.h — the latter references
+// PqcURLProtocol as the superclass of RnSamplePqcURLProtocol. See
+// docs/ios.md §6 for the quote-form import rationale.
+#import "PqcCore-Swift.h"
 #import "RnSample-Swift.h"
 
 @implementation AppDelegate
@@ -14,21 +16,11 @@
   self.moduleName = @"RnSample";
   self.initialProps = @{};
 
-  // Route RN's fetch() / XHR through PqcURLProtocol. Must be installed
-  // before any JS executes — RCTHTTPRequestHandler reads the provider
-  // lazily on first request. iOS 26+ negotiates X25519MLKEM768 natively,
-  // so skip there.
+  // Route RN's fetch() / XHR through PqcURLProtocol. registerIfNeededInto:
+  // no-ops on iOS 26+ (native PQC).
   RCTSetCustomNSURLSessionConfigurationProvider(^NSURLSessionConfiguration *{
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    if (@available(iOS 26.0, *)) {
-      // native PQC
-    } else {
-      NSMutableArray *protocols = [NSMutableArray arrayWithObject:[RnSamplePqcURLProtocol class]];
-      if (cfg.protocolClasses) {
-        [protocols addObjectsFromArray:cfg.protocolClasses];
-      }
-      cfg.protocolClasses = protocols;
-    }
+    [RnSamplePqcURLProtocol registerIfNeededInto:cfg];
     return cfg;
   });
 

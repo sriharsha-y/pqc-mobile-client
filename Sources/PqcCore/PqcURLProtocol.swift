@@ -49,6 +49,11 @@ open class PqcURLProtocol: URLProtocol {
 
     /// Insert at index 0 of `configuration.protocolClasses`. Inserts
     /// unconditionally — see ``registerIfNeeded(into:)`` for the gated form.
+    ///
+    /// `@objc(...)` so ObjC++ consumers (RN `AppDelegate.mm`) can call it
+    /// as `[MySubclass registerInto:cfg]`; class-level `@objc` doesn't
+    /// propagate to static funcs in the generated `-Swift.h`.
+    @objc(registerInto:)
     public static func register(into configuration: URLSessionConfiguration) {
         var classes = configuration.protocolClasses ?? []
         classes.insert(self as AnyClass, at: 0)
@@ -60,6 +65,7 @@ open class PqcURLProtocol: URLProtocol {
     /// (Apple [HT122756](https://support.apple.com/en-us/122756)).
     /// Call ``register(into:)`` directly if you need SPKI pinning on those
     /// versions too.
+    @objc(registerIfNeededInto:)
     public static func registerIfNeeded(into configuration: URLSessionConfiguration) {
         if #available(iOS 26.0, macOS 15.0, *) { return }
         register(into: configuration)
@@ -85,11 +91,11 @@ open class PqcURLProtocol: URLProtocol {
     // MARK: - `URLProtocol` overrides (final implementations)
 
     public override class func canInit(with request: URLRequest) -> Bool {
-        return shouldHandle(request)
+        shouldHandle(request)
     }
 
     public override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        return request
+        request
     }
 
     private var pqcTask: Task<Void, Never>?
@@ -136,14 +142,9 @@ open class PqcURLProtocol: URLProtocol {
     // MARK: - Request / response plumbing
 
     private static func buildRequest(from req: URLRequest, url: URL) throws -> HttpRequest {
-        let method: HttpMethod
-        if let raw = req.httpMethod {
-            guard let parsed = parseMethod(raw) else {
-                throw PqcError.InvalidRequest(message: "unsupported HTTP method: \(raw)")
-            }
-            method = parsed
-        } else {
-            method = .get
+        let rawMethod = req.httpMethod ?? "GET"
+        guard let method = parseMethod(rawMethod) else {
+            throw PqcError.InvalidRequest(message: "unsupported HTTP method: \(rawMethod)")
         }
 
         // Body routing matches Android: small inline `httpBody` is buffered
@@ -198,15 +199,10 @@ open class PqcURLProtocol: URLProtocol {
         )
     }
 
-    /// Emits `cacheStoragePolicy: .notAllowed` always (URLCache stays out)
-    /// and drops `Set-Cookie:` (HTTPURLResponse's [String: String] backing
-    /// corrupts comma-bearing Expires dates; Rust jar owns cookies).
-    ///
-    /// Streams the body chunk-by-chunk from `PqcResponse.readChunk()` so
-    /// large responses never materialize in app memory. Forwards each
-    /// chunk to URLProtocol via `urlProtocol(_:didLoad:)`, which itself
-    /// supports incremental delivery — matches Apple's pattern for
-    /// `URLSession.bytes(for:)`.
+    /// `Set-Cookie` is dropped because `HTTPURLResponse`'s `[String: String]`
+    /// header backing corrupts comma-bearing Expires dates — the Rust jar
+    /// owns cookies anyway. Body is streamed chunk-by-chunk so large
+    /// responses don't materialise in memory.
     private func emit(_ pqcResp: PqcResponse, originalURL: URL) async throws {
         let responseURL = URL(string: pqcResp.finalUrl()) ?? originalURL
 
@@ -228,7 +224,6 @@ open class PqcURLProtocol: URLProtocol {
         }
 
         self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        // Stream body chunks. Empty body → loop exits on first iteration.
         while let chunk = try await pqcResp.readChunk() {
             self.client?.urlProtocol(self, didLoad: Data(chunk))
         }
@@ -250,9 +245,8 @@ open class PqcURLProtocol: URLProtocol {
         }
     }
 
-    /// Map the Rust core's ALPN id to the `httpVersion` string
-    /// `HTTPURLResponse` accepts. Defaults to HTTP/1.1 on unknown values —
-    /// wrong telemetry is worse than conservative.
+    /// Maps ALPN id → `HTTPURLResponse.httpVersion`. Unknown ALPN falls
+    /// back to HTTP/1.1 (conservative is better than wrong telemetry).
     private static func httpVersionString(forAlpn alpn: String) -> String {
         switch alpn {
         case "http/0.9", "http/1.0": return "HTTP/1.0"
@@ -274,11 +268,12 @@ open class PqcURLProtocol: URLProtocol {
 /// deallocation. Reading from a closed stream returns `nil` (EOF) so
 /// the Rust side terminates cleanly.
 ///
-/// Threading: `nextChunk` is called sequentially from a single Rust
-/// worker, so the internal opened-flag isn't contended. `InputStream`
-/// itself is not thread-safe but URLProtocol's body stream is
-/// single-consumer by contract.
-final class InputStreamBodyProvider: BodyProvider {
+/// Threading: `nextChunk` is sequential from one Rust worker; `cancel()`
+/// may race it from another. The NSLock serializes the two. We don't
+/// close out from under a concurrent read — Foundation `InputStream`
+/// is not thread-safe. `@unchecked Sendable` because UniFFI's
+/// `BodyProvider` is Sendable but `InputStream` isn't.
+final class InputStreamBodyProvider: BodyProvider, @unchecked Sendable {
     private let stream: InputStream
     private var opened = false
     private var closed = false
@@ -298,21 +293,15 @@ final class InputStreamBodyProvider: BodyProvider {
     }
 
     func cancel() {
-        // Idempotent — Rust may call multiple times. Synchronously
-        // closes the InputStream so a file-backed body releases its
-        // file descriptor immediately on upload abort (don't wait for
-        // the Rust Arc<dyn BodyProvider> to drop, which could be
-        // delayed by buffered chunks in flight).
+        // Idempotent. Waits for any in-flight nextChunk to return before
+        // closing (see type doc for why we don't interrupt a read).
         lock.lock()
         defer { lock.unlock() }
         closeIfOpenLocked()
     }
 
-    /// Caller must hold `lock`. Closes the stream if it was opened
-    /// and not yet closed; marks closed unconditionally so a future
-    /// nextChunk short-circuits. Single source of truth for the
-    /// close sequence — used by deinit, cancel, and nextChunk's
-    /// error/EOF branches.
+    /// Caller must hold `lock`. Idempotent: marks `closed` even if the
+    /// stream was never opened, so subsequent `nextChunk` short-circuits.
     private func closeIfOpenLocked() {
         if opened && !closed {
             stream.close()
