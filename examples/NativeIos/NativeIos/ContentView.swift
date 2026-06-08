@@ -205,7 +205,10 @@ struct ContentView: View {
             body: nil,
             timeoutMs: 5_000
         ))
-        return (resp.status, parseKex(Data(resp.body)), resp.negotiatedProtocol)
+        // PqcResponse exposes status/protocol as methods and body via async
+        // bytes()/readChunk() — see the streaming refactor in src/client.rs.
+        let body = Data(try await resp.bytes())
+        return (resp.status(), parseKex(body), resp.negotiatedProtocol())
     }
 
     /// The iOS system stack (URLSession). Current iOS does not offer the hybrid

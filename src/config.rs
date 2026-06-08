@@ -21,6 +21,19 @@ pub struct PqcConfig {
     /// fails fast instead of burning the whole request budget. `None` = 10s.
     pub connect_timeout_ms: Option<u64>,
 
+    /// Idle timeout between body-bytes read operations. The timer resets
+    /// after every successful chunk read, so a healthy slow download is
+    /// not killed by it; only a stalled server (TCP open but no bytes
+    /// flowing) is. Mirrors OkHttp's `readTimeout`.
+    ///
+    /// `None` (default) leaves this off — only `default_timeout_ms` (the
+    /// total request budget) applies. Set this when downloading large
+    /// bodies where you'd rather kill a stuck stream within seconds than
+    /// wait for the total budget to expire (recommended values: 10–30s for
+    /// APIs, 60s+ for large file downloads).
+    #[uniffi(default = None)]
+    pub read_idle_timeout_ms: Option<u64>,
+
     // ----- Cookies -----
     /// Off by default: no cookie jar, so callers round-trip
     /// `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
@@ -33,6 +46,21 @@ pub struct PqcConfig {
     /// app's identifier.
     pub user_agent: Option<String>,
 
+    // ----- DNS -----
+    /// Which DNS resolver to use. `None` (default) selects `System` —
+    /// libc `getaddrinfo` driven on tokio's blocking pool, which on
+    /// Android honors user-configured Private DNS (DNS-over-TLS) and on
+    /// iOS honors the system resolver chain.
+    ///
+    /// Set to `Some(Hickory)` to use the bundled hickory-dns async
+    /// resolver, which enables RFC 8305 Happy Eyeballs (concurrent
+    /// v4/v6 connection racing — meaningfully faster on dual-stack
+    /// networks where one family is broken). The trade-off: hickory
+    /// bypasses Android's Private DNS setting, so consumers whose users
+    /// depend on DoT for privacy/policy should leave this at `None`.
+    #[uniffi(default = None)]
+    pub dns_resolver: Option<DnsResolver>,
+
     // ----- Redirects -----
     /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
     /// are refused so a redirect can't silently downgrade to an un-pinned
@@ -44,6 +72,29 @@ pub struct PqcConfig {
     /// treat any `status < 400` as success should therefore check for 3xx, or
     /// read `final_url` on the response to confirm where the body came from.
     pub redirect_policy: RedirectPolicy,
+
+    // ----- Concurrency -----
+    /// Maximum concurrent in-flight requests across all hosts. Acquired
+    /// before cache lookup and network send, so cache hits also count
+    /// against the budget — matches OkHttp's `Dispatcher.maxRequests`.
+    /// Default 64 mirrors OkHttp; `Some(n)` enforces n; `None` disables the
+    /// global gate entirely (use only when a consumer needs unbounded
+    /// concurrency, e.g. server-side or tunnelled use).
+    #[uniffi(default = Some(64))]
+    pub max_inflight_total: Option<u32>,
+
+    /// Maximum concurrent in-flight requests per host, keyed by URL hostname
+    /// (no port, no scheme). Default 5 mirrors OkHttp's
+    /// `Dispatcher.maxRequestsPerHost`. URLSession's analogous cap is 6
+    /// in-flight per host; we pick the lower OkHttp value. `None` disables
+    /// the per-host gate.
+    ///
+    /// Once a host is seen for the first time, its semaphore lives for the
+    /// lifetime of the client (one entry per unique host). For a typical
+    /// mobile app this is bounded by the number of distinct API hosts the
+    /// app talks to (usually under 100); the memory cost is negligible.
+    #[uniffi(default = Some(5))]
+    pub max_inflight_per_host: Option<u32>,
 
     // ----- Caching -----
     /// Opt-in RFC 9111 response cache (default false). When enabled it mirrors
@@ -75,6 +126,21 @@ pub struct PqcConfig {
     /// defaults to 20 MiB, matching a typical `URLCache` disk capacity.
     #[uniffi(default = None)]
     pub max_cache_bytes: Option<u64>,
+
+    /// Hard ceiling on the in-process LRU memory cache tier, in bytes.
+    /// `None` defaults to 4 MiB on both platforms (matching `URLCache`'s
+    /// historical memory capacity). `Some(0)` opts out of the memory tier
+    /// entirely — Android consumers who want OkHttp-style disk-only
+    /// behavior set this to `Some(0)`.
+    ///
+    /// Native baseline note: OkHttp's bundled `Cache` is disk-only (the
+    /// `Cache` class is `final` and not extensible), so OkHttp users get
+    /// no HTTP memory cache out of the box. URLCache on iOS does have a
+    /// memory tier. We expose the same tier on both platforms because
+    /// modern Android ART has dynamic heaps and the historical Dalvik
+    /// caps that drove OkHttp's choice no longer apply.
+    #[uniffi(default = None)]
+    pub max_memory_cache_bytes: Option<u64>,
 }
 
 /// What the client does on a 3xx. The reqwest default (10 unbounded
@@ -86,4 +152,16 @@ pub enum RedirectPolicy {
     NoRedirects {},
     SameOriginOnly {},
     Limited { max: u8 },
+}
+
+/// DNS resolver selection. See `PqcConfig::dns_resolver` for the full
+/// trade-off (Happy Eyeballs vs. Android Private DNS interaction).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum DnsResolver {
+    /// libc `getaddrinfo` (synchronous, on tokio's blocking pool).
+    /// Honors Android Private DNS / DoT and the iOS system resolver chain.
+    System,
+    /// hickory-resolver (async, RFC 8305 Happy Eyeballs). Bypasses
+    /// Android Private DNS.
+    Hickory,
 }

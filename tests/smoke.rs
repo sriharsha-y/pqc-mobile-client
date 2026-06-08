@@ -4,9 +4,11 @@
 //! Run: `cargo test --release --test smoke -- --nocapture`
 
 use pqc_client::{
-    HttpMethod, HttpRequest, HttpResponse, PqcConfig, PqcError, PqcHttpClient, RedirectPolicy,
+    BodyProvider, HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, PqcResponse,
+    RedirectPolicy,
 };
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Extract the `kex=` value from a Cloudflare `/cdn-cgi/trace` body.
 fn parse_kex(trace_body: &str) -> Option<String> {
@@ -24,12 +26,17 @@ fn default_test_config() -> PqcConfig {
         pinned_cert_sha256: vec![],
         default_timeout_ms: Some(15_000),
         connect_timeout_ms: None,
+        read_idle_timeout_ms: None,
         enable_cookies: false,
         user_agent: Some("pqc-client-smoke-test/0.3.1".to_string()),
         redirect_policy: RedirectPolicy::SameOriginOnly {},
+        dns_resolver: None,
+        max_inflight_total: Some(64),
+        max_inflight_per_host: Some(5),
         enable_cache: false,
         cache_dir: None,
         max_cache_bytes: None,
+        max_memory_cache_bytes: None,
     }
 }
 
@@ -39,6 +46,8 @@ fn get(url: &str) -> HttpRequest {
         url: url.to_string(),
         headers: HashMap::new(),
         body: None,
+        body_stream: None,
+        body_stream_length: None,
         timeout_ms: None,
     }
 }
@@ -53,13 +62,13 @@ fn get(url: &str) -> HttpRequest {
 /// returns the first response with a < 500, non-429 status. Use ONLY for
 /// success-path tests — error-path tests (pin / trust failures) assert on
 /// the returned Err and must NOT retry.
-async fn request_resilient(client: &PqcHttpClient, req: HttpRequest) -> HttpResponse {
+async fn request_resilient(client: &PqcHttpClient, req: HttpRequest) -> Arc<PqcResponse> {
     const ATTEMPTS: u32 = 4;
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         match client.request(req.clone()).await {
-            Ok(resp) if resp.status < 500 && resp.status != 429 => return resp,
-            Ok(resp) => last = format!("HTTP {}", resp.status),
+            Ok(resp) if resp.status() < 500 && resp.status() != 429 => return resp,
+            Ok(resp) => last = format!("HTTP {}", resp.status()),
             Err(e) => last = format!("{e:?}"),
         }
         if attempt < ATTEMPTS {
@@ -83,25 +92,26 @@ async fn pq_handshake_cloudflare() {
         get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
     )
     .await;
-    let body = String::from_utf8_lossy(&resp.body);
+    let status = resp.status();
+    let final_url = resp.final_url();
+    let negotiated_protocol = resp.negotiated_protocol();
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body = String::from_utf8_lossy(&body_bytes);
     let kex = parse_kex(&body).expect("trace body should contain a kex= line");
-    println!(
-        "status={} kex={} alpn={}",
-        resp.status, kex, resp.negotiated_protocol
-    );
+    println!("status={status} kex={kex} alpn={negotiated_protocol}");
     assert_eq!(
         kex, "X25519MLKEM768",
         "Cloudflare should negotiate X25519MLKEM768 when the client offers it"
     );
     // No redirect on /cdn-cgi/trace, so final_url should echo the request URL.
     assert_eq!(
-        resp.final_url, "https://pq.cloudflareresearch.com/cdn-cgi/trace",
+        final_url, "https://pq.cloudflareresearch.com/cdn-cgi/trace",
         "final_url should report the URL the body came from"
     );
     // ALPN must be set so the server negotiates h2; without it the http2
     // feature is silently a no-op.
     assert_eq!(
-        resp.negotiated_protocol, "h2",
+        negotiated_protocol, "h2",
         "ALPN must select h2 against Cloudflare"
     );
 }
@@ -142,9 +152,11 @@ async fn trust_failure_surfaces_typed_error() {
 }
 
 /// POST round-trip: method, headers, and body survive to the server.
-/// httpbin.org/post echoes the payload back; it's flaky under load, so this
-/// goes through `request_resilient`. If it's ever gone, swap to
-/// postman-echo.com or a local rustls fixture.
+/// Tries multiple public echo endpoints in order — postman-echo first
+/// (Postman-backed, generally reliable), then httpbin.org as a fallback
+/// because both have hit recurring 5xx incidents under load and the test
+/// shouldn't red CI for an unrelated third-party outage. If all echo
+/// services are down the test fails loudly so we don't silently skip.
 #[tokio::test]
 async fn post_body_round_trips() {
     let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
@@ -156,21 +168,56 @@ async fn post_body_round_trips() {
         vec!["application/json".to_string()],
     );
 
-    let req = HttpRequest {
-        method: HttpMethod::Post,
-        url: "https://httpbin.org/post".to_string(),
-        headers,
-        body: Some(body.clone()),
-        timeout_ms: None,
-    };
+    // Endpoints tried in order. Both are public echo services; we want
+    // at least one to be up. Each gets the full `request_resilient`
+    // retry budget before falling through to the next.
+    let endpoints = ["https://postman-echo.com/post", "https://httpbin.org/post"];
 
-    let resp = request_resilient(&client, req).await;
-    assert_eq!(resp.status, 200, "POST should return 200");
+    let mut last_err: Option<String> = None;
+    let mut got_resp = None;
+    for url in endpoints {
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: url.to_string(),
+            headers: headers.clone(),
+            body: Some(body.clone()),
+            body_stream: None,
+            body_stream_length: None,
+            timeout_ms: None,
+        };
+        // Each endpoint is its own resilient attempt; we don't panic
+        // until ALL endpoints have been tried. So inline the retry
+        // loop instead of using request_resilient's panic-on-fail.
+        let mut endpoint_ok = None;
+        for attempt in 1..=3 {
+            match client.request(req.clone()).await {
+                Ok(r) if r.status() < 500 && r.status() != 429 => {
+                    endpoint_ok = Some(r);
+                    break;
+                }
+                Ok(r) => last_err = Some(format!("{url}: HTTP {}", r.status())),
+                Err(e) => last_err = Some(format!("{url}: {e:?}")),
+            }
+            if attempt < 3 {
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+            }
+        }
+        if let Some(r) = endpoint_ok {
+            got_resp = Some(r);
+            break;
+        }
+    }
 
-    // httpbin echoes the body bytes back under either `data` or `json`.
-    // Don't full-parse the JSON; substring-match the unique payload we
-    // sent so the assertion isn't coupled to httpbin's exact schema.
-    let body_str = String::from_utf8_lossy(&resp.body);
+    let resp =
+        got_resp.unwrap_or_else(|| panic!("all POST echo endpoints failed (last: {last_err:?})"));
+    assert_eq!(resp.status(), 200, "POST should return 200");
+
+    // Both echo services include the unique payload bytes back somewhere
+    // in the response (postman-echo under `json`, httpbin under `data`
+    // or `json`). Substring-match the unique payload so the assertion
+    // isn't coupled to either's exact schema.
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body_str = String::from_utf8_lossy(&body_bytes);
     assert!(
         body_str.contains("\"hello\""),
         "echoed body should contain our payload key, got: {body_str}"
@@ -185,8 +232,6 @@ async fn post_body_round_trips() {
 /// tokio tasks, which consumers rely on when fanning out calls.
 #[tokio::test]
 async fn concurrent_requests_share_one_client() {
-    use std::sync::Arc;
-
     let client =
         Arc::new(PqcHttpClient::new(default_test_config()).expect("client should construct"));
 
@@ -206,9 +251,127 @@ async fn concurrent_requests_share_one_client() {
             .await
             .expect("task should not panic")
             .expect("request should succeed");
-        assert!(resp.status < 500, "unexpected status: {}", resp.status);
-        // Liveness is the signal: all tasks complete without panic/deadlock.
+        let status = resp.status();
+        assert!(status < 500, "unexpected status: {status}");
+        // Drop the response without draining the body — confirms the
+        // permit-release-on-drop path is healthy under concurrent load.
+        // (Dropping aborts the body stream; matches OkHttp `close()`.)
+        drop(resp);
         ok += 1;
     }
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");
+}
+
+/// Test-only `BodyProvider` that yields pre-staged chunks. Lets us
+/// drive the streaming-upload code path without a real file source.
+struct VecBodyProvider {
+    chunks: Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+impl VecBodyProvider {
+    fn new<I: IntoIterator<Item = Vec<u8>>>(chunks: I) -> Self {
+        Self {
+            chunks: Mutex::new(chunks.into_iter().collect()),
+        }
+    }
+}
+
+impl BodyProvider for VecBodyProvider {
+    fn next_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
+        Ok(self
+            .chunks
+            .lock()
+            .expect("provider lock poisoned")
+            .pop_front())
+    }
+    fn cancel(&self) {
+        // Drop any remaining chunks so a re-poll after cancel sees EOF.
+        // The in-memory provider has nothing else to release.
+        self.chunks.lock().expect("provider lock poisoned").clear();
+    }
+}
+
+/// Streaming POST: send a body via `BodyProvider` (chunks pulled by
+/// the client over FFI / `spawn_blocking`) and verify the assembled
+/// payload reaches the server. Three chunks → reqwest concatenates +
+/// uses chunked transfer-encoding (no Content-Length set), so this
+/// exercises both the streaming wire format and the multi-chunk
+/// FFI pull loop.
+#[tokio::test]
+async fn streaming_post_body_round_trips() {
+    let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
+
+    // Three chunks; the server should reassemble to the concatenation.
+    let chunks: Vec<Vec<u8>> = vec![
+        br#"{"a":"#.to_vec(),
+        br#""hello","b":"#.to_vec(),
+        br#""world"}"#.to_vec(),
+    ];
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        vec!["application/json".to_string()],
+    );
+
+    let endpoints = ["https://postman-echo.com/post", "https://httpbin.org/post"];
+    let mut last_err: Option<String> = None;
+    let mut got_resp: Option<Arc<PqcResponse>> = None;
+    for url in endpoints {
+        // Each retry needs a FRESH provider — streams aren't rewindable.
+        let provider: Arc<dyn BodyProvider> = Arc::new(VecBodyProvider::new(chunks.clone()));
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: url.to_string(),
+            headers: headers.clone(),
+            body: None,
+            body_stream: Some(provider),
+            body_stream_length: None, // chunked transfer-encoding
+            timeout_ms: None,
+        };
+        match client.request(req).await {
+            Ok(r) if r.status() < 500 && r.status() != 429 => {
+                got_resp = Some(r);
+                break;
+            }
+            Ok(r) => last_err = Some(format!("{url}: HTTP {}", r.status())),
+            Err(e) => last_err = Some(format!("{url}: {e:?}")),
+        }
+    }
+
+    let resp = got_resp
+        .unwrap_or_else(|| panic!("all streaming POST echo endpoints failed (last: {last_err:?})"));
+    assert_eq!(resp.status(), 200, "streaming POST should return 200");
+
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    // The concatenated payload contains both keys + values; echo
+    // services include the request body somewhere in the response.
+    assert!(
+        body_str.contains("\"hello\"") && body_str.contains("\"world\""),
+        "echoed body should contain the assembled payload, got: {body_str}"
+    );
+}
+
+/// Body + body_stream both set → InvalidRequest. Guards the
+/// mutually-exclusive contract documented on `HttpRequest`.
+#[tokio::test]
+async fn body_and_body_stream_both_set_rejected() {
+    let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
+    let provider: Arc<dyn BodyProvider> = Arc::new(VecBodyProvider::new(vec![b"x".to_vec()]));
+    let req = HttpRequest {
+        method: HttpMethod::Post,
+        url: "https://postman-echo.com/post".to_string(),
+        headers: HashMap::new(),
+        body: Some(b"y".to_vec()),
+        body_stream: Some(provider),
+        body_stream_length: None,
+        timeout_ms: None,
+    };
+    let err = client.request(req).await.expect_err("must reject");
+    assert!(
+        matches!(err, PqcError::InvalidRequest),
+        "expected InvalidRequest, got {:?}",
+        err
+    );
 }

@@ -203,8 +203,43 @@ suspend fun fetchBalance(): String {
         body = null,
         timeoutMs = null,
     ))
-    return String(resp.body, Charsets.UTF_8)
+    // resp is `PqcResponse` — streaming-first like OkHttp ResponseBody.
+    // `bytes()` is the buffered convenience matching `body.bytes()`;
+    // for large downloads loop on `readChunk()` to keep heap bounded.
+    return String(resp.bytes(), Charsets.UTF_8)
 }
+
+// Streaming large downloads to disk without buffering the whole body
+suspend fun downloadLargeFile(url: String, dest: java.io.File) {
+    val resp = pqc.request(HttpRequest(
+        method = HttpMethod.GET,
+        url = url,
+        headers = emptyMap(),
+        body = null,
+        timeoutMs = null,
+    ))
+    if (resp.status() != 200.toUShort()) error("HTTP ${resp.status()}")
+    dest.outputStream().use { out ->
+        while (true) {
+            val chunk = resp.readChunk() ?: break
+            out.write(chunk)
+        }
+    }
+}
+
+// Cancellation — UniFFI 0.29 does NOT propagate coroutine cancellation
+// into Rust. Call `resp.cancel()` explicitly when you want to abort a
+// download mid-stream. Idempotent.
+//
+//   val resp = pqc.request(req)
+//   try {
+//       resp.bytes()
+//   } finally {
+//       resp.cancel()  // safe even after bytes(); idempotent
+//   }
+//
+// Dropping the `PqcResponse` reference also aborts when GC reclaims it,
+// but explicit `cancel()` releases the connection immediately.
 
 // Blocking adapter for Java / legacy code
 fun fetchBalanceBlocking() = runBlocking { fetchBalance() }
@@ -229,7 +264,7 @@ Ship as an App Bundle so each device only downloads its ABI's `.so`. `arm64-v8a`
 
 ## 9. Verification
 
-Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `HttpResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global (see the `HttpResponse` doc in `src/types.rs`):
+Debug-build verification call. To confirm the negotiated key exchange, read the **server's** report from Cloudflare's `/cdn-cgi/trace` (the `kex=` line) — `PqcResponse` deliberately does not expose the group, because it is a per-connection property the client can only observe via a racy process-global:
 
 ```kotlin
 val resp = pqc.request(HttpRequest(
@@ -237,11 +272,11 @@ val resp = pqc.request(HttpRequest(
     url = "https://pq.cloudflareresearch.com/cdn-cgi/trace",
     headers = emptyMap<String, List<String>>(), body = null, timeoutMs = 5000UL,
 ))
-val kex = String(resp.body).lineSequence()
+val kex = String(resp.bytes()).lineSequence()
     .firstOrNull { it.startsWith("kex=") }?.removePrefix("kex=")
-android.util.Log.i("PQC", "kex=$kex alpn=${resp.negotiatedProtocol}")
+android.util.Log.i("PQC", "kex=$kex alpn=${resp.negotiatedProtocol()}")
 // kex == "X25519MLKEM768" → post-quantum; "X25519" → classical.
-// `negotiatedProtocol` is per-request ("h2", "http/1.1").
+// `negotiatedProtocol()` is per-request ("h2", "http/1.1").
 ```
 
 For production verification use Wireshark on a USB-tethered device — filter `tls.handshake.type == 1` and inspect the `key_share` extension for group `0x11EC`. ClientHello is unencrypted; no decryption needed.
@@ -313,3 +348,81 @@ This is a **private** cache (`shared = false`), so — exactly like OkHttp/`URLC
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache = true` makes the constructor throw `PqcError.InvalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
 - **Eviction** is by insertion time (FIFO) once `maxCacheBytes` is exceeded — a close approximation of OkHttp's LRU (the disk store exposes no access time).
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
+
+## 12. DNS resolver — `dnsResolver` (opt-in)
+
+By default the client uses libc `getaddrinfo` driven on tokio's blocking pool. On Android this **honors the user-configured Private DNS (DNS-over-TLS) setting** in *Settings → Network & internet → Private DNS*. Most apps want this — leave `dnsResolver` unset.
+
+Set `dnsResolver = DnsResolver.Hickory` to switch to the bundled `hickory-dns` async resolver. This enables **RFC 8305 Happy Eyeballs** — concurrent IPv4/IPv6 connection racing, materially faster on dual-stack networks where one address family is broken (common on some cellular carriers). The trade-off: **hickory bypasses the system Private DNS setting**, so consumers whose users depend on DoT for privacy or enterprise policy should leave the resolver at the default `System`.
+
+```kotlin
+val config = PqcConfig(
+    // ...
+    dnsResolver = DnsResolver.Hickory,  // opt-in for Happy Eyeballs
+)
+```
+
+## 13. Streaming upload bodies — `BodyProvider` (large file uploads)
+
+If you're using `PqcInterceptor` (§3), large uploads are handled automatically: OkHttp `RequestBody` instances with `contentLength() > 64 KiB` or unknown length route through an internal `BodyProvider` adapter that streams chunk-by-chunk via `okio.Pipe`. **Peak memory tracks one chunk (~64 KiB)**, not the file size — matches OkHttp's `RequestBody.writeTo()` semantics.
+
+For consumers calling `PqcHttpClient` directly (Section 6), implement `BodyProvider` in Kotlin and set `HttpRequest.bodyStream`:
+
+```kotlin
+import io.github.sriharsha_y.pqc.BodyProvider
+import io.github.sriharsha_y.pqc.HttpRequest
+import io.github.sriharsha_y.pqc.HttpMethod
+import io.github.sriharsha_y.pqc.PqcException
+import java.io.InputStream
+
+class StreamBodyProvider(private val stream: InputStream) : BodyProvider {
+    private val buf = ByteArray(64 * 1024)
+    @Volatile private var closed = false
+
+    override fun nextChunk(): ByteArray? {
+        if (closed) return null
+        val n = try { stream.read(buf) }
+                catch (t: Throwable) {
+                    throw PqcException.InvalidRequest("read failed: ${t.message}")
+                }
+        if (n <= 0) { close(); return null }
+        return buf.copyOf(n)
+    }
+
+    override fun cancel() {
+        // Idempotent — Rust calls this on upload abort. Release the fd
+        // immediately instead of waiting for the binding handle to drop.
+        if (!closed) { closed = true; try { stream.close() } catch (_: Throwable) {} }
+    }
+
+    private fun close() = cancel()
+}
+
+val fileStream = file.inputStream()
+val resp = runBlocking {
+    pqc.request(HttpRequest(
+        method = HttpMethod.POST,
+        url = "https://api.example.com/upload",
+        headers = mapOf("Content-Type" to listOf("application/octet-stream")),
+        body = null,                                  // ← mutually exclusive
+        bodyStream = StreamBodyProvider(fileStream),  // ← stream
+        bodyStreamLength = file.length().toULong(),   // optional Content-Length;
+                                                      //   null → chunked encoding
+        timeoutMs = null,
+    ))
+}
+```
+
+`nextChunk()` is invoked from Rust via tokio `spawn_blocking`, so blocking reads (`InputStream.read`, file I/O) are safe. `cancel()` is called when the upload aborts (network error, caller dropped the request, server closed mid-stream) — implement it to release file descriptors and other resources. **Streaming bodies are not retry-safe** — once consumed, they can't be replayed; construct a fresh `BodyProvider` if you need to retry.
+
+## 14. Tuning knobs
+
+Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional, named args on `PqcConfig(...)` or `PqcConfig.platformDefault(...)`):
+
+| Field | Default | Notes |
+|---|---|---|
+| `readIdleTimeoutMs` | `null` | Per-read idle timeout — kills a stalled stream without burning the total `defaultTimeoutMs` budget. Mirrors OkHttp's `readTimeout`. Recommended: 10–30 s for APIs, 60 s+ for large file downloads. |
+| `maxInflightTotal` | `64uL` | Global concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequests`. |
+| `maxInflightPerHost` | `5uL` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
+| `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
+| `dnsResolver` | `null` (= `System`) | See §12. |

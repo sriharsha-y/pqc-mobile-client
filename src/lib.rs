@@ -23,9 +23,9 @@ mod cache;
 #[cfg(target_os = "android")]
 mod android_init;
 
-pub use client::PqcHttpClient;
-pub use config::{PqcConfig, RedirectPolicy};
+pub use client::{PqcHttpClient, PqcResponse};
+pub use config::{DnsResolver, PqcConfig, RedirectPolicy};
 pub use error::PqcError;
-pub use types::{HttpMethod, HttpRequest, HttpResponse};
+pub use types::{BodyProvider, HttpMethod, HttpRequest};
 
 uniffi::setup_scaffolding!("pqc");

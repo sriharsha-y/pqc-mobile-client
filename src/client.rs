@@ -1,13 +1,22 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
+use tokio::sync::Semaphore;
 
-use crate::config::{PqcConfig, RedirectPolicy};
+use crate::config::{DnsResolver, PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
 use crate::tls::build_tls_config;
-use crate::types::{HttpMethod, HttpRequest, HttpResponse};
+use crate::types::{BodyProvider, HttpMethod, HttpRequest};
+use bytes::Bytes;
+use futures_core::Stream;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+use tokio::sync::OwnedSemaphorePermit;
 
 /// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
 /// handover: absorbs one SYN retry, still fails fast.
@@ -22,6 +31,15 @@ enum HttpBackend {
     Cached(reqwest_middleware::ClientWithMiddleware),
 }
 
+/// Per-host concurrency gate. The map grows on first contact with a new
+/// host and lives for the client's lifetime. The `Mutex` is only held to
+/// look up or insert a per-host `Semaphore` — `acquire_owned` is awaited
+/// outside the lock so no `.await` happens across the critical section.
+struct PerHostInflight {
+    cap: u32,
+    map: Mutex<HashMap<String, Arc<Semaphore>>>,
+}
+
 /// The HTTPS client exposed to Kotlin / Swift via UniFFI.
 ///
 /// Holds a single client with PQC TLS configured. Construct once per process
@@ -30,10 +48,16 @@ enum HttpBackend {
 pub struct PqcHttpClient {
     inner: HttpBackend,
     default_timeout: Option<Duration>,
+    /// Global in-flight cap (OkHttp `Dispatcher.maxRequests` parity).
+    /// `None` when the consumer disabled the global gate.
+    global_inflight: Option<Arc<Semaphore>>,
+    /// Per-host in-flight cap (OkHttp `Dispatcher.maxRequestsPerHost`
+    /// parity). `None` when the consumer disabled the per-host gate.
+    per_host_inflight: Option<PerHostInflight>,
     // Held alongside the middleware's copy so clear_cache / cache_size_bytes
     // reach the same store. None when caching is off.
     #[cfg(feature = "cache")]
-    cache_manager: Option<crate::cache::PqcCacheManager>,
+    cache_manager: Option<crate::cache::PqcStreamingCacheManager>,
 }
 
 #[uniffi::export]
@@ -50,12 +74,36 @@ impl PqcHttpClient {
             .gzip(true)
             .brotli(true)
             // Reuse idle connections so a burst doesn't pay a PQ TLS 1.3
-            // handshake per call. The 60s idle timeout + tcp_keepalive
-            // below bound the cell↔wifi-handover risk of a dead idle socket
-            // (hyper also refuses a connection it knows is broken).
-            .pool_idle_timeout(Duration::from_secs(60))
-            // TCP keep-alive: detect dead peers faster than the OS default.
-            .tcp_keepalive(Duration::from_secs(30));
+            // handshake per call. 5 min idle window matches OkHttp's
+            // ConnectionPool (keepAliveDuration = 5 minutes); reqwest's own
+            // default is 90s, URLSession is system-managed. The hybrid
+            // X25519MLKEM768 handshake adds ~2.2 KB of keyshare on top of
+            // a classical TLS 1.3 handshake, so making reuse worthwhile is
+            // more battery-relevant for us than for a classical client.
+            // Dead-idle-socket risk on cell↔wifi handover is handled by
+            // hyper refusing connections it knows are broken plus the
+            // HTTP/2 keep-alive PING wired below.
+            .pool_idle_timeout(Duration::from_secs(300))
+            // Cap idle sockets per host to match OkHttp's ConnectionPool
+            // (maxIdleConnections = 5). reqwest defaults to usize::MAX, which
+            // on HTTP/1.1 lets a burst leave hundreds of idle sockets — each
+            // having paid a full PQ handshake — sitting in the pool. iOS
+            // URLSession caps in-flight per host at 6; the parity number is 5.
+            .pool_max_idle_per_host(5)
+            // Dead-peer detection: HTTP/2 keep-alive PING ONLY while streams
+            // are open, never on an idle pooled connection. Crucial for
+            // cellular battery — sending SO_KEEPALIVE probes on an otherwise
+            // idle socket wakes the modem and prevents it from dropping to
+            // IDLE (the LTE RRC inactivity timer is 10–60s on most networks,
+            // typically 20s, and SO_KEEPALIVE resets it on every probe).
+            // OkHttp and URLSession both leave SO_KEEPALIVE OFF for the same
+            // reason; Go fixed the same battery bug (see golang/go#48622).
+            //
+            // 60s interval / 20s timeout: a stuck h2 connection fails after
+            // ~80s instead of hanging for the full request timeout.
+            .http2_keep_alive_interval(Duration::from_secs(60))
+            .http2_keep_alive_timeout(Duration::from_secs(20))
+            .http2_keep_alive_while_idle(false);
 
         builder = builder.connect_timeout(
             config
@@ -68,8 +116,24 @@ impl PqcHttpClient {
             builder = builder.timeout(Duration::from_millis(timeout_ms));
         }
 
+        // Per-read idle timeout — reqwest resets the timer after every
+        // successful read, so this kills a stalled stream without burning
+        // the total request budget. Mirrors OkHttp's readTimeout.
+        if let Some(t) = config.read_idle_timeout_ms {
+            builder = builder.read_timeout(Duration::from_millis(t));
+        }
+
         if let Some(ref ua) = config.user_agent {
             builder = builder.user_agent(ua.clone());
+        }
+
+        // DNS resolver — opt-in hickory for Happy Eyeballs (v4/v6 race).
+        // System is the default and matches today's behavior; we only flip
+        // hickory_dns on when explicitly requested, because it bypasses
+        // Android Private DNS. The hickory-dns reqwest feature is always
+        // compiled in (small cost) so the runtime toggle is real.
+        if matches!(config.dns_resolver, Some(DnsResolver::Hickory)) {
+            builder = builder.hickory_dns(true);
         }
 
         builder = builder.redirect(match config.redirect_policy {
@@ -104,13 +168,21 @@ impl PqcHttpClient {
 
         let default_timeout = config.default_timeout_ms.map(Duration::from_millis);
 
+        let global_inflight = config
+            .max_inflight_total
+            .map(|n| Arc::new(Semaphore::new(n as usize)));
+        let per_host_inflight = config.max_inflight_per_host.map(|n| PerHostInflight {
+            cap: n,
+            map: Mutex::new(HashMap::new()),
+        });
+
         #[cfg(feature = "cache")]
         {
             // `enable_cache` builds the cache layer; a missing tier (e.g.
             // Android with no `cache_dir`) logs and falls back to no caching
             // rather than failing the constructor.
             let cache_manager = if config.enable_cache {
-                let m = crate::cache::PqcCacheManager::new(&config);
+                let m = crate::cache::PqcStreamingCacheManager::new(&config);
                 if m.is_none() {
                     log::warn!(
                         "pqc cache: enable_cache=true but no usable tier \
@@ -132,6 +204,8 @@ impl PqcHttpClient {
             Ok(Self {
                 inner,
                 default_timeout,
+                global_inflight,
+                per_host_inflight,
                 cache_manager,
             })
         }
@@ -146,6 +220,8 @@ impl PqcHttpClient {
             Ok(Self {
                 inner: HttpBackend::Plain(client),
                 default_timeout,
+                global_inflight,
+                per_host_inflight,
             })
         }
     }
@@ -158,7 +234,49 @@ impl PqcHttpClient {
 // above (async_runtime applies only to the async methods here).
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcHttpClient {
-    pub async fn request(&self, req: HttpRequest) -> Result<HttpResponse, PqcError> {
+    pub async fn request(&self, req: HttpRequest) -> Result<Arc<PqcResponse>, PqcError> {
+        // Concurrency gates — acquired before cache lookup OR network send,
+        // and held until this function returns (after the body is fully
+        // consumed). Cache hits count too, matching OkHttp's Dispatcher,
+        // because OkHttp counts Calls, not network sockets.
+        //
+        // Global first, then per-host: a request "in flight" includes time
+        // queued waiting for the per-host gate. Acquisition is `.await` —
+        // queued requests park, never spin.
+        //
+        // OwnedSemaphorePermit's Drop releases the slot. The bindings
+        // are unused on purpose; the lifetimes are what matter.
+        let _global_permit = match &self.global_inflight {
+            Some(s) => Some(
+                s.clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| PqcError::Network)?,
+            ),
+            None => None,
+        };
+        let _host_permit = match &self.per_host_inflight {
+            Some(ph) => {
+                // Host key matches OkHttp: URL host only (no port, no scheme).
+                // A parse failure here would also fail in reqwest below, but
+                // we surface it now so the permit isn't held while we discover
+                // the URL is invalid.
+                let host = reqwest::Url::parse(&req.url)
+                    .map_err(|_| PqcError::InvalidRequest)?
+                    .host_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let sem = {
+                    let mut m = ph.map.lock().expect("per-host inflight map poisoned");
+                    m.entry(host)
+                        .or_insert_with(|| Arc::new(Semaphore::new(ph.cap as usize)))
+                        .clone()
+                };
+                Some(sem.acquire_owned().await.map_err(|_| PqcError::Network)?)
+            }
+            None => None,
+        };
+
         let method = match req.method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
@@ -175,6 +293,14 @@ impl PqcHttpClient {
         // Moved (not cloned) into whichever match arm runs — cloning would
         // copy the entire upload on every request.
         let body = req.body;
+        let body_stream = req.body_stream.clone();
+        let body_stream_length = req.body_stream_length;
+
+        // Mutually exclusive: caller must pick exactly one (or neither).
+        // Mixing them would silently drop the stream — fail loud instead.
+        if body.is_some() && body_stream.is_some() {
+            return Err(PqcError::InvalidRequest);
+        }
 
         // The two backends share the same header/body/timeout surface but
         // have distinct RequestBuilder types, so a macro fills both without
@@ -193,6 +319,22 @@ impl PqcHttpClient {
                 }
                 if let Some(body) = body {
                     b = b.body(body);
+                } else if let Some(provider) = body_stream.clone() {
+                    // Streaming upload: pull chunks via `BodyProvider`
+                    // and feed them to reqwest::Body::wrap_stream. Each
+                    // foreign call runs on `spawn_blocking` so the FFI
+                    // (potentially blocking) read doesn't park a tokio
+                    // worker.
+                    let s = body_provider_stream(provider);
+                    let reqwest_body = reqwest::Body::wrap_stream(s);
+                    b = b.body(reqwest_body);
+                    if let Some(len) = body_stream_length {
+                        // Known length → Content-Length header, no
+                        // chunked encoding. Matches URLSession with
+                        // httpBodyStream when the consumer sets a
+                        // length, and OkHttp's contentLength() != -1.
+                        b = b.header("content-length", len.to_string());
+                    }
                 }
                 if let Some(t) = timeout_ms {
                     b = b.timeout(Duration::from_millis(t));
@@ -240,30 +382,21 @@ impl PqcHttpClient {
             headers.entry(k.as_str().to_string()).or_default().push(s);
         }
 
-        // Mid-body errors are transport-level (handshake already done), so
-        // map to Timeout/Network, skipping the rustls classifier. Matches the
-        // native stacks' shape: URLSession `dataTask` and OkHttp
-        // `ResponseBody.bytes()` buffer the whole body to memory with no cap
-        // — callers stream when they need to bound it.
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    PqcError::Timeout
-                } else {
-                    PqcError::Network
-                }
-            })?
-            .to_vec();
-
-        Ok(HttpResponse {
+        // Return a PqcResponse handle. The body is NOT drained here —
+        // consumers pull via async `read_chunk()` / `bytes()`. The
+        // semaphore permits move INTO the response so they're held
+        // until the response is fully consumed or dropped, matching
+        // OkHttp's "in-flight until response.close()" lifecycle.
+        Ok(Arc::new(PqcResponse {
             status,
             final_url,
             headers,
-            body,
             negotiated_protocol,
-        })
+            cancelled: AtomicBool::new(false),
+            body: tokio::sync::Mutex::new(Some(resp)),
+            _global_permit,
+            _host_permit,
+        }))
     }
 
     /// Clear all cached responses. Best-effort and non-throwing, mirroring
@@ -286,6 +419,216 @@ impl PqcHttpClient {
             return m.size().await;
         }
         0
+    }
+}
+
+/// Streaming HTTP response handle. Returned by [`PqcHttpClient::request`]
+/// as soon as the response head (status, headers) has been received —
+/// the body is pulled on demand via [`PqcResponse::read_chunk`] or
+/// drained whole via [`PqcResponse::bytes`].
+///
+/// Matches the streaming default of OkHttp's `ResponseBody` and
+/// URLSession's `URLSession.bytes(for:)`. The buffered convenience
+/// (`bytes()`) mirrors `body.bytes()` / `data(for:)`.
+///
+/// # Concurrency
+///
+/// `&self` methods can be called concurrently; an internal async mutex
+/// serializes body reads. Only one reader at a time makes progress
+/// (chunks have to come out in order), but headers/status are pre-
+/// captured so those getters never block.
+///
+/// # Lifecycle
+///
+/// The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
+/// semaphore permits acquired at request time both live inside this
+/// object. Dropping the response without calling `bytes()` aborts the
+/// body stream — same as OkHttp `Response.close()` and URLSession's
+/// task-cancel semantics.
+///
+/// # Cancellation note
+///
+/// UniFFI 0.29 does not propagate foreign-runtime cancellation
+/// (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust
+/// (mozilla/uniffi-rs#2771). Consumers who want to abort an in-flight
+/// body read must call [`PqcResponse::cancel`] explicitly — it's
+/// synchronous, so iOS `URLProtocol.stopLoading` and OkHttp
+/// `Source.close()` can call it without `Task { … }` or `runBlocking`.
+#[derive(uniffi::Object)]
+pub struct PqcResponse {
+    // (Debug impl is manual below — the body field's mutex contents
+    // include reqwest::Response which isn't Debug.)
+    status: u16,
+    headers: HashMap<String, Vec<String>>,
+    final_url: String,
+    negotiated_protocol: String,
+    /// Set by `cancel()`. Read by `read_chunk` / `bytes` before AND
+    /// after the chunk await so a cancel that races a mid-flight read
+    /// is observed at the next await point: the in-flight chunk
+    /// completes (reqwest::Response::chunk isn't externally
+    /// cancellable), then the response is dropped and `Ok(None)` /
+    /// empty bytes returned. Modeled on OkHttp's `Call.cancel()`,
+    /// which also doesn't synchronously interrupt a mid-read socket
+    /// (square/okhttp#3680).
+    cancelled: AtomicBool,
+    /// The live response. Wrapped in `tokio::sync::Mutex` so multiple
+    /// `&self` callers serialize on body reads (UniFFI Object methods
+    /// must take `&self`). `Option` so consume-style operations
+    /// (`bytes`, `cancel`) can `take()` it.
+    body: tokio::sync::Mutex<Option<reqwest::Response>>,
+    /// In-flight semaphore permits acquired at request time. Held
+    /// here so they're released by `Drop` exactly when the response
+    /// is no longer in flight from the consumer's perspective.
+    /// Underscore-prefixed because we never read them — the lifetime
+    /// is what matters.
+    _global_permit: Option<OwnedSemaphorePermit>,
+    _host_permit: Option<OwnedSemaphorePermit>,
+}
+
+impl std::fmt::Debug for PqcResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PqcResponse")
+            .field("status", &self.status)
+            .field("final_url", &self.final_url)
+            .field("negotiated_protocol", &self.negotiated_protocol)
+            .field("headers_len", &self.headers.len())
+            .field(
+                "body_consumed",
+                &self.body.try_lock().map(|g| g.is_none()).ok(),
+            )
+            .finish()
+    }
+}
+
+#[uniffi::export]
+impl PqcResponse {
+    /// HTTP status code (e.g. 200, 404, 503).
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Response headers. Multi-valued headers (`Set-Cookie`, `Vary`,
+    /// `Link`) appear with all values intact — never collapsed.
+    pub fn headers(&self) -> HashMap<String, Vec<String>> {
+        self.headers.clone()
+    }
+
+    /// The URL the body actually came from, after any followed
+    /// redirects. Equals the request URL when no redirect occurred.
+    /// Lets callers detect a redirect they refused (see
+    /// `RedirectPolicy`) — mirrors OkHttp `Response.request().url()`
+    /// and `URLResponse.url`.
+    pub fn final_url(&self) -> String {
+        self.final_url.clone()
+    }
+
+    /// The negotiated ALPN protocol (`"h2"`, `"http/1.1"`, etc.).
+    /// Useful for logging / observability; the consumer never has to
+    /// branch on this.
+    pub fn negotiated_protocol(&self) -> String {
+        self.negotiated_protocol.clone()
+    }
+
+    /// Abort the body stream and release the underlying connection.
+    /// Idempotent — a second call is a no-op. Synchronous so iOS
+    /// `URLProtocol.stopLoading` and OkHttp `Source.close()` can call
+    /// it directly, without wrapping in `Task { … }` or `runBlocking`.
+    ///
+    /// If a `read_chunk`/`bytes` await is in flight when `cancel` is
+    /// called, the body mutex is contended and the in-flight chunk
+    /// completes normally; the post-await cancelled check then drops
+    /// the response and returns `Ok(None)` / empty bytes. This matches
+    /// OkHttp `Call.cancel()`, which also doesn't synchronously
+    /// interrupt a mid-read socket — interruption is best-effort.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        // If no reader holds the mutex right now, drop the response
+        // immediately so the connection returns to the pool. If a
+        // reader IS holding it, try_lock fails — the reader will
+        // observe `cancelled` after its current chunk finishes and
+        // take care of the drop itself.
+        if let Ok(mut guard) = self.body.try_lock() {
+            *guard = None;
+        }
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl PqcResponse {
+    /// Pull the next chunk of the body. Returns `Ok(None)` when the
+    /// body has been fully consumed (EOF) or `cancel()` has been
+    /// called. Chunks arrive in network order and are not bounded in
+    /// size — typically 16 KB to 64 KB for HTTP/2, larger for HTTP/1.1.
+    pub async fn read_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
+        // Pre-await cancel check — short-circuits without taking the
+        // mutex when cancel ran before this call.
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let mut guard = self.body.lock().await;
+        let resp = match guard.as_mut() {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let result = resp.chunk().await;
+        // Post-await cancel check — if cancel raced this read, drop
+        // whatever we got and report EOF.
+        if self.cancelled.load(Ordering::Acquire) {
+            *guard = None;
+            return Ok(None);
+        }
+        match result {
+            Ok(Some(b)) => Ok(Some(b.to_vec())),
+            Ok(None) => {
+                // EOF — drop the live response so the connection
+                // returns to the pool promptly instead of waiting for
+                // the PqcResponse to be dropped.
+                *guard = None;
+                Ok(None)
+            }
+            Err(e) => {
+                *guard = None;
+                Err(map_midbody_err(e))
+            }
+        }
+    }
+
+    /// Drain the entire body to a `Vec<u8>` (the buffered convenience,
+    /// mirroring OkHttp `body.bytes()` and URLSession `data(for:)`).
+    /// Internally consumes the response — subsequent `read_chunk`
+    /// calls return `Ok(None)`. Returns empty if `cancel()` has been
+    /// called.
+    pub async fn bytes(&self) -> Result<Vec<u8>, PqcError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
+        let mut guard = self.body.lock().await;
+        let resp = match guard.take() {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let result = resp.bytes().await;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
+        match result {
+            Ok(b) => Ok(b.to_vec()),
+            Err(e) => Err(map_midbody_err(e)),
+        }
+    }
+}
+
+/// Map a mid-body reqwest error to a `PqcError`. Mid-body means the
+/// handshake already succeeded, so the rustls classifier doesn't apply
+/// — only `Timeout` and `Network` are reachable from here. Used by
+/// `PqcResponse::read_chunk` and `bytes` so the classification policy
+/// lives in one place; adding a new mid-body error variant (e.g.
+/// ConnectionReset) only needs to update this helper.
+fn map_midbody_err(e: reqwest::Error) -> PqcError {
+    if e.is_timeout() {
+        PqcError::Timeout
+    } else {
+        PqcError::Network
     }
 }
 
@@ -405,6 +748,106 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         | R::InconsistentKeys(_) => PqcError::Tls,
 
         _ => PqcError::Tls,
+    }
+}
+
+/// Adapter from a foreign-implemented `BodyProvider` to the
+/// `Stream<Item = Result<Bytes>>` shape `reqwest::Body::wrap_stream`
+/// expects.
+///
+/// Each `next_chunk` call runs on `tokio::task::spawn_blocking` so a
+/// blocking foreign read (file I/O, okio.Pipe read, InputStream read)
+/// doesn't park a tokio worker. The `JoinHandle` futures are stored
+/// per-poll so cancellation drops them naturally and the next poll
+/// starts a fresh blocking task.
+///
+/// Empty `Some(vec)` is treated as EOF, matching the `BodyProvider`
+/// doc contract — lets foreign code signal end-of-stream without
+/// keeping an extra flag.
+struct BodyProviderStream {
+    provider: Arc<dyn BodyProvider>,
+    pending: Option<tokio::task::JoinHandle<Result<Option<Vec<u8>>, PqcError>>>,
+    done: bool,
+}
+
+impl Stream for BodyProviderStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        // Kick off a blocking next_chunk call if none in flight.
+        if self.pending.is_none() {
+            let provider = Arc::clone(&self.provider);
+            let handle = tokio::task::spawn_blocking(move || provider.next_chunk());
+            self.pending = Some(handle);
+        }
+        // Poll the in-flight handle.
+        let handle = self.pending.as_mut().expect("pending set above");
+        match Pin::new(handle).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(Ok(Some(c)))) if !c.is_empty() => {
+                self.pending = None;
+                Poll::Ready(Some(Ok(Bytes::from(c))))
+            }
+            Poll::Ready(Ok(Ok(_))) => {
+                // None or empty Vec → EOF.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Ok(Err(_))) => {
+                // BodyProvider returned PqcError — abort the upload.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(Some(Err(std::io::Error::other(
+                    "body provider returned error",
+                ))))
+            }
+            Poll::Ready(Err(join_err)) => {
+                // spawn_blocking task panicked. Surface to reqwest as
+                // an IO error so the request fails cleanly.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(Some(Err(std::io::Error::other(format!(
+                    "body provider task panicked: {join_err}"
+                )))))
+            }
+        }
+    }
+}
+
+fn body_provider_stream(provider: Arc<dyn BodyProvider>) -> BodyProviderStream {
+    BodyProviderStream {
+        provider,
+        pending: None,
+        done: false,
+    }
+}
+
+impl Drop for BodyProviderStream {
+    /// Signal the foreign-side `BodyProvider` to release any resources
+    /// it's holding (file descriptors, writer threads, okio.Pipe
+    /// buffers). Triggers when:
+    ///   - The reqwest upload completes normally → reqwest drops the
+    ///     wrapped Body → we drop here.
+    ///   - The request errors before consuming all chunks (TLS
+    ///     handshake failure, semaphore unavailable, malformed URL).
+    ///   - The caller drops the PqcResponse mid-upload.
+    ///
+    /// Without this, the Android `OkHttpBodyProviderAdapter` writer
+    /// thread would block forever on `sink.write()` once the 256 KiB
+    /// pipe buffer filled, leaking one daemon thread + the caller's
+    /// RequestBody (often a FileInputStream) per failed upload —
+    /// observable on a retry loop against a failing host.
+    /// `cancel()` is required to be idempotent and synchronous; we
+    /// don't await anything.
+    fn drop(&mut self) {
+        self.provider.cancel();
     }
 }
 

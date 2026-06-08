@@ -93,6 +93,12 @@ open class PqcURLProtocol: URLProtocol {
     }
 
     private var pqcTask: Task<Void, Never>?
+    /// Captured once `client.request(...)` returns so `stopLoading()` can
+    /// invoke `cancel()` on it. UniFFI 0.29 doesn't propagate Swift
+    /// `Task.cancel()` into Rust (mozilla/uniffi-rs#2771), so without this
+    /// the underlying request keeps streaming bytes and holding the global +
+    /// per-host semaphore permits long after URLSession told us to stop.
+    private var pqcResp: PqcResponse?
 
     public override func startLoading() {
         let subclass = type(of: self)
@@ -103,8 +109,9 @@ open class PqcURLProtocol: URLProtocol {
                 }
                 let client = try subclass.clientFor(subclass)
                 let pqcReq = try Self.buildRequest(from: self.request, url: url)
-                let pqcResp = try await client.request(req: pqcReq)
-                try self.emit(pqcResp, originalURL: url)
+                let resp = try await client.request(req: pqcReq)
+                self.pqcResp = resp
+                try await self.emit(resp, originalURL: url)
             } catch is CancellationError {
                 // stopLoading() cancelled us; URLProtocol contract is to
                 // stay silent — URLSession owns the cancel notification.
@@ -115,8 +122,15 @@ open class PqcURLProtocol: URLProtocol {
     }
 
     public override func stopLoading() {
+        let resp = self.pqcResp
+        self.pqcResp = nil
         pqcTask?.cancel()
         pqcTask = nil
+        // Sync FFI call — releases the connection + permits NOW. No
+        // detached Task, no async dance. `cancel()` is idempotent and
+        // races safely with an `emit()` already in flight (the read
+        // loop observes `cancelled` at its next chunk boundary).
+        resp?.cancel()
     }
 
     // MARK: - Request / response plumbing
@@ -132,20 +146,44 @@ open class PqcURLProtocol: URLProtocol {
             method = .get
         }
 
-        // Streamed uploads send httpBody=nil + non-nil httpBodyStream; reading
-        // only httpBody would silently ship an empty body.
-        let body: Data?
-        if let inlineBody = req.httpBody {
-            body = inlineBody
+        // Body routing matches Android: small inline `httpBody` is buffered
+        // once into Data; `httpBodyStream` (the URLSession streaming
+        // upload primitive) is wrapped as a BodyProvider so the Rust core
+        // pulls chunks via FFI without ever materializing the full
+        // upload — matches URLSession's own streamed-request behavior.
+        let inlineBody: Data?
+        let streamProvider: BodyProvider?
+        let streamLength: UInt64?
+        if let body = req.httpBody {
+            inlineBody = body
+            streamProvider = nil
+            streamLength = nil
+        } else if let stream = req.httpBodyStream {
+            inlineBody = nil
+            streamProvider = InputStreamBodyProvider(stream: stream)
+            // URLRequest puts a known length in Content-Length when the
+            // caller set one; otherwise reqwest will use chunked
+            // transfer-encoding. URLSession honors this same contract
+            // (see Apple HT122756 / URLSession needNewBodyStream docs).
+            streamLength = (req.value(forHTTPHeaderField: "Content-Length"))
+                .flatMap(UInt64.init)
         } else {
-            body = try drainBodyStream(req.httpBodyStream)
+            inlineBody = nil
+            streamProvider = nil
+            streamLength = nil
         }
 
         // allHTTPHeaderFields is [String: String]; wrap each value in a
         // 1-element array. Strip Cookie: (Rust jar is authoritative).
+        // Strip Content-Length when we set it via bodyStreamLength —
+        // the Rust client re-emits it and forwarding both would
+        // duplicate the header.
         var headers: [String: [String]] = [:]
         for (key, value) in req.allHTTPHeaderFields ?? [:] {
             if key.caseInsensitiveCompare("Cookie") == .orderedSame { continue }
+            if streamLength != nil && key.caseInsensitiveCompare("Content-Length") == .orderedSame {
+                continue
+            }
             headers[key] = [value]
         }
 
@@ -153,7 +191,9 @@ open class PqcURLProtocol: URLProtocol {
             method: method,
             url: url.absoluteString,
             headers: headers,
-            body: body,
+            body: inlineBody,
+            bodyStream: streamProvider,
+            bodyStreamLength: streamLength,
             timeoutMs: nil
         )
     }
@@ -161,20 +201,26 @@ open class PqcURLProtocol: URLProtocol {
     /// Emits `cacheStoragePolicy: .notAllowed` always (URLCache stays out)
     /// and drops `Set-Cookie:` (HTTPURLResponse's [String: String] backing
     /// corrupts comma-bearing Expires dates; Rust jar owns cookies).
-    private func emit(_ pqcResp: HttpResponse, originalURL: URL) throws {
-        let responseURL = URL(string: pqcResp.finalUrl) ?? originalURL
+    ///
+    /// Streams the body chunk-by-chunk from `PqcResponse.readChunk()` so
+    /// large responses never materialize in app memory. Forwards each
+    /// chunk to URLProtocol via `urlProtocol(_:didLoad:)`, which itself
+    /// supports incremental delivery — matches Apple's pattern for
+    /// `URLSession.bytes(for:)`.
+    private func emit(_ pqcResp: PqcResponse, originalURL: URL) async throws {
+        let responseURL = URL(string: pqcResp.finalUrl()) ?? originalURL
 
         var headerFields: [String: String] = [:]
-        for (key, values) in pqcResp.headers {
+        for (key, values) in pqcResp.headers() {
             if key.lowercased() == "set-cookie" { continue }
             headerFields[key] = values.joined(separator: ", ")
         }
 
-        let httpVersion = Self.httpVersionString(forAlpn: pqcResp.negotiatedProtocol)
+        let httpVersion = Self.httpVersionString(forAlpn: pqcResp.negotiatedProtocol())
 
         guard let response = HTTPURLResponse(
             url: responseURL,
-            statusCode: Int(pqcResp.status),
+            statusCode: Int(pqcResp.status()),
             httpVersion: httpVersion,
             headerFields: headerFields
         ) else {
@@ -182,7 +228,10 @@ open class PqcURLProtocol: URLProtocol {
         }
 
         self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        self.client?.urlProtocol(self, didLoad: Data(pqcResp.body))
+        // Stream body chunks. Empty body → loop exits on first iteration.
+        while let chunk = try await pqcResp.readChunk() {
+            self.client?.urlProtocol(self, didLoad: Data(chunk))
+        }
         self.client?.urlProtocolDidFinishLoading(self)
     }
 
@@ -201,32 +250,6 @@ open class PqcURLProtocol: URLProtocol {
         }
     }
 
-    /// Drain an `InputStream`-backed request body fully into memory.
-    /// Throws `PqcError.InvalidRequest` on read error so a streamed upload
-    /// failing mid-read surfaces as a load failure (instead of an empty
-    /// PUT/POST). Large uploads should stream rather than buffer.
-    private static func drainBodyStream(_ stream: InputStream?) throws -> Data? {
-        guard let stream = stream else { return nil }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        let bufferSize = 64 * 1024
-        var buffer = [UInt8](repeating: 0, count: bufferSize)
-        while stream.hasBytesAvailable {
-            let read = stream.read(&buffer, maxLength: bufferSize)
-            if read < 0 {
-                let underlying = stream.streamError?.localizedDescription
-                    ?? "stream read returned an error"
-                throw PqcError.InvalidRequest(
-                    message: "request body stream read failed: \(underlying)"
-                )
-            }
-            if read == 0 { break }
-            data.append(buffer, count: read)
-        }
-        return data
-    }
-
     /// Map the Rust core's ALPN id to the `httpVersion` string
     /// `HTTPURLResponse` accepts. Defaults to HTTP/1.1 on unknown values —
     /// wrong telemetry is worse than conservative.
@@ -238,5 +261,90 @@ open class PqcURLProtocol: URLProtocol {
         case "h3":                   return "HTTP/3.0"
         default:                     return "HTTP/1.1"
         }
+    }
+}
+
+/// Adapts a Foundation `InputStream` (as exposed by
+/// `URLRequest.httpBodyStream`) to the Rust `BodyProvider` PULL
+/// contract. Each `nextChunk` call reads up to 64 KiB synchronously
+/// — the Rust client invokes this on a tokio `spawn_blocking` worker
+/// so blocking stream reads are safe.
+///
+/// Lifecycle: opens the stream on first read, closes on EOF or
+/// deallocation. Reading from a closed stream returns `nil` (EOF) so
+/// the Rust side terminates cleanly.
+///
+/// Threading: `nextChunk` is called sequentially from a single Rust
+/// worker, so the internal opened-flag isn't contended. `InputStream`
+/// itself is not thread-safe but URLProtocol's body stream is
+/// single-consumer by contract.
+final class InputStreamBodyProvider: BodyProvider {
+    private let stream: InputStream
+    private var opened = false
+    private var closed = false
+    private let lock = NSLock()
+
+    init(stream: InputStream) {
+        self.stream = stream
+    }
+
+    deinit {
+        // Safety net in case cancel() isn't called (e.g. an old build
+        // of the Rust client). Holds the lock to make sure no
+        // concurrent nextChunk is mid-read on the InputStream.
+        lock.lock()
+        defer { lock.unlock() }
+        closeIfOpenLocked()
+    }
+
+    func cancel() {
+        // Idempotent — Rust may call multiple times. Synchronously
+        // closes the InputStream so a file-backed body releases its
+        // file descriptor immediately on upload abort (don't wait for
+        // the Rust Arc<dyn BodyProvider> to drop, which could be
+        // delayed by buffered chunks in flight).
+        lock.lock()
+        defer { lock.unlock() }
+        closeIfOpenLocked()
+    }
+
+    /// Caller must hold `lock`. Closes the stream if it was opened
+    /// and not yet closed; marks closed unconditionally so a future
+    /// nextChunk short-circuits. Single source of truth for the
+    /// close sequence — used by deinit, cancel, and nextChunk's
+    /// error/EOF branches.
+    private func closeIfOpenLocked() {
+        if opened && !closed {
+            stream.close()
+        }
+        closed = true
+    }
+
+    func nextChunk() throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if closed { return nil }
+        if !opened {
+            stream.open()
+            opened = true
+        }
+        // 64 KiB matches Rust-side STREAM_CHUNK_SIZE and Android's
+        // OkHttpBodyProviderAdapter chunk size — keeps memory bounded
+        // and amortizes syscall cost.
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        let n = stream.read(&buf, maxLength: buf.count)
+        if n < 0 {
+            let underlying = stream.streamError?.localizedDescription
+                ?? "stream read returned an error"
+            closeIfOpenLocked()
+            throw PqcError.InvalidRequest(
+                message: "request body stream read failed: \(underlying)"
+            )
+        }
+        if n == 0 {
+            closeIfOpenLocked()
+            return nil  // EOF
+        }
+        return Data(bytes: buf, count: n)
     }
 }

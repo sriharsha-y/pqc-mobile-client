@@ -78,7 +78,7 @@ val resp = runBlocking {
         timeoutMs = null,
     ))
 }
-println("status=${resp.status} alpn=${resp.negotiatedProtocol}")
+println("status=${resp.status()} alpn=${resp.negotiatedProtocol()}")
 ```
 
 **Swift** (iOS)
@@ -97,7 +97,7 @@ let client = try PqcHttpClient(config: .platformDefault(
 let resp = try await client.request(req: HttpRequest(
     method: .get, url: "https://example.com",
     headers: [:], body: nil, timeoutMs: nil))
-print("status=\(resp.status) alpn=\(resp.negotiatedProtocol)")
+print("status=\(resp.status()) alpn=\(resp.negotiatedProtocol())")
 ```
 
 ## Documentation
@@ -158,12 +158,14 @@ The same Rust core ships to every consumer; only the integration glue at the cal
 | Cookies | ✅ Opt-in via `enableCookies`; off by default |
 | gzip / brotli | ✅ Transparent decoding via reqwest (no cap — matches `URLSession` / `OkHttp`) |
 | Redirects | ✅ `SameOriginOnly` default; also `NoRedirects` / `Limited(max)` |
-| Post-redirect URL on `HttpResponse` | ✅ `finalUrl` mirrors `URLResponse.url` / OkHttp `response.request.url` |
+| Post-redirect URL on `PqcResponse` | ✅ `finalUrl()` mirrors `URLResponse.url` / OkHttp `response.request.url` |
 | RFC 9111 response cache (opt-in) | ✅ Disk on Android, mem+disk on iOS — like `OkHttp Cache` / `URLCache`; `clearCache()` + `cacheSizeBytes()` |
 | Timeouts (connect / total) | ✅ Separated so connect fails fast on cell handover |
 | Connection pooling | ✅ |
 | All HTTP methods | ✅ GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS |
-| ALPN reported on `HttpResponse` | ✅ `negotiatedProtocol` per request (confirm the KEX **group** server-side via `/cdn-cgi/trace` `kex=`) |
+| ALPN reported on `PqcResponse` | ✅ `negotiatedProtocol()` per request (confirm the KEX **group** server-side via `/cdn-cgi/trace` `kex=`) |
+| Streaming response bodies | ✅ `PqcResponse.readChunk()` / `bytes()` — like OkHttp `ResponseBody.source()` / URLSession `bytes(for:)` |
+| Streaming upload bodies (`BodyProvider`) | ✅ Bridge OkHttp `RequestBody.writeTo()` / URLSession `httpBodyStream` chunk-by-chunk — never buffers full upload |
 | Android GMS + non-GMS, iOS 13–18, iOS 26+ | ✅ (on iOS 26+ defer to native `URLSession` via `#available`) |
 | HTTP/3 / QUIC | ❌ Not supported |
 
