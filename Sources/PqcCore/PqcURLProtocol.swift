@@ -294,10 +294,7 @@ final class InputStreamBodyProvider: BodyProvider {
         // concurrent nextChunk is mid-read on the InputStream.
         lock.lock()
         defer { lock.unlock() }
-        if opened && !closed {
-            stream.close()
-            closed = true
-        }
+        closeIfOpenLocked()
     }
 
     func cancel() {
@@ -308,6 +305,15 @@ final class InputStreamBodyProvider: BodyProvider {
         // delayed by buffered chunks in flight).
         lock.lock()
         defer { lock.unlock() }
+        closeIfOpenLocked()
+    }
+
+    /// Caller must hold `lock`. Closes the stream if it was opened
+    /// and not yet closed; marks closed unconditionally so a future
+    /// nextChunk short-circuits. Single source of truth for the
+    /// close sequence — used by deinit, cancel, and nextChunk's
+    /// error/EOF branches.
+    private func closeIfOpenLocked() {
         if opened && !closed {
             stream.close()
         }
@@ -328,17 +334,15 @@ final class InputStreamBodyProvider: BodyProvider {
         var buf = [UInt8](repeating: 0, count: 64 * 1024)
         let n = stream.read(&buf, maxLength: buf.count)
         if n < 0 {
-            closed = true
-            stream.close()
             let underlying = stream.streamError?.localizedDescription
                 ?? "stream read returned an error"
+            closeIfOpenLocked()
             throw PqcError.InvalidRequest(
                 message: "request body stream read failed: \(underlying)"
             )
         }
         if n == 0 {
-            closed = true
-            stream.close()
+            closeIfOpenLocked()
             return nil  // EOF
         }
         return Data(bytes: buf, count: n)

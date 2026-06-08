@@ -550,11 +550,16 @@ impl StreamingCacheManager for PqcStreamingCacheManager {
         let body = if let Some(b) = self.read_mem(cache_key).await {
             PqcCachedBody::Buffered { data: b }
         } else {
-            // Open a streaming reader by the same key the writer used.
-            // `remaining` uses `body_size` from raw_metadata (authoritative)
-            // instead of `entry.size` (which may be 0 in the tee race
-            // window — see body_size guard above).
-            match cacache::Reader::open(&disk.path, cache_key).await {
+            // Open a streaming reader BY INTEGRITY. We already have
+            // `entry.integrity` from the metadata() call above —
+            // `Reader::open(path, key)` would re-walk the index
+            // bucket to look up the same integrity we already hold,
+            // doubling the per-hit I/O. `open_hash(path, integrity)`
+            // skips that and goes straight to the content blob.
+            // `remaining` uses `body_size` from raw_metadata
+            // (authoritative — see body_size guard above), not
+            // `entry.size` which is 0 during the tee race window.
+            match cacache::Reader::open_hash(&disk.path, entry.integrity.clone()).await {
                 Ok(reader) => PqcCachedBody::Cached {
                     reader: Box::pin(reader),
                     buf: BytesMut::with_capacity(STREAM_CHUNK_SIZE),
@@ -792,8 +797,14 @@ impl PqcStreamingCacheManager {
                 // Body size is known up-front for the buffered path, so
                 // raw_metadata gets `body_size: Some(len)` directly — no
                 // race window like put_tee.
-                let meta_blob =
-                    serialize_cache_metadata(&parts, policy, metadata, Some(body_size))?;
+                let meta_blob = serialize_cache_metadata(
+                    parts.status,
+                    parts.version,
+                    &parts.headers,
+                    policy,
+                    metadata,
+                    Some(body_size),
+                )?;
                 let mut writer = cacache::WriteOpts::new()
                     .raw_metadata(meta_blob)
                     .size(body_bytes.len())
@@ -875,7 +886,14 @@ impl PqcStreamingCacheManager {
         // background task can't complete. Headers/policy/metadata are
         // cloned (cheap — Vec<u8> + HashMap + Vec<u8>) so the task can
         // re-serialize with body_size=Some(total) on commit.
-        let meta_blob = serialize_cache_metadata(&parts, policy.clone(), metadata.clone(), None)?;
+        let meta_blob = serialize_cache_metadata(
+            parts.status,
+            parts.version,
+            &parts.headers,
+            policy.clone(),
+            metadata.clone(),
+            None,
+        )?;
         let task_parts_headers = parts.headers.clone();
         let task_status = parts.status;
         let task_version = parts.version;
@@ -1022,26 +1040,28 @@ impl PqcStreamingCacheManager {
                 // what makes get() deliver the full body (read off
                 // body_size, not entry.size — see the body_size guard
                 // in get()) and what makes eviction's list_sync see
-                // the real on-disk footprint.
-                let headers_for_meta: Vec<(String, Vec<u8>)> = task_parts_headers
-                    .iter()
-                    .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_owned()))
-                    .collect();
-                let final_meta = CacheMetadata {
-                    status: task_status.as_u16(),
-                    version: version_to_u8(task_version),
-                    headers: headers_for_meta,
-                    policy: task_policy,
-                    user_metadata: task_metadata,
-                    body_size: Some(total),
-                };
-                let final_meta_blob = match postcard::to_allocvec(&final_meta) {
+                // the real on-disk footprint. Uses the same
+                // serialize_cache_metadata helper as the initial
+                // commit + put_buffered, so a future CacheMetadata
+                // field change can't silently miss the commit path.
+                let final_meta_blob = match serialize_cache_metadata(
+                    task_status,
+                    task_version,
+                    &task_parts_headers,
+                    task_policy,
+                    task_metadata,
+                    Some(total),
+                ) {
                     Ok(b) => b,
                     Err(e) => {
                         log::warn!("pqc cache: tee final meta serialize failed: {e}");
                         return;
                     }
                 };
+                // Clone the integrity before reinsert (which consumes
+                // it via .integrity()) so we can use it for blob
+                // cleanup if the reinsert fails.
+                let integrity_for_cleanup = integrity.clone();
                 let reinsert_opts = cacache::WriteOpts::new()
                     .raw_metadata(final_meta_blob)
                     .size(total as usize)
@@ -1054,6 +1074,16 @@ impl PqcStreamingCacheManager {
                 .await
                 {
                     log::warn!("pqc cache: tee index re-insert failed: {e}");
+                    // Without this cleanup, the body blob committed
+                    // above stays on disk forever — its index entry
+                    // has size=0 (never accumulated into disk.bytes,
+                    // so evict_if_over_budget can't see it) and the
+                    // content blob is unreferenced after the failed
+                    // reinsert. cacache::remove + remove_hash reclaim
+                    // both; failures are logged but not fatal (best-
+                    // effort cleanup on an already-degraded path).
+                    let _ = cacache::remove(&disk_path, &task_cache_key).await;
+                    let _ = cacache::remove_hash(&disk_path, &integrity_for_cleanup).await;
                     return;
                 }
                 disk_bytes.fetch_add(total, Ordering::AcqRel);
@@ -1088,20 +1118,28 @@ impl PqcStreamingCacheManager {
 /// Serialize the cache metadata head (status/headers/policy/user_meta)
 /// to postcard bytes. Used by both put_buffered and put_tee so the
 /// on-disk layout stays a single source of truth.
+/// Single source of truth for the on-disk `CacheMetadata` postcard
+/// shape. Called by `put_buffered` (with body_size known up front),
+/// `put_tee` initial commit (body_size=None, the in-flight sentinel),
+/// and `put_tee` post-commit reinsert (body_size=Some(total)). Takes
+/// the constituent fields (not `&Parts`) so the tee task's commit
+/// path can call it from inside the spawn without needing to thread
+/// the whole `Parts` struct across the spawn boundary.
 fn serialize_cache_metadata(
-    parts: &http::response::Parts,
+    status: http::StatusCode,
+    version: http::Version,
+    headers: &http::HeaderMap,
     policy: CachePolicy,
     user_metadata: Option<Vec<u8>>,
     body_size: Option<u64>,
 ) -> HttpCacheResult<Vec<u8>> {
-    let headers: Vec<(String, Vec<u8>)> = parts
-        .headers
+    let headers: Vec<(String, Vec<u8>)> = headers
         .iter()
         .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_owned()))
         .collect();
     let meta = CacheMetadata {
-        status: parts.status.as_u16(),
-        version: version_to_u8(parts.version),
+        status: status.as_u16(),
+        version: version_to_u8(version),
         headers,
         policy,
         user_metadata,

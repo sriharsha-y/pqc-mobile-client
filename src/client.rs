@@ -587,16 +587,8 @@ impl PqcResponse {
                 Ok(None)
             }
             Err(e) => {
-                // Mid-body errors are transport-level (handshake
-                // already done), so map to Timeout/Network. The rustls
-                // classifier doesn't apply mid-body.
-                let mapped = if e.is_timeout() {
-                    PqcError::Timeout
-                } else {
-                    PqcError::Network
-                };
                 *guard = None;
-                Err(mapped)
+                Err(map_midbody_err(e))
             }
         }
     }
@@ -621,14 +613,22 @@ impl PqcResponse {
         }
         match result {
             Ok(b) => Ok(b.to_vec()),
-            Err(e) => {
-                if e.is_timeout() {
-                    Err(PqcError::Timeout)
-                } else {
-                    Err(PqcError::Network)
-                }
-            }
+            Err(e) => Err(map_midbody_err(e)),
         }
+    }
+}
+
+/// Map a mid-body reqwest error to a `PqcError`. Mid-body means the
+/// handshake already succeeded, so the rustls classifier doesn't apply
+/// — only `Timeout` and `Network` are reachable from here. Used by
+/// `PqcResponse::read_chunk` and `bytes` so the classification policy
+/// lives in one place; adding a new mid-body error variant (e.g.
+/// ConnectionReset) only needs to update this helper.
+fn map_midbody_err(e: reqwest::Error) -> PqcError {
+    if e.is_timeout() {
+        PqcError::Timeout
+    } else {
+        PqcError::Network
     }
 }
 
