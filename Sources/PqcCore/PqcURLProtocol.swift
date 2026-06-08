@@ -126,12 +126,11 @@ open class PqcURLProtocol: URLProtocol {
         self.pqcResp = nil
         pqcTask?.cancel()
         pqcTask = nil
-        // Reach into Rust to release the connection + permits NOW. The
-        // detached task is fire-and-forget; `cancel()` is idempotent and
-        // races safely with an `emit()` already in flight.
-        if let resp {
-            Task { await resp.cancel() }
-        }
+        // Sync FFI call — releases the connection + permits NOW. No
+        // detached Task, no async dance. `cancel()` is idempotent and
+        // races safely with an `emit()` already in flight (the read
+        // loop observes `cancelled` at its next chunk boundary).
+        resp?.cancel()
     }
 
     // MARK: - Request / response plumbing

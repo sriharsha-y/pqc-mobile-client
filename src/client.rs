@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -362,6 +363,7 @@ impl PqcHttpClient {
             final_url,
             headers,
             negotiated_protocol,
+            cancelled: AtomicBool::new(false),
             body: tokio::sync::Mutex::new(Some(resp)),
             _global_permit,
             _host_permit,
@@ -418,10 +420,11 @@ impl PqcHttpClient {
 /// # Cancellation note
 ///
 /// UniFFI 0.29 does not propagate foreign-runtime cancellation
-/// (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust.
-/// Consumers who want to abort an in-flight body read must call
-/// [`PqcResponse::cancel`] explicitly. See `docs/ios.md` and
-/// `docs/android.md`.
+/// (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust
+/// (mozilla/uniffi-rs#2771). Consumers who want to abort an in-flight
+/// body read must call [`PqcResponse::cancel`] explicitly — it's
+/// synchronous, so iOS `URLProtocol.stopLoading` and OkHttp
+/// `Source.close()` can call it without `Task { … }` or `runBlocking`.
 #[derive(uniffi::Object)]
 pub struct PqcResponse {
     // (Debug impl is manual below — the body field's mutex contents
@@ -430,8 +433,17 @@ pub struct PqcResponse {
     headers: HashMap<String, Vec<String>>,
     final_url: String,
     negotiated_protocol: String,
+    /// Set by `cancel()`. Read by `read_chunk` / `bytes` before AND
+    /// after the chunk await so a cancel that races a mid-flight read
+    /// is observed at the next await point: the in-flight chunk
+    /// completes (reqwest::Response::chunk isn't externally
+    /// cancellable), then the response is dropped and `Ok(None)` /
+    /// empty bytes returned. Modeled on OkHttp's `Call.cancel()`,
+    /// which also doesn't synchronously interrupt a mid-read socket
+    /// (square/okhttp#3680).
+    cancelled: AtomicBool,
     /// The live response. Wrapped in `tokio::sync::Mutex` so multiple
-    /// `&self` callers can coordinate access (UniFFI Object methods
+    /// `&self` callers serialize on body reads (UniFFI Object methods
     /// must take `&self`). `Option` so consume-style operations
     /// (`bytes`, `cancel`) can `take()` it.
     body: tokio::sync::Mutex<Option<reqwest::Response>>,
@@ -487,24 +499,56 @@ impl PqcResponse {
     pub fn negotiated_protocol(&self) -> String {
         self.negotiated_protocol.clone()
     }
+
+    /// Abort the body stream and release the underlying connection.
+    /// Idempotent — a second call is a no-op. Synchronous so iOS
+    /// `URLProtocol.stopLoading` and OkHttp `Source.close()` can call
+    /// it directly, without wrapping in `Task { … }` or `runBlocking`.
+    ///
+    /// If a `read_chunk`/`bytes` await is in flight when `cancel` is
+    /// called, the body mutex is contended and the in-flight chunk
+    /// completes normally; the post-await cancelled check then drops
+    /// the response and returns `Ok(None)` / empty bytes. This matches
+    /// OkHttp `Call.cancel()`, which also doesn't synchronously
+    /// interrupt a mid-read socket — interruption is best-effort.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        // If no reader holds the mutex right now, drop the response
+        // immediately so the connection returns to the pool. If a
+        // reader IS holding it, try_lock fails — the reader will
+        // observe `cancelled` after its current chunk finishes and
+        // take care of the drop itself.
+        if let Ok(mut guard) = self.body.try_lock() {
+            *guard = None;
+        }
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl PqcResponse {
     /// Pull the next chunk of the body. Returns `Ok(None)` when the
-    /// body has been fully consumed (EOF). Chunks arrive in network
-    /// order and are not bounded in size — typically 16 KB to 64 KB
-    /// for HTTP/2, larger for HTTP/1.1.
-    ///
-    /// Calling `read_chunk` after `bytes()` or `cancel()` always
-    /// returns `Ok(None)` — both consume the body.
+    /// body has been fully consumed (EOF) or `cancel()` has been
+    /// called. Chunks arrive in network order and are not bounded in
+    /// size — typically 16 KB to 64 KB for HTTP/2, larger for HTTP/1.1.
     pub async fn read_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
+        // Pre-await cancel check — short-circuits without taking the
+        // mutex when cancel ran before this call.
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let mut guard = self.body.lock().await;
         let resp = match guard.as_mut() {
             Some(r) => r,
             None => return Ok(None),
         };
-        match resp.chunk().await {
+        let result = resp.chunk().await;
+        // Post-await cancel check — if cancel raced this read, drop
+        // whatever we got and report EOF.
+        if self.cancelled.load(Ordering::Acquire) {
+            *guard = None;
+            return Ok(None);
+        }
+        match result {
             Ok(Some(b)) => Ok(Some(b.to_vec())),
             Ok(None) => {
                 // EOF — drop the live response so the connection
@@ -531,14 +575,22 @@ impl PqcResponse {
     /// Drain the entire body to a `Vec<u8>` (the buffered convenience,
     /// mirroring OkHttp `body.bytes()` and URLSession `data(for:)`).
     /// Internally consumes the response — subsequent `read_chunk`
-    /// calls return `Ok(None)`.
+    /// calls return `Ok(None)`. Returns empty if `cancel()` has been
+    /// called.
     pub async fn bytes(&self) -> Result<Vec<u8>, PqcError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
         let mut guard = self.body.lock().await;
         let resp = match guard.take() {
             Some(r) => r,
             None => return Ok(Vec::new()),
         };
-        match resp.bytes().await {
+        let result = resp.bytes().await;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
+        match result {
             Ok(b) => Ok(b.to_vec()),
             Err(e) => {
                 if e.is_timeout() {
@@ -548,15 +600,6 @@ impl PqcResponse {
                 }
             }
         }
-    }
-
-    /// Abort the body stream and release the underlying connection.
-    /// Idempotent — a second call is a no-op. Required for consumers
-    /// who want to abort mid-download because UniFFI 0.29 doesn't
-    /// propagate foreign cancellation into Rust.
-    pub async fn cancel(&self) {
-        let mut guard = self.body.lock().await;
-        *guard = None; // Dropping the reqwest::Response aborts the stream.
     }
 }
 
