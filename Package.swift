@@ -31,16 +31,10 @@ let package = Package(
         // `publish-swiftpm` each release. Its `import pqcFFI` matches the
         // xcframework modulemap and the binaryTarget name above.
         //
-        // linkerSettings: the vendored static archive references symbols
-        // from Apple frameworks that don't auto-link (no LC_LINKER_OPTION
-        // on .a files). Security: rustls-platform-verifier's SecTrust*
-        // / SecKey* calls. SystemConfiguration: hickory-resolver's
-        // transitive `system-configuration` Rust crate, which references
-        // SCDynamicStore* / SCNetworkReachability* / kSCNetworkInterfaceType*
-        // (added when the streaming refactor introduced the opt-in
-        // Hickory DNS path). Both linkedFramework decls propagate to
-        // consumer targets so `import PqcCore` is enough — no manual
-        // "Link Binary With Libraries" tweak on the consumer side.
+        // linkerSettings: static .a files don't auto-link Apple frameworks.
+        // Security: rustls-platform-verifier. SystemConfiguration:
+        // hickory-resolver via the system-configuration crate. Propagates
+        // to consumer targets — no manual link step needed.
         .target(
             name: "PqcCore",
             dependencies: ["pqcFFI"],

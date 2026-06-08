@@ -432,9 +432,20 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 The Kotlin-only sugar (`PqcConfig.platformDefault`, default-arg shortcuts, `suspend fun` on `PqcHttpClient.request`) interoperates with Java but requires a few adjustments:
 
 - **`PqcConfig.platformDefault(...)`** is a top-level extension function on `PqcConfig.Companion`. From Java it lives at `PqcConfigDefaultsKt.platformDefault(context, …)`. Kotlin default-arg synthesis isn't exposed to Java, so **you must pass every parameter explicitly**; pass `null` for the optional `*_ms` / pin / UA / etc. parameters where you want the defaults to apply. Easier alternative: build a `PqcConfig` via its full constructor (UniFFI-generated; all fields visible from Java).
-- **`PqcHttpClient.request(req)` is `suspend fun`**, which UniFFI 0.29 does **not** auto-bridge to Java (no `CompletableFuture` variant is generated). Two practical options from Java code:
-   1. Drop in a small Kotlin facade that wraps the call as `CompletableFuture` via `BuildersKt.future(GlobalScope.INSTANCE, ...)` from `kotlinx-coroutines-jdk8`, then call that from Java with `.get()` / `.thenApply(...)`. Add the bridge dep once (`implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.7.x")`).
-   2. From a Java background thread, call `BuildersKt.runBlocking(EmptyCoroutineContext.INSTANCE, (scope, cont) -> client.request(req, cont))` and treat the result synchronously. Simpler when you already have a worker pool; not appropriate on the main thread.
+- **`PqcHttpClient.request(req)` is `suspend fun`**, which UniFFI 0.29 does **not** auto-bridge to Java (no `CompletableFuture` variant is generated). Write a small Kotlin facade and call it from Java:
+   ```kotlin
+   // PqcClientJavaBridge.kt
+   import kotlinx.coroutines.GlobalScope
+   import kotlinx.coroutines.future.future
+   import java.util.concurrent.CompletableFuture
+
+   object PqcClientJavaBridge {
+       @JvmStatic
+       fun requestAsync(client: PqcHttpClient, req: HttpRequest): CompletableFuture<PqcResponse> =
+           GlobalScope.future { client.request(req) }
+   }
+   ```
+   Add `implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.7.x")` once. From Java: `PqcClientJavaBridge.requestAsync(client, req).get()` (blocking) or `.thenApply(...)` (callback). Calling the raw `suspend fun` from Java requires hand-constructing a `Continuation` — possible but error-prone; keep the suspension boundary on the Kotlin side.
 - **`PqcException` is sealed** in Kotlin; Java sees it as a regular exception hierarchy (`PqcException.Network`, `PqcException.Tls`, `PqcException.PinningFailure`, `PqcException.TrustVerification`, `PqcException.Timeout`, `PqcException.InvalidRequest`). Catch the base or the specific subclass.
 - **`PqcInterceptor` subclassing from Java** works — it's a Kotlin `open class`. Override `makeConfig(Context)` to return your `PqcConfig`. The interceptor is then added to OkHttp via `OkHttpClient.Builder.addInterceptor(pqcInterceptor)` the same way as in Kotlin.
 - **`BodyProvider` is a Kotlin interface** with two methods (`nextChunk(): ByteArray?` and `cancel(): Unit`); Java implementations are straightforward — implement both.

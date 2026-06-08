@@ -94,20 +94,11 @@ Behind the scenes: SPM resolves the version you pin to the matching `vX.Y.Z` git
 
 ### Apple framework dependencies
 
-The vendored static archive references symbols from two Apple frameworks. The release artifacts declare these on the consumer's behalf — you should **not** need to add them manually on either packaging path — but the underlying reason is worth knowing in case you switch to a manual XCFramework drop or hit a stripped-down build configuration:
+The vendored static archive references `Security` (rustls-platform-verifier) and `SystemConfiguration` (hickory-resolver via the `system-configuration` crate). Static `.a` files don't carry `LC_LINKER_OPTION` like dylibs, so each packaging path declares them explicitly — CocoaPods and SPM do this for you:
 
-| Framework | Why it's needed |
-|---|---|
-| `Security` | `rustls-platform-verifier`'s `SecTrust*` / `SecKey*` calls (`kSecKeyAlgorithm*` constants). |
-| `SystemConfiguration` | Pulled in transitively by `hickory-resolver` (added with the opt-in Hickory DNS path) via the `system-configuration` Rust crate; references `SCDynamicStore*` / `SCNetworkReachability*` / `kSCNetworkInterfaceType*`. |
-
-How each path declares them:
-
-- **CocoaPods**: `PqcCore.podspec`'s `s.frameworks = 'Security', 'SystemConfiguration'`. Picked up automatically by `pod install`.
-- **Swift Package Manager**: `Package.swift`'s `PqcCore` target declares `linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]`. Propagates to consumer targets via the standard SPM mechanism.
-- **Manual XCFramework drop / tarball**: add both frameworks under your app target's **Build Settings → Other Linker Flags** (`-framework Security -framework SystemConfiguration`) or **Build Phases → Link Binary With Libraries**. Without this you'll see `Undefined symbol: _kSCNetworkInterfaceTypeWWAN` or similar at link time.
-
-Static archives don't carry `LC_LINKER_OPTION` like dylibs do, which is why each consumer-side framework must be explicitly declared.
+- **CocoaPods**: `s.frameworks = 'Security', 'SystemConfiguration'` in `PqcCore.podspec`.
+- **SPM**: `linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]` in `Package.swift`.
+- **Manual XCFramework / tarball**: add `-framework Security -framework SystemConfiguration` to **Other Linker Flags**, or both under **Link Binary With Libraries**. Without this, expect `Undefined symbol: _kSCNetworkInterfaceTypeWWAN` (or similar) at link time.
 
 ## 3. Native iOS — `URLSession` via `URLProtocol` (drop-in)
 
@@ -291,26 +282,14 @@ The `AppPqcURLProtocol` class is identical to the native case (Section 3).
 
 ### Wiring from `AppDelegate.mm` (Objective-C++)
 
-If your RN template uses the Objective-C++ AppDelegate (`.mm`) instead of Swift, the same `RCTSetCustomNSURLSessionConfigurationProvider` call works — but ObjC++ can only see Swift symbols marked `@objc`. Two imports order matters in the `.mm`:
+If your RN template uses the Objective-C++ AppDelegate (`.mm`) instead of Swift, the same `RCTSetCustomNSURLSessionConfigurationProvider` call works — but ObjC++ can only see Swift symbols marked `@objc`, and import order matters:
 
 ```objc++
 // AppDelegate.mm
 
-// 1) PqcCore's Swift Compatibility Header FIRST — declares
-//    PqcURLProtocol (the superclass that <AppName>-Swift.h is about
-//    to reference for your bridge subclass).
-//
-//    Quote-form `#import "PqcCore-Swift.h"` is deliberate: `.mm` is
-//    Objective-C++, and `@import PqcCore;` would require
-//    `-fcxx-modules` in OTHER_CPLUSPLUSFLAGS — a build setting React
-//    Native does not enable. The PqcCore podspec adds the Swift
-//    Compatibility Header path to HEADER_SEARCH_PATHS via
-//    `user_target_xcconfig`, so this import resolves with no consumer
-//    xcconfig or pbxproj changes.
+// PqcCore-Swift.h first (declares PqcURLProtocol — superclass of
+// AppPqcURLProtocol). Replace "MyApp" with your product module name.
 #import "PqcCore-Swift.h"
-
-// 2) App's auto-generated Swift header AFTER — exposes AppPqcURLProtocol.
-//    Replace "MyApp" with your actual product module name.
 #import "MyApp-Swift.h"
 
 // ... inside didFinishLaunchingWithOptions: ...
@@ -339,13 +318,15 @@ public class AppPqcURLProtocol: PqcURLProtocol {
 }
 ```
 
-**Why `registerIfNeededInto:` (with the `Into:` suffix)?** The Swift method is `registerIfNeeded(into:)`; the framework exports it via `@objc(registerIfNeededInto:)` so ObjC++ sees it as `+ registerIfNeededInto:`. Same for `register(into:)` → `+ registerInto:`.
+The selector `registerIfNeededInto:` is Swift's default mapping of `registerIfNeeded(into:)`; `register(into:)` maps to `registerInto:`.
 
-> **Available since 0.8.1.** Earlier versions did not annotate the static helpers with `@objc`; if you're on 0.8.0, either upgrade or add a thin Swift `@objc` wrapper on your subclass. The podspec's `user_target_xcconfig` (which puts `PqcCore-Swift.h` on the consumer's HEADER_SEARCH_PATHS) is also 0.8.1+.
+> **If your Podfile uses `use_frameworks!`** (any linkage), swap the quote-form import for `#import <PqcCore/PqcCore-Swift.h>` (or `@import PqcCore;`). The quote-form above is for the default static-libs packaging and relies on the podspec's `user_target_xcconfig`; under `use_frameworks!` the header lives inside `PqcCore.framework/Headers/` and CocoaPods adds the right search path automatically.
+
+> **Available since 0.8.1.** Older releases don't `@objc`-annotate the static helpers or set `user_target_xcconfig`. On 0.8.0, either upgrade or add a thin Swift `@objc` wrapper on your subclass.
 
 ### Direct use of `PqcHttpClient` from Objective-C++
 
-The UniFFI-generated classes (`PqcHttpClient`, `PqcResponse`, `PqcConfig`, `BodyProvider`) are pure Swift — they are NOT bridged to Objective-C and cannot be called directly from `.mm` files. If you need to invoke `PqcHttpClient.request(...)` outside the URLProtocol path, write a small Swift bridge class with `@objc` methods and call that from your `.mm` code. The URLProtocol-based integration above is the recommended path for RN apps; direct use is only needed for custom protocols (e.g. WebSocket-over-HTTPS, gRPC).
+The UniFFI-generated classes (`PqcHttpClient`, `PqcResponse`, `PqcConfig`, `BodyProvider`) are pure Swift and are not bridged to Objective-C. To call them from `.mm`, write a small Swift `@objc` wrapper and call that. The URLProtocol path above is the recommended integration; direct use is only needed for non-`URLSession` protocols (e.g. WebSocket-over-HTTPS, gRPC).
 
 ## 7. iOS 26 gate
 

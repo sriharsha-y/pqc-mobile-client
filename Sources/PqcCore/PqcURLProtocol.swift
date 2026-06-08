@@ -50,12 +50,9 @@ open class PqcURLProtocol: URLProtocol {
     /// Insert at index 0 of `configuration.protocolClasses`. Inserts
     /// unconditionally — see ``registerIfNeeded(into:)`` for the gated form.
     ///
-    /// `@objc(registerInto:)` so Objective-C / Objective-C++ consumers
-    /// (typical React Native iOS apps wiring this from `AppDelegate.mm`)
-    /// can call it as `[MySubclass registerInto:cfg]` without a Swift
-    /// shim. The class-level `@objc(PqcURLProtocol)` alone isn't enough
-    /// — static funcs need their own annotation to appear in the
-    /// generated `-Swift.h` header.
+    /// `@objc(...)` so ObjC++ consumers (RN `AppDelegate.mm`) can call it
+    /// as `[MySubclass registerInto:cfg]`; class-level `@objc` doesn't
+    /// propagate to static funcs in the generated `-Swift.h`.
     @objc(registerInto:)
     public static func register(into configuration: URLSessionConfiguration) {
         var classes = configuration.protocolClasses ?? []
@@ -68,11 +65,6 @@ open class PqcURLProtocol: URLProtocol {
     /// (Apple [HT122756](https://support.apple.com/en-us/122756)).
     /// Call ``register(into:)`` directly if you need SPKI pinning on those
     /// versions too.
-    ///
-    /// `@objc(registerIfNeededInto:)` so Objective-C / Objective-C++
-    /// consumers can call `[MySubclass registerIfNeededInto:cfg]`
-    /// directly from `.mm` files (e.g. RN `AppDelegate.mm` inside
-    /// `RCTSetCustomNSURLSessionConfigurationProvider`).
     @objc(registerIfNeededInto:)
     public static func registerIfNeeded(into configuration: URLSessionConfiguration) {
         if #available(iOS 26.0, macOS 15.0, *) { return }
@@ -288,19 +280,11 @@ open class PqcURLProtocol: URLProtocol {
 /// deallocation. Reading from a closed stream returns `nil` (EOF) so
 /// the Rust side terminates cleanly.
 ///
-/// Threading: `nextChunk` is called sequentially from a single Rust
-/// worker, so the internal opened-flag isn't contended. `InputStream`
-/// itself is not thread-safe but URLProtocol's body stream is
-/// single-consumer by contract. `cancel()` may race a `nextChunk` from
-/// a different Rust thread; the `NSLock` below serializes the two.
-///
-/// `@unchecked Sendable` because the `BodyProvider` foreign trait is
-/// `Sendable` (UniFFI generates it that way — Rust trait objects are
-/// `Send + Sync`), but the stored `InputStream` is not `Sendable` and
-/// the mutable opened/closed flags trip Swift 6 strict concurrency
-/// checking. The NSLock manually enforces the synchronization Swift's
-/// type system can't see — same pattern UIKit classes use for
-/// `@unchecked Sendable` conformance.
+/// Threading: `nextChunk` is sequential from one Rust worker; `cancel()`
+/// may race it from another. The NSLock serializes the two. We don't
+/// close out from under a concurrent read — Foundation `InputStream`
+/// is not thread-safe. `@unchecked Sendable` because UniFFI's
+/// `BodyProvider` is Sendable but `InputStream` isn't.
 final class InputStreamBodyProvider: BodyProvider, @unchecked Sendable {
     private let stream: InputStream
     private var opened = false
@@ -321,11 +305,8 @@ final class InputStreamBodyProvider: BodyProvider, @unchecked Sendable {
     }
 
     func cancel() {
-        // Idempotent — Rust may call multiple times. Synchronously
-        // closes the InputStream so a file-backed body releases its
-        // file descriptor immediately on upload abort (don't wait for
-        // the Rust Arc<dyn BodyProvider> to drop, which could be
-        // delayed by buffered chunks in flight).
+        // Idempotent. Waits for any in-flight nextChunk to return before
+        // closing (see type doc for why we don't interrupt a read).
         lock.lock()
         defer { lock.unlock() }
         closeIfOpenLocked()

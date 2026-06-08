@@ -34,19 +34,9 @@ Pod::Spec.new do |s|
   s.vendored_frameworks = 'PqcCore.xcframework'
   s.preserve_paths    = 'PqcCore.xcframework'
 
-  # The vendored static archive references symbols from two Apple
-  # frameworks. Static .a files don't carry LC_LINKER_OPTION like
-  # dylibs, so each must be declared here — otherwise the consumer's
-  # app fails at link time with "Undefined symbol: …".
-  #
-  # - Security: rustls-platform-verifier's SecTrust* / SecKey* calls
-  #   (_kSecKeyAlgorithm*).
-  # - SystemConfiguration: hickory-resolver (added when the streaming
-  #   refactor introduced the opt-in Hickory DNS path) transitively
-  #   pulls in the `system-configuration` Rust crate, which references
-  #   SCDynamicStoreCreate, SCNetworkReachabilityCreateWithName,
-  #   kSCNetworkInterfaceType* constants, etc. These ship in
-  #   SystemConfiguration.framework, which Apple does NOT auto-link.
+  # Static .a files don't auto-link Apple frameworks. Security:
+  # rustls-platform-verifier. SystemConfiguration: hickory-resolver
+  # via the system-configuration Rust crate.
   s.frameworks = 'Security', 'SystemConfiguration'
 
   # aws-lc-sys's C++ runtime support symbols come from libc++ on Apple
@@ -60,28 +50,11 @@ Pod::Spec.new do |s|
   # but links with `Undefined symbol: _$s6pqcFFI...`.
   s.static_framework = true
 
-  # Make the Swift Compatibility Header (`PqcCore-Swift.h`) findable from
-  # Objective-C / Objective-C++ consumers via `#import "PqcCore-Swift.h"`
-  # (quote form, no modules). CocoaPods synthesises this header from the
-  # `@objc public` Swift API surface in `PqcURLProtocol.swift` etc., but
-  # places it at `$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header/`
-  # which is NOT in the consumer's default HEADER_SEARCH_PATHS.
-  #
-  # Why this matters: React Native AppDelegate is `.mm` (Objective-C++).
-  # `@import PqcCore;` works only with `-fcxx-modules` in OTHER_CPLUSPLUSFLAGS,
-  # which RN does not enable by default. The Pod's own synthesised modulemap
-  # declares `module PqcCore.Swift { requires objc }` — the `requires objc`
-  # clause explicitly blocks `@import` from ObjC++. And the framework-style
-  # `#import <PqcCore/PqcCore-Swift.h>` doesn't resolve in non-`use_frameworks!`
-  # mode because there's no `PqcCore.framework` bundle, only flat artifacts.
-  #
-  # `user_target_xcconfig` adds the path to the CONSUMER's HEADER_SEARCH_PATHS
-  # (not the Pod's own), so subclassing `PqcURLProtocol` in a Swift bridge
-  # class and calling it from `AppDelegate.mm` works out of the box —
-  # consumers do NOT need to touch their own xcconfig or pbxproj.
-  #
-  # See `docs/ios.md §6` for the consumer pattern.
+  # Put PqcCore-Swift.h on consumer HEADER_SEARCH_PATHS so ObjC++
+  # (RN AppDelegate.mm) can `#import "PqcCore-Swift.h"`. Static-libs
+  # layout; under `use_frameworks!` use the framework-form import.
+  # See docs/ios.md §6.
   s.user_target_xcconfig = {
-    'HEADER_SEARCH_PATHS' => '"$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header"',
+    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_CONFIGURATION_BUILD_DIR)/PqcCore/Swift Compatibility Header"',
   }
 end
