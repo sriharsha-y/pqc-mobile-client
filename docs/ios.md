@@ -371,3 +371,79 @@ This is a **private** cache (`shared = false`), so — exactly like `URLCache`/O
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache: true` makes the initializer throw `PqcError.invalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
 - **vs. `URLCache`:** the memory tier is true LRU; the disk tier evicts oldest-first (FIFO) once `maxCacheBytes` is exceeded. Like `URLCache`, we apply a **per-entry cap of ~5% of total capacity** — with a 20 MiB cache, individual responses larger than ~1 MiB skip the cache, so one large download can't evict the entire hot set. We deliberately do **not** replicate `URLCache`'s 200–299-only status filter (we cache the broader RFC set).
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
+
+## 12. DNS resolver — `dnsResolver` (opt-in)
+
+By default the client uses libc `getaddrinfo` driven by the iOS system resolver chain. Most apps want this — leave `dnsResolver` unset.
+
+Set `dnsResolver = .hickory` to switch to the bundled `hickory-dns` async resolver. This enables **RFC 8305 Happy Eyeballs** — concurrent IPv4/IPv6 connection racing, materially faster on dual-stack networks where one address family is broken (common on some cellular carriers). The trade-off: hickory uses its own DNS path; if your app relies on iOS-managed DNS configuration (e.g. profile-installed resolvers), leave the resolver at the default `.system`.
+
+```swift
+let config = PqcConfig.platformDefault(
+    // ...
+    dnsResolver: .hickory  // opt-in for Happy Eyeballs
+)
+```
+
+## 13. Streaming upload bodies — `BodyProvider` (large file uploads)
+
+The default upload path inlines the body via `HttpRequest.body: Data` (or `URLRequest.httpBody`), buffering the entire payload in memory. For large uploads (photos, videos, multipart with file parts) use the streaming path: set `URLRequest.httpBodyStream` and the `PqcURLProtocol` wrapper automatically bridges it through `BodyProvider`, streaming chunk-by-chunk to the network. **Peak memory tracks one chunk (~64 KiB)**, not the file size — matches `URLSession.uploadTask(withStreamedRequest:)` semantics.
+
+For consumers calling `PqcHttpClient` directly (bypassing `URLProtocol`), implement `BodyProvider` in Swift and set `HttpRequest.bodyStream`:
+
+```swift
+final class FileBodyProvider: BodyProvider {
+    private let stream: InputStream
+    private var opened = false
+    private var closed = false
+    private let lock = NSLock()
+
+    init(fileURL: URL) {
+        self.stream = InputStream(url: fileURL)!
+    }
+
+    func nextChunk() throws -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        if closed { return nil }
+        if !opened { stream.open(); opened = true }
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        let n = stream.read(&buf, maxLength: buf.count)
+        if n < 0 { throw PqcError.invalidRequest(message: "read failed") }
+        if n == 0 { stream.close(); closed = true; return nil }
+        return Data(bytes: buf, count: n)
+    }
+
+    func cancel() {
+        // Idempotent — Rust calls this on upload abort to release the fd.
+        lock.lock(); defer { lock.unlock() }
+        if opened && !closed { stream.close() }
+        closed = true
+    }
+}
+
+let fileURL = URL(fileURLWithPath: "/path/to/big.bin")
+let resp = try await pqc.request(req: HttpRequest(
+    method: .post,
+    url: "https://api.example.com/upload",
+    headers: ["Content-Type": ["application/octet-stream"]],
+    body: nil,                                       // ← mutually exclusive
+    bodyStream: FileBodyProvider(fileURL: fileURL),  // ← stream
+    bodyStreamLength: UInt64(fileSize),              // optional Content-Length;
+                                                     //   nil → chunked encoding
+    timeoutMs: nil
+))
+```
+
+`nextChunk()` is invoked from Rust via tokio `spawn_blocking`, so blocking reads (file I/O, `InputStream.read`) are safe. `cancel()` is called when the upload aborts (network error, caller dropped the request, server closed mid-stream) — implement it to release fds and other resources. **Streaming bodies are not retry-safe** — once consumed, they can't be replayed; construct a fresh `BodyProvider` if you need to retry.
+
+## 14. Tuning knobs
+
+Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional, set on the config you return from `makeConfig()`):
+
+| Field | Default | Notes |
+|---|---|---|
+| `readIdleTimeoutMs` | `nil` | Per-read idle timeout — kills a stalled stream without burning the total `defaultTimeoutMs` budget. Mirrors OkHttp's `readTimeout`. Recommended: 10–30 s for APIs, 60 s+ for large file downloads. |
+| `maxInflightTotal` | `Some(64)` | Global concurrent-request cap. `nil` disables. Matches OkHttp `Dispatcher.maxRequests`. |
+| `maxInflightPerHost` | `Some(5)` | Per-host concurrent-request cap. `nil` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`; URLSession's analogous cap is 6. |
+| `maxMemoryCacheBytes` | `nil` (= 4 MiB) | In-memory LRU tier for the response cache, on top of the disk tier. Matches `URLCache`'s memory tier. `Some(0)` opts out entirely. |
+| `dnsResolver` | `nil` (= `.system`) | See §12. |

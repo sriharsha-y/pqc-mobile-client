@@ -361,3 +361,68 @@ val config = PqcConfig(
     dnsResolver = DnsResolver.Hickory,  // opt-in for Happy Eyeballs
 )
 ```
+
+## 13. Streaming upload bodies — `BodyProvider` (large file uploads)
+
+If you're using `PqcInterceptor` (§3), large uploads are handled automatically: OkHttp `RequestBody` instances with `contentLength() > 64 KiB` or unknown length route through an internal `BodyProvider` adapter that streams chunk-by-chunk via `okio.Pipe`. **Peak memory tracks one chunk (~64 KiB)**, not the file size — matches OkHttp's `RequestBody.writeTo()` semantics.
+
+For consumers calling `PqcHttpClient` directly (Section 6), implement `BodyProvider` in Kotlin and set `HttpRequest.bodyStream`:
+
+```kotlin
+import io.github.sriharsha_y.pqc.BodyProvider
+import io.github.sriharsha_y.pqc.HttpRequest
+import io.github.sriharsha_y.pqc.HttpMethod
+import io.github.sriharsha_y.pqc.PqcException
+import java.io.InputStream
+
+class StreamBodyProvider(private val stream: InputStream) : BodyProvider {
+    private val buf = ByteArray(64 * 1024)
+    @Volatile private var closed = false
+
+    override fun nextChunk(): ByteArray? {
+        if (closed) return null
+        val n = try { stream.read(buf) }
+                catch (t: Throwable) {
+                    throw PqcException.InvalidRequest("read failed: ${t.message}")
+                }
+        if (n <= 0) { close(); return null }
+        return buf.copyOf(n)
+    }
+
+    override fun cancel() {
+        // Idempotent — Rust calls this on upload abort. Release the fd
+        // immediately instead of waiting for the binding handle to drop.
+        if (!closed) { closed = true; try { stream.close() } catch (_: Throwable) {} }
+    }
+
+    private fun close() = cancel()
+}
+
+val fileStream = file.inputStream()
+val resp = runBlocking {
+    pqc.request(HttpRequest(
+        method = HttpMethod.POST,
+        url = "https://api.example.com/upload",
+        headers = mapOf("Content-Type" to listOf("application/octet-stream")),
+        body = null,                                  // ← mutually exclusive
+        bodyStream = StreamBodyProvider(fileStream),  // ← stream
+        bodyStreamLength = file.length().toULong(),   // optional Content-Length;
+                                                      //   null → chunked encoding
+        timeoutMs = null,
+    ))
+}
+```
+
+`nextChunk()` is invoked from Rust via tokio `spawn_blocking`, so blocking reads (`InputStream.read`, file I/O) are safe. `cancel()` is called when the upload aborts (network error, caller dropped the request, server closed mid-stream) — implement it to release file descriptors and other resources. **Streaming bodies are not retry-safe** — once consumed, they can't be replayed; construct a fresh `BodyProvider` if you need to retry.
+
+## 14. Tuning knobs
+
+Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional, named args on `PqcConfig(...)` or `PqcConfig.platformDefault(...)`):
+
+| Field | Default | Notes |
+|---|---|---|
+| `readIdleTimeoutMs` | `null` | Per-read idle timeout — kills a stalled stream without burning the total `defaultTimeoutMs` budget. Mirrors OkHttp's `readTimeout`. Recommended: 10–30 s for APIs, 60 s+ for large file downloads. |
+| `maxInflightTotal` | `64uL` | Global concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequests`. |
+| `maxInflightPerHost` | `5uL` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
+| `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
+| `dnsResolver` | `null` (= `System`) | See §12. |
