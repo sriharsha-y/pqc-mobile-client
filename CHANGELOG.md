@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.0...v0.8.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **ios,android,docs:** integration audit + cleanup pass ([29a61aa](https://github.com/sriharsha-y/pqc-mobile-client/commit/29a61aaa853237549d3f398e24b68f684a510d44))
+* **ios,android,docs:** tighten integration patches and trim explanatory prose ([dbc1b0a](https://github.com/sriharsha-y/pqc-mobile-client/commit/dbc1b0a41b7138e5b12fe17fbdead90b8c21500f))
+* **ios,docs:** unblock Objective-C++ integration paths ([08bc4b5](https://github.com/sriharsha-y/pqc-mobile-client/commit/08bc4b589becb30edabf88a44f0312ea86b97468))
+* **ios:** declare SystemConfiguration framework dependency ([ac5ff57](https://github.com/sriharsha-y/pqc-mobile-client/commit/ac5ff57f13cddb39002fefbcff6b410ce0c32719))
+* **ios:** expose PqcCore-Swift.h to ObjC++ consumers via user_target_xcconfig ([3533711](https://github.com/sriharsha-y/pqc-mobile-client/commit/353371153fcf8deac4b09b98bb9b9c1272e0027c))
+
 ## [0.8.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.7.1...v0.8.0) (2026-06-08)
 
 
