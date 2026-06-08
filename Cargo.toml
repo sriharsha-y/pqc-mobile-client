@@ -51,10 +51,10 @@ cache = [
     "dep:serde",
     "dep:http-cache-semantics",
     # Body + streaming machinery for our StreamingCacheManager impl.
+    # (bytes is now a required dep — streaming uploads need it too.)
     "dep:http-body",
     "dep:http-body-util",
     "dep:http",
-    "dep:bytes",
     "dep:pin-project-lite",
     "dep:futures-util",
 ]
@@ -150,9 +150,18 @@ http-cache-semantics = { version = "3", features = ["serde"], optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 http = { version = "1", optional = true }
-bytes = { version = "1", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
+
+# Streaming-upload primitives. Required (not feature-gated) — used by
+# `client.rs::BodyProviderStream` to bridge foreign-implemented
+# `BodyProvider` into reqwest::Body::wrap_stream. `bytes` is already
+# transitively present via reqwest; pinning it explicitly so we don't
+# silently drift if reqwest drops it. `futures-core` is the minimal
+# Stream trait surface (no executor) — adds ~negligible bytes to the
+# mobile archive.
+bytes = "1"
+futures-core = { version = "0.3", default-features = false }
 
 # Android-only: rustls-platform-verifier needs a JNI handshake from the
 # app's Application.onCreate to capture the Android Context so it can

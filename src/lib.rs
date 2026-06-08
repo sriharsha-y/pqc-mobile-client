@@ -26,6 +26,6 @@ mod android_init;
 pub use client::{PqcHttpClient, PqcResponse};
 pub use config::{DnsResolver, PqcConfig, RedirectPolicy};
 pub use error::PqcError;
-pub use types::{HttpMethod, HttpRequest};
+pub use types::{BodyProvider, HttpMethod, HttpRequest};
 
 uniffi::setup_scaffolding!("pqc");

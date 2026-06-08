@@ -10,7 +10,12 @@ use tokio::sync::Semaphore;
 use crate::config::{DnsResolver, PqcConfig, RedirectPolicy};
 use crate::error::PqcError;
 use crate::tls::build_tls_config;
-use crate::types::{HttpMethod, HttpRequest};
+use crate::types::{BodyProvider, HttpMethod, HttpRequest};
+use bytes::Bytes;
+use futures_core::Stream;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use tokio::sync::OwnedSemaphorePermit;
 
 /// Default connect timeout (`connect_timeout_ms == None`). Sized for cell
@@ -288,6 +293,14 @@ impl PqcHttpClient {
         // Moved (not cloned) into whichever match arm runs — cloning would
         // copy the entire upload on every request.
         let body = req.body;
+        let body_stream = req.body_stream.clone();
+        let body_stream_length = req.body_stream_length;
+
+        // Mutually exclusive: caller must pick exactly one (or neither).
+        // Mixing them would silently drop the stream — fail loud instead.
+        if body.is_some() && body_stream.is_some() {
+            return Err(PqcError::InvalidRequest);
+        }
 
         // The two backends share the same header/body/timeout surface but
         // have distinct RequestBuilder types, so a macro fills both without
@@ -306,6 +319,22 @@ impl PqcHttpClient {
                 }
                 if let Some(body) = body {
                     b = b.body(body);
+                } else if let Some(provider) = body_stream.clone() {
+                    // Streaming upload: pull chunks via `BodyProvider`
+                    // and feed them to reqwest::Body::wrap_stream. Each
+                    // foreign call runs on `spawn_blocking` so the FFI
+                    // (potentially blocking) read doesn't park a tokio
+                    // worker.
+                    let s = body_provider_stream(provider);
+                    let reqwest_body = reqwest::Body::wrap_stream(s);
+                    b = b.body(reqwest_body);
+                    if let Some(len) = body_stream_length {
+                        // Known length → Content-Length header, no
+                        // chunked encoding. Matches URLSession with
+                        // httpBodyStream when the consumer sets a
+                        // length, and OkHttp's contentLength() != -1.
+                        b = b.header("content-length", len.to_string());
+                    }
                 }
                 if let Some(t) = timeout_ms {
                     b = b.timeout(Duration::from_millis(t));
@@ -719,6 +748,84 @@ fn classify_rustls_error(e: &rustls::Error) -> PqcError {
         | R::InconsistentKeys(_) => PqcError::Tls,
 
         _ => PqcError::Tls,
+    }
+}
+
+/// Adapter from a foreign-implemented `BodyProvider` to the
+/// `Stream<Item = Result<Bytes>>` shape `reqwest::Body::wrap_stream`
+/// expects.
+///
+/// Each `next_chunk` call runs on `tokio::task::spawn_blocking` so a
+/// blocking foreign read (file I/O, okio.Pipe read, InputStream read)
+/// doesn't park a tokio worker. The `JoinHandle` futures are stored
+/// per-poll so cancellation drops them naturally and the next poll
+/// starts a fresh blocking task.
+///
+/// Empty `Some(vec)` is treated as EOF, matching the `BodyProvider`
+/// doc contract — lets foreign code signal end-of-stream without
+/// keeping an extra flag.
+struct BodyProviderStream {
+    provider: Arc<dyn BodyProvider>,
+    pending: Option<tokio::task::JoinHandle<Result<Option<Vec<u8>>, PqcError>>>,
+    done: bool,
+}
+
+impl Stream for BodyProviderStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        // Kick off a blocking next_chunk call if none in flight.
+        if self.pending.is_none() {
+            let provider = Arc::clone(&self.provider);
+            let handle = tokio::task::spawn_blocking(move || provider.next_chunk());
+            self.pending = Some(handle);
+        }
+        // Poll the in-flight handle.
+        let handle = self.pending.as_mut().expect("pending set above");
+        match Pin::new(handle).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(Ok(Some(c)))) if !c.is_empty() => {
+                self.pending = None;
+                Poll::Ready(Some(Ok(Bytes::from(c))))
+            }
+            Poll::Ready(Ok(Ok(_))) => {
+                // None or empty Vec → EOF.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Ok(Err(_))) => {
+                // BodyProvider returned PqcError — abort the upload.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(Some(Err(std::io::Error::other(
+                    "body provider returned error",
+                ))))
+            }
+            Poll::Ready(Err(join_err)) => {
+                // spawn_blocking task panicked. Surface to reqwest as
+                // an IO error so the request fails cleanly.
+                self.done = true;
+                self.pending = None;
+                Poll::Ready(Some(Err(std::io::Error::other(format!(
+                    "body provider task panicked: {join_err}"
+                )))))
+            }
+        }
+    }
+}
+
+fn body_provider_stream(provider: Arc<dyn BodyProvider>) -> BodyProviderStream {
+    BodyProviderStream {
+        provider,
+        pending: None,
+        done: false,
     }
 }
 

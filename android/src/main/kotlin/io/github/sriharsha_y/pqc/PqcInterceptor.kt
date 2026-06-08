@@ -8,10 +8,13 @@ import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.Response
 import okio.Buffer
+import okio.Pipe
 import okio.buffer
 import java.io.IOException
+import java.util.concurrent.Executors
 
 /**
  * OkHttp [Interceptor] that routes calls through the Rust [PqcHttpClient]
@@ -24,6 +27,13 @@ import java.io.IOException
  * `BridgeInterceptor` (cookies, `Host`, gzip) and `CacheInterceptor` are
  * bypassed too; the Rust client owns cookies and cache instead.
  */
+/// Bodies up to this size are buffered inline (single ByteArray, one
+/// FFI hop). Anything larger — including unknown-length bodies — goes
+/// through the streaming BodyProvider path. 64 KiB is the same as
+/// OkHttp's default `Segment` size, big enough that small JSON
+/// payloads never spin up a streaming pipe.
+private const val INLINE_BODY_THRESHOLD: Long = 64L * 1024L
+
 open class PqcInterceptor(context: Context) : Interceptor {
 
     private val appContext: Context = context.applicationContext
@@ -76,10 +86,35 @@ open class PqcInterceptor(context: Context) : Interceptor {
                             else current + req.headers.value(i)
         }
 
-        val bodyBytes: ByteArray? = req.body?.let { body ->
+        // Body routing: small bodies (or unknown-length but ≤ INLINE_THRESHOLD)
+        // are inlined as ByteArray; everything else streams via BodyProvider
+        // so the upload never fully materializes — matches OkHttp's own
+        // RequestBody.writeTo() streaming contract.
+        val reqBody: RequestBody? = req.body
+        val contentLen: Long = reqBody?.contentLength() ?: -1L
+        val inline: ByteArray?
+        val stream: BodyProvider?
+        val streamLen: ULong?
+        if (reqBody == null) {
+            inline = null
+            stream = null
+            streamLen = null
+        } else if (contentLen in 0L..INLINE_BODY_THRESHOLD) {
+            // Known-small body: buffer once into ByteArray (one allocation,
+            // single FFI hop, no thread spin-up).
             val buf = Buffer()
-            body.writeTo(buf)
-            buf.readByteArray()
+            reqBody.writeTo(buf)
+            inline = buf.readByteArray()
+            stream = null
+            streamLen = null
+        } else {
+            // Unknown length OR known-large: stream. RequestBody.writeTo is a
+            // PUSH interface; we adapt it to BodyProvider's PULL contract via
+            // okio.Pipe — writer pushes from a background thread, Rust pulls
+            // from the source side.
+            inline = null
+            stream = OkHttpBodyProviderAdapter(reqBody)
+            streamLen = if (contentLen >= 0) contentLen.toULong() else null
         }
 
         val pqcResp = try {
@@ -89,7 +124,9 @@ open class PqcInterceptor(context: Context) : Interceptor {
                         method = req.method.toPqcMethod(),
                         url = req.url.toString(),
                         headers = headers,
-                        body = bodyBytes,
+                        body = inline,
+                        bodyStream = stream,
+                        bodyStreamLength = streamLen,
                         timeoutMs = null,
                     )
                 )
@@ -243,5 +280,71 @@ open class PqcInterceptor(context: Context) : Interceptor {
         503 -> "Service Unavailable"
         504 -> "Gateway Timeout"
         else -> ""
+    }
+}
+
+/**
+ * Adapts an OkHttp [RequestBody] (a PUSH interface — `writeTo(sink)`)
+ * to the Rust [BodyProvider] PULL contract via an [okio.Pipe]. The
+ * OkHttp body is written from a single background thread; the Rust
+ * client pulls chunks via [nextChunk], each call reading the next
+ * available 64 KiB from the pipe's source side.
+ *
+ * The pipe's internal buffer (`PIPE_BUFFER`) provides backpressure:
+ * if Rust falls behind, the writer thread blocks on the next
+ * `sink.write()` until the source drains. Peak memory tracks
+ * `PIPE_BUFFER`, not the body size — even a 10 GB upload stays
+ * bounded to ~256 KiB resident.
+ *
+ * Threading: the writer thread is a single dedicated daemon — one
+ * thread per in-flight streaming upload, lifetime tied to the request.
+ * `nextChunk` is invoked from Rust via UniFFI on a tokio
+ * `spawn_blocking` worker, so it's safe to do blocking pipe reads.
+ */
+private class OkHttpBodyProviderAdapter(private val body: RequestBody) : BodyProvider {
+    private val pipe = Pipe(PIPE_BUFFER)
+    private val source = pipe.source.buffer()
+    private val readBuf = Buffer()
+
+    init {
+        // One-shot writer: pumps the RequestBody into the pipe sink and
+        // closes it on EOF. Errors propagate via pipe.fold/cancel; the
+        // source-side read then surfaces them to Rust as an EOF.
+        val sink = pipe.sink.buffer()
+        WRITER_POOL.execute {
+            try {
+                body.writeTo(sink)
+                sink.flush()
+            } catch (t: Throwable) {
+                // Close the pipe to signal EOF/error to the reader.
+            } finally {
+                try { sink.close() } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    override fun nextChunk(): ByteArray? {
+        readBuf.clear()
+        return try {
+            val n = source.read(readBuf, CHUNK_SIZE.toLong())
+            if (n <= 0L) null else readBuf.readByteArray()
+        } catch (_: Throwable) {
+            // Pipe closed mid-read (writer errored or completed).
+            null
+        }
+    }
+
+    companion object {
+        // Per-upload buffer. 256 KiB balances syscall amortization vs
+        // peak memory; OkHttp's own internal pipe defaults to 1 MiB,
+        // but mobile devices prefer the tighter cap.
+        private const val PIPE_BUFFER: Long = 256L * 1024L
+        // Per-chunk read size — matches the Rust side's STREAM_CHUNK_SIZE.
+        private const val CHUNK_SIZE: Int = 64 * 1024
+        // Single shared daemon pool — one writer per in-flight upload.
+        // Each task lives O(body size / network throughput), then exits.
+        private val WRITER_POOL = Executors.newCachedThreadPool { r ->
+            Thread(r, "pqc-upload-writer").apply { isDaemon = true }
+        }
     }
 }

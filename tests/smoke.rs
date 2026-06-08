@@ -4,10 +4,11 @@
 //! Run: `cargo test --release --test smoke -- --nocapture`
 
 use pqc_client::{
-    HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, PqcResponse, RedirectPolicy,
+    BodyProvider, HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, PqcResponse,
+    RedirectPolicy,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Extract the `kex=` value from a Cloudflare `/cdn-cgi/trace` body.
 fn parse_kex(trace_body: &str) -> Option<String> {
@@ -45,6 +46,8 @@ fn get(url: &str) -> HttpRequest {
         url: url.to_string(),
         headers: HashMap::new(),
         body: None,
+        body_stream: None,
+        body_stream_length: None,
         timeout_ms: None,
     }
 }
@@ -178,6 +181,8 @@ async fn post_body_round_trips() {
             url: url.to_string(),
             headers: headers.clone(),
             body: Some(body.clone()),
+            body_stream: None,
+            body_stream_length: None,
             timeout_ms: None,
         };
         // Each endpoint is its own resilient attempt; we don't panic
@@ -255,4 +260,110 @@ async fn concurrent_requests_share_one_client() {
         ok += 1;
     }
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");
+}
+
+/// Test-only `BodyProvider` that yields pre-staged chunks. Lets us
+/// drive the streaming-upload code path without a real file source.
+struct VecBodyProvider {
+    chunks: Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+impl VecBodyProvider {
+    fn new<I: IntoIterator<Item = Vec<u8>>>(chunks: I) -> Self {
+        Self {
+            chunks: Mutex::new(chunks.into_iter().collect()),
+        }
+    }
+}
+
+impl BodyProvider for VecBodyProvider {
+    fn next_chunk(&self) -> Result<Option<Vec<u8>>, PqcError> {
+        Ok(self.chunks.lock().expect("provider lock poisoned").pop_front())
+    }
+}
+
+/// Streaming POST: send a body via `BodyProvider` (chunks pulled by
+/// the client over FFI / `spawn_blocking`) and verify the assembled
+/// payload reaches the server. Three chunks → reqwest concatenates +
+/// uses chunked transfer-encoding (no Content-Length set), so this
+/// exercises both the streaming wire format and the multi-chunk
+/// FFI pull loop.
+#[tokio::test]
+async fn streaming_post_body_round_trips() {
+    let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
+
+    // Three chunks; the server should reassemble to the concatenation.
+    let chunks: Vec<Vec<u8>> = vec![
+        br#"{"a":"#.to_vec(),
+        br#""hello","b":"#.to_vec(),
+        br#""world"}"#.to_vec(),
+    ];
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        vec!["application/json".to_string()],
+    );
+
+    let endpoints = ["https://postman-echo.com/post", "https://httpbin.org/post"];
+    let mut last_err: Option<String> = None;
+    let mut got_resp: Option<Arc<PqcResponse>> = None;
+    for url in endpoints {
+        // Each retry needs a FRESH provider — streams aren't rewindable.
+        let provider: Arc<dyn BodyProvider> =
+            Arc::new(VecBodyProvider::new(chunks.clone()));
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: url.to_string(),
+            headers: headers.clone(),
+            body: None,
+            body_stream: Some(provider),
+            body_stream_length: None, // chunked transfer-encoding
+            timeout_ms: None,
+        };
+        match client.request(req).await {
+            Ok(r) if r.status() < 500 && r.status() != 429 => {
+                got_resp = Some(r);
+                break;
+            }
+            Ok(r) => last_err = Some(format!("{url}: HTTP {}", r.status())),
+            Err(e) => last_err = Some(format!("{url}: {e:?}")),
+        }
+    }
+
+    let resp = got_resp
+        .unwrap_or_else(|| panic!("all streaming POST echo endpoints failed (last: {last_err:?})"));
+    assert_eq!(resp.status(), 200, "streaming POST should return 200");
+
+    let body_bytes = resp.bytes().await.expect("body drain should succeed");
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    // The concatenated payload contains both keys + values; echo
+    // services include the request body somewhere in the response.
+    assert!(
+        body_str.contains("\"hello\"") && body_str.contains("\"world\""),
+        "echoed body should contain the assembled payload, got: {body_str}"
+    );
+}
+
+/// Body + body_stream both set → InvalidRequest. Guards the
+/// mutually-exclusive contract documented on `HttpRequest`.
+#[tokio::test]
+async fn body_and_body_stream_both_set_rejected() {
+    let client = PqcHttpClient::new(default_test_config()).expect("client should construct");
+    let provider: Arc<dyn BodyProvider> = Arc::new(VecBodyProvider::new(vec![b"x".to_vec()]));
+    let req = HttpRequest {
+        method: HttpMethod::Post,
+        url: "https://postman-echo.com/post".to_string(),
+        headers: HashMap::new(),
+        body: Some(b"y".to_vec()),
+        body_stream: Some(provider),
+        body_stream_length: None,
+        timeout_ms: None,
+    };
+    let err = client.request(req).await.expect_err("must reject");
+    assert!(
+        matches!(err, PqcError::InvalidRequest),
+        "expected InvalidRequest, got {:?}",
+        err
+    );
 }
