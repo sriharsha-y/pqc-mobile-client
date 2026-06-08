@@ -426,3 +426,13 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 | `maxInflightPerHost` | `5uL` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
 | `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
 | `dnsResolver` | `null` (= `System`) | See §12. |
+
+## 15. Consuming from Java (not Kotlin)
+
+The Kotlin-only sugar (`PqcConfig.platformDefault`, default-arg shortcuts, `suspend fun` on `PqcHttpClient.request`) interoperates with Java but requires a few adjustments:
+
+- **`PqcConfig.platformDefault(...)`** is a top-level extension function on `PqcConfig.Companion`. From Java it lives at `PqcConfigDefaultsKt.platformDefault(context, …)`. Kotlin default-arg synthesis isn't exposed to Java, so **you must pass every parameter explicitly**; pass `null` for the optional `*_ms` / pin / UA / etc. parameters where you want the defaults to apply. Easier alternative: build a `PqcConfig` via its full constructor (UniFFI-generated; all fields visible from Java).
+- **`PqcHttpClient.request(req)` is `suspend fun`**, which UniFFI 0.29 exposes to Java as a `CompletableFuture<PqcResponse>` (alongside the Kotlin `suspend` form). Use `.get()` to block or `.thenApply(...)` to chain.
+- **`PqcException` is sealed** in Kotlin; Java sees it as a regular exception hierarchy (`PqcException.Network`, `PqcException.Tls`, `PqcException.PinningFailure`, `PqcException.TrustVerification`, `PqcException.Timeout`, `PqcException.InvalidRequest`). Catch the base or the specific subclass.
+- **`PqcInterceptor` subclassing from Java** works — it's a Kotlin `open class`. Override `makeConfig(Context)` to return your `PqcConfig`. The interceptor is then added to OkHttp via `OkHttpClient.Builder.addInterceptor(pqcInterceptor)` the same way as in Kotlin.
+- **`BodyProvider` is a Kotlin interface** with two methods (`nextChunk(): ByteArray?` and `cancel(): Unit`); Java implementations are straightforward — implement both.

@@ -49,6 +49,14 @@ open class PqcURLProtocol: URLProtocol {
 
     /// Insert at index 0 of `configuration.protocolClasses`. Inserts
     /// unconditionally — see ``registerIfNeeded(into:)`` for the gated form.
+    ///
+    /// `@objc(registerInto:)` so Objective-C / Objective-C++ consumers
+    /// (typical React Native iOS apps wiring this from `AppDelegate.mm`)
+    /// can call it as `[MySubclass registerInto:cfg]` without a Swift
+    /// shim. The class-level `@objc(PqcURLProtocol)` alone isn't enough
+    /// — static funcs need their own annotation to appear in the
+    /// generated `-Swift.h` header.
+    @objc(registerInto:)
     public static func register(into configuration: URLSessionConfiguration) {
         var classes = configuration.protocolClasses ?? []
         classes.insert(self as AnyClass, at: 0)
@@ -60,6 +68,12 @@ open class PqcURLProtocol: URLProtocol {
     /// (Apple [HT122756](https://support.apple.com/en-us/122756)).
     /// Call ``register(into:)`` directly if you need SPKI pinning on those
     /// versions too.
+    ///
+    /// `@objc(registerIfNeededInto:)` so Objective-C / Objective-C++
+    /// consumers can call `[MySubclass registerIfNeededInto:cfg]`
+    /// directly from `.mm` files (e.g. RN `AppDelegate.mm` inside
+    /// `RCTSetCustomNSURLSessionConfigurationProvider`).
+    @objc(registerIfNeededInto:)
     public static func registerIfNeeded(into configuration: URLSessionConfiguration) {
         if #available(iOS 26.0, macOS 15.0, *) { return }
         register(into: configuration)
@@ -277,8 +291,17 @@ open class PqcURLProtocol: URLProtocol {
 /// Threading: `nextChunk` is called sequentially from a single Rust
 /// worker, so the internal opened-flag isn't contended. `InputStream`
 /// itself is not thread-safe but URLProtocol's body stream is
-/// single-consumer by contract.
-final class InputStreamBodyProvider: BodyProvider {
+/// single-consumer by contract. `cancel()` may race a `nextChunk` from
+/// a different Rust thread; the `NSLock` below serializes the two.
+///
+/// `@unchecked Sendable` because the `BodyProvider` foreign trait is
+/// `Sendable` (UniFFI generates it that way — Rust trait objects are
+/// `Send + Sync`), but the stored `InputStream` is not `Sendable` and
+/// the mutable opened/closed flags trip Swift 6 strict concurrency
+/// checking. The NSLock manually enforces the synchronization Swift's
+/// type system can't see — same pattern UIKit classes use for
+/// `@unchecked Sendable` conformance.
+final class InputStreamBodyProvider: BodyProvider, @unchecked Sendable {
     private let stream: InputStream
     private var opened = false
     private var closed = false

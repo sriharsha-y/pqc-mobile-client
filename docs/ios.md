@@ -272,6 +272,55 @@ final class AppDelegate: RCTAppDelegate {
 
 The `AppPqcURLProtocol` class is identical to the native case (Section 3).
 
+### Wiring from `AppDelegate.mm` (Objective-C++)
+
+If your RN template uses the Objective-C++ AppDelegate (`.mm`) instead of Swift, the same `RCTSetCustomNSURLSessionConfigurationProvider` call works — but ObjC++ can only see Swift symbols marked `@objc`. Two imports order matters in the `.mm`:
+
+```objc++
+// AppDelegate.mm
+
+// 1) Framework module FIRST — declares PqcURLProtocol (the superclass that
+//    your <AppName>-Swift.h is about to reference for your bridge subclass).
+@import PqcCore;
+
+// 2) App's auto-generated Swift header AFTER — exposes AppPqcURLProtocol.
+//    Replace "MyApp" with your actual product module name.
+#import "MyApp-Swift.h"
+
+// ... inside didFinishLaunchingWithOptions: ...
+RCTSetCustomNSURLSessionConfigurationProvider(^NSURLSessionConfiguration *{
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    [AppPqcURLProtocol registerIfNeededInto:cfg];   // ← @objc selector form
+    return cfg;
+});
+```
+
+Your Swift bridge subclass:
+
+```swift
+// MyApp/AppPqcURLProtocol.swift
+import PqcCore
+
+@objc(AppPqcURLProtocol)
+public class AppPqcURLProtocol: PqcURLProtocol {
+    public override class func makeConfig() -> PqcConfig {
+        return .platformDefault(
+            pinnedCertSha256: CertPins.spkiSha256,
+            userAgent: "MyApp/1.0",
+            redirectPolicy: .sameOriginOnly
+        )
+    }
+}
+```
+
+**Why `registerIfNeededInto:` (with the `Into:` suffix)?** The Swift method is `registerIfNeeded(into:)`; the framework exports it via `@objc(registerIfNeededInto:)` so ObjC++ sees it as `+ registerIfNeededInto:`. Same for `register(into:)` → `+ registerInto:`.
+
+> **Available since 0.8.1.** Earlier versions did not annotate the static helpers with `@objc`; if you're on 0.8.0, either upgrade or add a thin Swift `@objc` wrapper on your subclass.
+
+### Direct use of `PqcHttpClient` from Objective-C++
+
+The UniFFI-generated classes (`PqcHttpClient`, `PqcResponse`, `PqcConfig`, `BodyProvider`) are pure Swift — they are NOT bridged to Objective-C and cannot be called directly from `.mm` files. If you need to invoke `PqcHttpClient.request(...)` outside the URLProtocol path, write a small Swift bridge class with `@objc` methods and call that from your `.mm` code. The URLProtocol-based integration above is the recommended path for RN apps; direct use is only needed for custom protocols (e.g. WebSocket-over-HTTPS, gRPC).
+
 ## 7. iOS 26 gate
 
 On iOS 26+, the native `URLSession` already advertises `X25519MLKEM768` in every ClientHello (Apple [HT122756](https://support.apple.com/en-us/122756)), so the custom path is unnecessary and slightly slower. The bundled `registerIfNeeded(into:)` helper encapsulates this — call it instead of `register(into:)` and the gate stays in one place. Use `register(into:)` directly only when you want the URLProtocol to run on iOS 26+ as well (e.g. for SPKI pinning that the OS handshake doesn't provide).
