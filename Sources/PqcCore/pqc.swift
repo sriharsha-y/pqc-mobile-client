@@ -395,7 +395,13 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 
 
 // Public interface members begin here.
-
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -421,6 +427,22 @@ fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias SwiftType = UInt16
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
         return try lift(readInt(&buf))
     }
 
@@ -532,6 +554,312 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Foreign-implementable streaming upload body. The Rust client pulls
+ * chunks via `next_chunk` until it returns `None` (EOF) or `Err`
+ * (abort). Implemented by Kotlin and Swift to bridge OkHttp's
+ * `RequestBody.writeTo(BufferedSink)` and `URLRequest.httpBodyStream`
+ * (an `InputStream`) into Rust's `reqwest::Body::wrap_stream` without
+ * buffering the full upload in memory — matching native OkHttp /
+ * URLSession streaming-upload behavior.
+ *
+ * # Threading
+ *
+ * `next_chunk` is synchronous on the FFI surface. The Rust client
+ * invokes it via `tokio::task::spawn_blocking` so the foreign call
+ * doesn't park a tokio worker — implementers can block on local I/O
+ * (file reads, okio.Pipe.source.read, InputStream.read) freely.
+ *
+ * # Chunk size
+ *
+ * Typical chunk size is 16-64 KiB. Smaller is fine (more FFI
+ * round-trips); larger is fine (peak memory tracks the largest single
+ * chunk). Returning an empty Vec is treated as EOF.
+ *
+ * # Retry safety
+ *
+ * Streaming bodies are NOT automatically retry-safe — once a chunk is
+ * consumed it's gone (matches URLSession's `needNewBodyStream:`
+ * contract). If a request needs retry, the consumer must construct a
+ * fresh `BodyProvider`. Don't enable redirects on streaming uploads
+ * unless the source can be re-read.
+ */
+public protocol BodyProvider: AnyObject, Sendable {
+    
+    /**
+     * Return the next chunk of upload body, or `None` at EOF. Empty
+     * vecs are also treated as EOF (lets callers signal end-of-stream
+     * without keeping an Option flag).
+     */
+    func nextChunk() throws  -> Data?
+    
+    /**
+     * Abort the upload and release foreign-side resources. Called by
+     * the Rust client when the request errors before all chunks have
+     * been pulled, when the caller drops the in-flight `PqcResponse`,
+     * or when the request completes normally.
+     *
+     * Implementations must:
+     * - Be idempotent (may be called multiple times).
+     * - Be safe to call from any thread, including before
+     * `next_chunk` has been invoked.
+     * - Synchronously release I/O handles (e.g. close an
+     * `okio.Pipe.source` to unblock the writer thread, close an
+     * `InputStream`) — without this signal, a writer thread that
+     * fills its pipe buffer would park forever on `sink.write()`
+     * and the file descriptor / thread / buffer would leak per
+     * aborted upload until process exit.
+     */
+    func cancel() 
+    
+}
+/**
+ * Foreign-implementable streaming upload body. The Rust client pulls
+ * chunks via `next_chunk` until it returns `None` (EOF) or `Err`
+ * (abort). Implemented by Kotlin and Swift to bridge OkHttp's
+ * `RequestBody.writeTo(BufferedSink)` and `URLRequest.httpBodyStream`
+ * (an `InputStream`) into Rust's `reqwest::Body::wrap_stream` without
+ * buffering the full upload in memory — matching native OkHttp /
+ * URLSession streaming-upload behavior.
+ *
+ * # Threading
+ *
+ * `next_chunk` is synchronous on the FFI surface. The Rust client
+ * invokes it via `tokio::task::spawn_blocking` so the foreign call
+ * doesn't park a tokio worker — implementers can block on local I/O
+ * (file reads, okio.Pipe.source.read, InputStream.read) freely.
+ *
+ * # Chunk size
+ *
+ * Typical chunk size is 16-64 KiB. Smaller is fine (more FFI
+ * round-trips); larger is fine (peak memory tracks the largest single
+ * chunk). Returning an empty Vec is treated as EOF.
+ *
+ * # Retry safety
+ *
+ * Streaming bodies are NOT automatically retry-safe — once a chunk is
+ * consumed it's gone (matches URLSession's `needNewBodyStream:`
+ * contract). If a request needs retry, the consumer must construct a
+ * fresh `BodyProvider`. Don't enable redirects on streaming uploads
+ * unless the source can be re-read.
+ */
+open class BodyProviderImpl: BodyProvider, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_pqc_client_fn_clone_bodyprovider(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_pqc_client_fn_free_bodyprovider(pointer, $0) }
+    }
+
+    
+
+    
+    /**
+     * Return the next chunk of upload body, or `None` at EOF. Empty
+     * vecs are also treated as EOF (lets callers signal end-of-stream
+     * without keeping an Option flag).
+     */
+open func nextChunk()throws  -> Data?  {
+    return try  FfiConverterOptionData.lift(try rustCallWithError(FfiConverterTypePqcError_lift) {
+    uniffi_pqc_client_fn_method_bodyprovider_next_chunk(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Abort the upload and release foreign-side resources. Called by
+     * the Rust client when the request errors before all chunks have
+     * been pulled, when the caller drops the in-flight `PqcResponse`,
+     * or when the request completes normally.
+     *
+     * Implementations must:
+     * - Be idempotent (may be called multiple times).
+     * - Be safe to call from any thread, including before
+     * `next_chunk` has been invoked.
+     * - Synchronously release I/O handles (e.g. close an
+     * `okio.Pipe.source` to unblock the writer thread, close an
+     * `InputStream`) — without this signal, a writer thread that
+     * fills its pipe buffer would park forever on `sink.write()`
+     * and the file descriptor / thread / buffer would leak per
+     * aborted upload until process exit.
+     */
+open func cancel()  {try! rustCall() {
+    uniffi_pqc_client_fn_method_bodyprovider_cancel(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceBodyProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceBodyProvider] = [UniffiVTableCallbackInterfaceBodyProvider(
+        nextChunk: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterTypeBodyProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.nextChunk(
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePqcError_lower
+            )
+        },
+        cancel: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeBodyProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.cancel(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterTypeBodyProvider.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface BodyProvider: handle missing in uniffiFree")
+            }
+        }
+    )]
+}
+
+private func uniffiCallbackInitBodyProvider() {
+    uniffi_pqc_client_fn_init_callback_vtable_bodyprovider(UniffiCallbackInterfaceBodyProvider.vtable)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBodyProvider: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<BodyProvider>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = BodyProvider
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> BodyProvider {
+        return BodyProviderImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: BodyProvider) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BodyProvider {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: BodyProvider, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBodyProvider_lift(_ pointer: UnsafeMutableRawPointer) throws -> BodyProvider {
+    return try FfiConverterTypeBodyProvider.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBodyProvider_lower(_ value: BodyProvider) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeBodyProvider.lower(value)
+}
+
+
+
+
+
+
+/**
  * The HTTPS client exposed to Kotlin / Swift via UniFFI.
  *
  * Holds a single client with PQC TLS configured. Construct once per process
@@ -554,7 +882,7 @@ public protocol PqcHttpClientProtocol: AnyObject, Sendable {
      */
     func clearCache() async 
     
-    func request(req: HttpRequest) async throws  -> HttpResponse
+    func request(req: HttpRequest) async throws  -> PqcResponse
     
 }
 /**
@@ -674,7 +1002,7 @@ open func clearCache()async   {
         )
 }
     
-open func request(req: HttpRequest)async throws  -> HttpResponse  {
+open func request(req: HttpRequest)async throws  -> PqcResponse  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -683,10 +1011,10 @@ open func request(req: HttpRequest)async throws  -> HttpResponse  {
                     FfiConverterTypeHttpRequest_lower(req)
                 )
             },
-            pollFunc: ffi_pqc_client_rust_future_poll_rust_buffer,
-            completeFunc: ffi_pqc_client_rust_future_complete_rust_buffer,
-            freeFunc: ffi_pqc_client_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeHttpResponse_lift,
+            pollFunc: ffi_pqc_client_rust_future_poll_pointer,
+            completeFunc: ffi_pqc_client_rust_future_complete_pointer,
+            freeFunc: ffi_pqc_client_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePqcResponse_lift,
             errorHandler: FfiConverterTypePqcError_lift
         )
 }
@@ -747,20 +1075,415 @@ public func FfiConverterTypePqcHttpClient_lower(_ value: PqcHttpClient) -> Unsaf
 
 
 
+
+
+/**
+ * Streaming HTTP response handle. Returned by [`PqcHttpClient::request`]
+ * as soon as the response head (status, headers) has been received —
+ * the body is pulled on demand via [`PqcResponse::read_chunk`] or
+ * drained whole via [`PqcResponse::bytes`].
+ *
+ * Matches the streaming default of OkHttp's `ResponseBody` and
+ * URLSession's `URLSession.bytes(for:)`. The buffered convenience
+ * (`bytes()`) mirrors `body.bytes()` / `data(for:)`.
+ *
+ * # Concurrency
+ *
+ * `&self` methods can be called concurrently; an internal async mutex
+ * serializes body reads. Only one reader at a time makes progress
+ * (chunks have to come out in order), but headers/status are pre-
+ * captured so those getters never block.
+ *
+ * # Lifecycle
+ *
+ * The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
+ * semaphore permits acquired at request time both live inside this
+ * object. Dropping the response without calling `bytes()` aborts the
+ * body stream — same as OkHttp `Response.close()` and URLSession's
+ * task-cancel semantics.
+ *
+ * # Cancellation note
+ *
+ * UniFFI 0.29 does not propagate foreign-runtime cancellation
+ * (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust
+ * (mozilla/uniffi-rs#2771). Consumers who want to abort an in-flight
+ * body read must call [`PqcResponse::cancel`] explicitly — it's
+ * synchronous, so iOS `URLProtocol.stopLoading` and OkHttp
+ * `Source.close()` can call it without `Task { … }` or `runBlocking`.
+ */
+public protocol PqcResponseProtocol: AnyObject, Sendable {
+    
+    /**
+     * Drain the entire body to a `Vec<u8>` (the buffered convenience,
+     * mirroring OkHttp `body.bytes()` and URLSession `data(for:)`).
+     * Internally consumes the response — subsequent `read_chunk`
+     * calls return `Ok(None)`. Returns empty if `cancel()` has been
+     * called.
+     */
+    func bytes() async throws  -> Data
+    
+    /**
+     * Abort the body stream and release the underlying connection.
+     * Idempotent — a second call is a no-op. Synchronous so iOS
+     * `URLProtocol.stopLoading` and OkHttp `Source.close()` can call
+     * it directly, without wrapping in `Task { … }` or `runBlocking`.
+     *
+     * If a `read_chunk`/`bytes` await is in flight when `cancel` is
+     * called, the body mutex is contended and the in-flight chunk
+     * completes normally; the post-await cancelled check then drops
+     * the response and returns `Ok(None)` / empty bytes. This matches
+     * OkHttp `Call.cancel()`, which also doesn't synchronously
+     * interrupt a mid-read socket — interruption is best-effort.
+     */
+    func cancel() 
+    
+    /**
+     * The URL the body actually came from, after any followed
+     * redirects. Equals the request URL when no redirect occurred.
+     * Lets callers detect a redirect they refused (see
+     * `RedirectPolicy`) — mirrors OkHttp `Response.request().url()`
+     * and `URLResponse.url`.
+     */
+    func finalUrl()  -> String
+    
+    /**
+     * Response headers. Multi-valued headers (`Set-Cookie`, `Vary`,
+     * `Link`) appear with all values intact — never collapsed.
+     */
+    func headers()  -> [String: [String]]
+    
+    /**
+     * The negotiated ALPN protocol (`"h2"`, `"http/1.1"`, etc.).
+     * Useful for logging / observability; the consumer never has to
+     * branch on this.
+     */
+    func negotiatedProtocol()  -> String
+    
+    /**
+     * Pull the next chunk of the body. Returns `Ok(None)` when the
+     * body has been fully consumed (EOF) or `cancel()` has been
+     * called. Chunks arrive in network order and are not bounded in
+     * size — typically 16 KB to 64 KB for HTTP/2, larger for HTTP/1.1.
+     */
+    func readChunk() async throws  -> Data?
+    
+    /**
+     * HTTP status code (e.g. 200, 404, 503).
+     */
+    func status()  -> UInt16
+    
+}
+/**
+ * Streaming HTTP response handle. Returned by [`PqcHttpClient::request`]
+ * as soon as the response head (status, headers) has been received —
+ * the body is pulled on demand via [`PqcResponse::read_chunk`] or
+ * drained whole via [`PqcResponse::bytes`].
+ *
+ * Matches the streaming default of OkHttp's `ResponseBody` and
+ * URLSession's `URLSession.bytes(for:)`. The buffered convenience
+ * (`bytes()`) mirrors `body.bytes()` / `data(for:)`.
+ *
+ * # Concurrency
+ *
+ * `&self` methods can be called concurrently; an internal async mutex
+ * serializes body reads. Only one reader at a time makes progress
+ * (chunks have to come out in order), but headers/status are pre-
+ * captured so those getters never block.
+ *
+ * # Lifecycle
+ *
+ * The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
+ * semaphore permits acquired at request time both live inside this
+ * object. Dropping the response without calling `bytes()` aborts the
+ * body stream — same as OkHttp `Response.close()` and URLSession's
+ * task-cancel semantics.
+ *
+ * # Cancellation note
+ *
+ * UniFFI 0.29 does not propagate foreign-runtime cancellation
+ * (Swift `Task.cancel()`, Kotlin coroutine cancel) into Rust
+ * (mozilla/uniffi-rs#2771). Consumers who want to abort an in-flight
+ * body read must call [`PqcResponse::cancel`] explicitly — it's
+ * synchronous, so iOS `URLProtocol.stopLoading` and OkHttp
+ * `Source.close()` can call it without `Task { … }` or `runBlocking`.
+ */
+open class PqcResponse: PqcResponseProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_pqc_client_fn_clone_pqcresponse(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_pqc_client_fn_free_pqcresponse(pointer, $0) }
+    }
+
+    
+
+    
+    /**
+     * Drain the entire body to a `Vec<u8>` (the buffered convenience,
+     * mirroring OkHttp `body.bytes()` and URLSession `data(for:)`).
+     * Internally consumes the response — subsequent `read_chunk`
+     * calls return `Ok(None)`. Returns empty if `cancel()` has been
+     * called.
+     */
+open func bytes()async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_pqc_client_fn_method_pqcresponse_bytes(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_pqc_client_rust_future_poll_rust_buffer,
+            completeFunc: ffi_pqc_client_rust_future_complete_rust_buffer,
+            freeFunc: ffi_pqc_client_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypePqcError_lift
+        )
+}
+    
+    /**
+     * Abort the body stream and release the underlying connection.
+     * Idempotent — a second call is a no-op. Synchronous so iOS
+     * `URLProtocol.stopLoading` and OkHttp `Source.close()` can call
+     * it directly, without wrapping in `Task { … }` or `runBlocking`.
+     *
+     * If a `read_chunk`/`bytes` await is in flight when `cancel` is
+     * called, the body mutex is contended and the in-flight chunk
+     * completes normally; the post-await cancelled check then drops
+     * the response and returns `Ok(None)` / empty bytes. This matches
+     * OkHttp `Call.cancel()`, which also doesn't synchronously
+     * interrupt a mid-read socket — interruption is best-effort.
+     */
+open func cancel()  {try! rustCall() {
+    uniffi_pqc_client_fn_method_pqcresponse_cancel(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
+     * The URL the body actually came from, after any followed
+     * redirects. Equals the request URL when no redirect occurred.
+     * Lets callers detect a redirect they refused (see
+     * `RedirectPolicy`) — mirrors OkHttp `Response.request().url()`
+     * and `URLResponse.url`.
+     */
+open func finalUrl() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_pqc_client_fn_method_pqcresponse_final_url(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Response headers. Multi-valued headers (`Set-Cookie`, `Vary`,
+     * `Link`) appear with all values intact — never collapsed.
+     */
+open func headers() -> [String: [String]]  {
+    return try!  FfiConverterDictionaryStringSequenceString.lift(try! rustCall() {
+    uniffi_pqc_client_fn_method_pqcresponse_headers(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * The negotiated ALPN protocol (`"h2"`, `"http/1.1"`, etc.).
+     * Useful for logging / observability; the consumer never has to
+     * branch on this.
+     */
+open func negotiatedProtocol() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_pqc_client_fn_method_pqcresponse_negotiated_protocol(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Pull the next chunk of the body. Returns `Ok(None)` when the
+     * body has been fully consumed (EOF) or `cancel()` has been
+     * called. Chunks arrive in network order and are not bounded in
+     * size — typically 16 KB to 64 KB for HTTP/2, larger for HTTP/1.1.
+     */
+open func readChunk()async throws  -> Data?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_pqc_client_fn_method_pqcresponse_read_chunk(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_pqc_client_rust_future_poll_rust_buffer,
+            completeFunc: ffi_pqc_client_rust_future_complete_rust_buffer,
+            freeFunc: ffi_pqc_client_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionData.lift,
+            errorHandler: FfiConverterTypePqcError_lift
+        )
+}
+    
+    /**
+     * HTTP status code (e.g. 200, 404, 503).
+     */
+open func status() -> UInt16  {
+    return try!  FfiConverterUInt16.lift(try! rustCall() {
+    uniffi_pqc_client_fn_method_pqcresponse_status(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePqcResponse: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PqcResponse
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PqcResponse {
+        return PqcResponse(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PqcResponse) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PqcResponse {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PqcResponse, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePqcResponse_lift(_ pointer: UnsafeMutableRawPointer) throws -> PqcResponse {
+    return try FfiConverterTypePqcResponse.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePqcResponse_lower(_ value: PqcResponse) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePqcResponse.lower(value)
+}
+
+
+
+
 public struct HttpRequest {
     public var method: HttpMethod
     public var url: String
     public var headers: [String: [String]]
+    /**
+     * Inline body bytes for small uploads (request payload fully in
+     * memory). Mutually exclusive with `body_stream`; passing both is
+     * rejected with `PqcError::InvalidRequest`.
+     */
     public var body: Data?
+    /**
+     * Streaming upload body. When set, the client pulls chunks from
+     * the provider and forwards them to the server without buffering
+     * the full payload — required for large file uploads on
+     * memory-constrained devices. Mutually exclusive with `body`.
+     */
+    public var bodyStream: BodyProvider?
+    /**
+     * Optional `Content-Length` hint when using `body_stream`. When
+     * `None`, the request uses chunked transfer-encoding (the natural
+     * fit for stream sources of unknown length); when `Some(n)`, the
+     * `Content-Length: n` header is set and the server gets a
+     * content-length-framed body. Set this when the source's total
+     * size is known (file uploads); leave `None` for live streams.
+     */
+    public var bodyStreamLength: UInt64?
     public var timeoutMs: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(method: HttpMethod, url: String, headers: [String: [String]], body: Data?, timeoutMs: UInt64?) {
+    public init(method: HttpMethod, url: String, headers: [String: [String]], 
+        /**
+         * Inline body bytes for small uploads (request payload fully in
+         * memory). Mutually exclusive with `body_stream`; passing both is
+         * rejected with `PqcError::InvalidRequest`.
+         */body: Data?, 
+        /**
+         * Streaming upload body. When set, the client pulls chunks from
+         * the provider and forwards them to the server without buffering
+         * the full payload — required for large file uploads on
+         * memory-constrained devices. Mutually exclusive with `body`.
+         */bodyStream: BodyProvider? = nil, 
+        /**
+         * Optional `Content-Length` hint when using `body_stream`. When
+         * `None`, the request uses chunked transfer-encoding (the natural
+         * fit for stream sources of unknown length); when `Some(n)`, the
+         * `Content-Length: n` header is set and the server gets a
+         * content-length-framed body. Set this when the source's total
+         * size is known (file uploads); leave `None` for live streams.
+         */bodyStreamLength: UInt64? = nil, timeoutMs: UInt64?) {
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
+        self.bodyStream = bodyStream
+        self.bodyStreamLength = bodyStreamLength
         self.timeoutMs = timeoutMs
     }
 }
@@ -768,36 +1491,6 @@ public struct HttpRequest {
 #if compiler(>=6)
 extension HttpRequest: Sendable {}
 #endif
-
-
-extension HttpRequest: Equatable, Hashable {
-    public static func ==(lhs: HttpRequest, rhs: HttpRequest) -> Bool {
-        if lhs.method != rhs.method {
-            return false
-        }
-        if lhs.url != rhs.url {
-            return false
-        }
-        if lhs.headers != rhs.headers {
-            return false
-        }
-        if lhs.body != rhs.body {
-            return false
-        }
-        if lhs.timeoutMs != rhs.timeoutMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(method)
-        hasher.combine(url)
-        hasher.combine(headers)
-        hasher.combine(body)
-        hasher.combine(timeoutMs)
-    }
-}
 
 
 
@@ -812,6 +1505,8 @@ public struct FfiConverterTypeHttpRequest: FfiConverterRustBuffer {
                 url: FfiConverterString.read(from: &buf), 
                 headers: FfiConverterDictionaryStringSequenceString.read(from: &buf), 
                 body: FfiConverterOptionData.read(from: &buf), 
+                bodyStream: FfiConverterOptionTypeBodyProvider.read(from: &buf), 
+                bodyStreamLength: FfiConverterOptionUInt64.read(from: &buf), 
                 timeoutMs: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
@@ -821,6 +1516,8 @@ public struct FfiConverterTypeHttpRequest: FfiConverterRustBuffer {
         FfiConverterString.write(value.url, into: &buf)
         FfiConverterDictionaryStringSequenceString.write(value.headers, into: &buf)
         FfiConverterOptionData.write(value.body, into: &buf)
+        FfiConverterOptionTypeBodyProvider.write(value.bodyStream, into: &buf)
+        FfiConverterOptionUInt64.write(value.bodyStreamLength, into: &buf)
         FfiConverterOptionUInt64.write(value.timeoutMs, into: &buf)
     }
 }
@@ -838,114 +1535,6 @@ public func FfiConverterTypeHttpRequest_lift(_ buf: RustBuffer) throws -> HttpRe
 #endif
 public func FfiConverterTypeHttpRequest_lower(_ value: HttpRequest) -> RustBuffer {
     return FfiConverterTypeHttpRequest.lower(value)
-}
-
-
-public struct HttpResponse {
-    public var status: UInt16
-    /**
-     * The final URL the body was actually fetched from, after any redirects
-     * were followed. Equals the request URL when no redirect occurred. Lets
-     * callers detect a redirect they refused (see `RedirectPolicy`) and learn
-     * the effective origin — mirrors OkHttp `Response.request().url()` and
-     * `URLResponse.url`.
-     */
-    public var finalUrl: String
-    public var headers: [String: [String]]
-    public var body: Data
-    public var negotiatedProtocol: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(status: UInt16, 
-        /**
-         * The final URL the body was actually fetched from, after any redirects
-         * were followed. Equals the request URL when no redirect occurred. Lets
-         * callers detect a redirect they refused (see `RedirectPolicy`) and learn
-         * the effective origin — mirrors OkHttp `Response.request().url()` and
-         * `URLResponse.url`.
-         */finalUrl: String, headers: [String: [String]], body: Data, negotiatedProtocol: String) {
-        self.status = status
-        self.finalUrl = finalUrl
-        self.headers = headers
-        self.body = body
-        self.negotiatedProtocol = negotiatedProtocol
-    }
-}
-
-#if compiler(>=6)
-extension HttpResponse: Sendable {}
-#endif
-
-
-extension HttpResponse: Equatable, Hashable {
-    public static func ==(lhs: HttpResponse, rhs: HttpResponse) -> Bool {
-        if lhs.status != rhs.status {
-            return false
-        }
-        if lhs.finalUrl != rhs.finalUrl {
-            return false
-        }
-        if lhs.headers != rhs.headers {
-            return false
-        }
-        if lhs.body != rhs.body {
-            return false
-        }
-        if lhs.negotiatedProtocol != rhs.negotiatedProtocol {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(status)
-        hasher.combine(finalUrl)
-        hasher.combine(headers)
-        hasher.combine(body)
-        hasher.combine(negotiatedProtocol)
-    }
-}
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeHttpResponse: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HttpResponse {
-        return
-            try HttpResponse(
-                status: FfiConverterUInt16.read(from: &buf), 
-                finalUrl: FfiConverterString.read(from: &buf), 
-                headers: FfiConverterDictionaryStringSequenceString.read(from: &buf), 
-                body: FfiConverterData.read(from: &buf), 
-                negotiatedProtocol: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: HttpResponse, into buf: inout [UInt8]) {
-        FfiConverterUInt16.write(value.status, into: &buf)
-        FfiConverterString.write(value.finalUrl, into: &buf)
-        FfiConverterDictionaryStringSequenceString.write(value.headers, into: &buf)
-        FfiConverterData.write(value.body, into: &buf)
-        FfiConverterString.write(value.negotiatedProtocol, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHttpResponse_lift(_ buf: RustBuffer) throws -> HttpResponse {
-    return try FfiConverterTypeHttpResponse.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHttpResponse_lower(_ value: HttpResponse) -> RustBuffer {
-    return FfiConverterTypeHttpResponse.lower(value)
 }
 
 
@@ -976,6 +1565,19 @@ public struct PqcConfig {
      */
     public var connectTimeoutMs: UInt64?
     /**
+     * Idle timeout between body-bytes read operations. The timer resets
+     * after every successful chunk read, so a healthy slow download is
+     * not killed by it; only a stalled server (TCP open but no bytes
+     * flowing) is. Mirrors OkHttp's `readTimeout`.
+     *
+     * `None` (default) leaves this off — only `default_timeout_ms` (the
+     * total request budget) applies. Set this when downloading large
+     * bodies where you'd rather kill a stuck stream within seconds than
+     * wait for the total budget to expire (recommended values: 10–30s for
+     * APIs, 60s+ for large file downloads).
+     */
+    public var readIdleTimeoutMs: UInt64?
+    /**
      * Off by default: no cookie jar, so callers round-trip
      * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
      * endpoints is a session-leak vector — enable only when needed.
@@ -988,6 +1590,20 @@ public struct PqcConfig {
      */
     public var userAgent: String?
     /**
+     * Which DNS resolver to use. `None` (default) selects `System` —
+     * libc `getaddrinfo` driven on tokio's blocking pool, which on
+     * Android honors user-configured Private DNS (DNS-over-TLS) and on
+     * iOS honors the system resolver chain.
+     *
+     * Set to `Some(Hickory)` to use the bundled hickory-dns async
+     * resolver, which enables RFC 8305 Happy Eyeballs (concurrent
+     * v4/v6 connection racing — meaningfully faster on dual-stack
+     * networks where one family is broken). The trade-off: hickory
+     * bypasses Android's Private DNS setting, so consumers whose users
+     * depend on DoT for privacy/policy should leave this at `None`.
+     */
+    public var dnsResolver: DnsResolver?
+    /**
      * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
      * are refused so a redirect can't silently downgrade to an un-pinned
      * host.
@@ -999,6 +1615,28 @@ public struct PqcConfig {
      * read `final_url` on the response to confirm where the body came from.
      */
     public var redirectPolicy: RedirectPolicy
+    /**
+     * Maximum concurrent in-flight requests across all hosts. Acquired
+     * before cache lookup and network send, so cache hits also count
+     * against the budget — matches OkHttp's `Dispatcher.maxRequests`.
+     * Default 64 mirrors OkHttp; `Some(n)` enforces n; `None` disables the
+     * global gate entirely (use only when a consumer needs unbounded
+     * concurrency, e.g. server-side or tunnelled use).
+     */
+    public var maxInflightTotal: UInt32?
+    /**
+     * Maximum concurrent in-flight requests per host, keyed by URL hostname
+     * (no port, no scheme). Default 5 mirrors OkHttp's
+     * `Dispatcher.maxRequestsPerHost`. URLSession's analogous cap is 6
+     * in-flight per host; we pick the lower OkHttp value. `None` disables
+     * the per-host gate.
+     *
+     * Once a host is seen for the first time, its semaphore lives for the
+     * lifetime of the client (one entry per unique host). For a typical
+     * mobile app this is bounded by the number of distinct API hosts the
+     * app talks to (usually under 100); the memory cost is negligible.
+     */
+    public var maxInflightPerHost: UInt32?
     /**
      * Opt-in RFC 9111 response cache (default false). When enabled it mirrors
      * the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
@@ -1029,6 +1667,21 @@ public struct PqcConfig {
      * defaults to 20 MiB, matching a typical `URLCache` disk capacity.
      */
     public var maxCacheBytes: UInt64?
+    /**
+     * Hard ceiling on the in-process LRU memory cache tier, in bytes.
+     * `None` defaults to 4 MiB on both platforms (matching `URLCache`'s
+     * historical memory capacity). `Some(0)` opts out of the memory tier
+     * entirely — Android consumers who want OkHttp-style disk-only
+     * behavior set this to `Some(0)`.
+     *
+     * Native baseline note: OkHttp's bundled `Cache` is disk-only (the
+     * `Cache` class is `final` and not extensible), so OkHttp users get
+     * no HTTP memory cache out of the box. URLCache on iOS does have a
+     * memory tier. We expose the same tier on both platforms because
+     * modern Android ART has dynamic heaps and the historical Dalvik
+     * caps that drove OkHttp's choice no longer apply.
+     */
+    public var maxMemoryCacheBytes: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1051,6 +1704,18 @@ public struct PqcConfig {
          * fails fast instead of burning the whole request budget. `None` = 10s.
          */connectTimeoutMs: UInt64?, 
         /**
+         * Idle timeout between body-bytes read operations. The timer resets
+         * after every successful chunk read, so a healthy slow download is
+         * not killed by it; only a stalled server (TCP open but no bytes
+         * flowing) is. Mirrors OkHttp's `readTimeout`.
+         *
+         * `None` (default) leaves this off — only `default_timeout_ms` (the
+         * total request budget) applies. Set this when downloading large
+         * bodies where you'd rather kill a stuck stream within seconds than
+         * wait for the total budget to expire (recommended values: 10–30s for
+         * APIs, 60s+ for large file downloads).
+         */readIdleTimeoutMs: UInt64? = nil, 
+        /**
          * Off by default: no cookie jar, so callers round-trip
          * `Set-Cookie`/`Cookie` themselves. Auto-attaching cookies across
          * endpoints is a session-leak vector — enable only when needed.
@@ -1060,6 +1725,19 @@ public struct PqcConfig {
          * many WAFs (Akamai Bot Manager, bank UA allowlists) reject — set your
          * app's identifier.
          */userAgent: String?, 
+        /**
+         * Which DNS resolver to use. `None` (default) selects `System` —
+         * libc `getaddrinfo` driven on tokio's blocking pool, which on
+         * Android honors user-configured Private DNS (DNS-over-TLS) and on
+         * iOS honors the system resolver chain.
+         *
+         * Set to `Some(Hickory)` to use the bundled hickory-dns async
+         * resolver, which enables RFC 8305 Happy Eyeballs (concurrent
+         * v4/v6 connection racing — meaningfully faster on dual-stack
+         * networks where one family is broken). The trade-off: hickory
+         * bypasses Android's Private DNS setting, so consumers whose users
+         * depend on DoT for privacy/policy should leave this at `None`.
+         */dnsResolver: DnsResolver? = nil, 
         /**
          * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
          * are refused so a redirect can't silently downgrade to an un-pinned
@@ -1071,6 +1749,26 @@ public struct PqcConfig {
          * treat any `status < 400` as success should therefore check for 3xx, or
          * read `final_url` on the response to confirm where the body came from.
          */redirectPolicy: RedirectPolicy, 
+        /**
+         * Maximum concurrent in-flight requests across all hosts. Acquired
+         * before cache lookup and network send, so cache hits also count
+         * against the budget — matches OkHttp's `Dispatcher.maxRequests`.
+         * Default 64 mirrors OkHttp; `Some(n)` enforces n; `None` disables the
+         * global gate entirely (use only when a consumer needs unbounded
+         * concurrency, e.g. server-side or tunnelled use).
+         */maxInflightTotal: UInt32? = UInt32(64), 
+        /**
+         * Maximum concurrent in-flight requests per host, keyed by URL hostname
+         * (no port, no scheme). Default 5 mirrors OkHttp's
+         * `Dispatcher.maxRequestsPerHost`. URLSession's analogous cap is 6
+         * in-flight per host; we pick the lower OkHttp value. `None` disables
+         * the per-host gate.
+         *
+         * Once a host is seen for the first time, its semaphore lives for the
+         * lifetime of the client (one entry per unique host). For a typical
+         * mobile app this is bounded by the number of distinct API hosts the
+         * app talks to (usually under 100); the memory cost is negligible.
+         */maxInflightPerHost: UInt32? = UInt32(5), 
         /**
          * Opt-in RFC 9111 response cache (default false). When enabled it mirrors
          * the platform HTTP caches (Android OkHttp `Cache`, iOS `URLCache`):
@@ -1097,16 +1795,35 @@ public struct PqcConfig {
          * Hard ceiling on the on-disk cache in bytes. When exceeded, the oldest
          * entries are evicted to stay under it (cf. OkHttp's `maxSize`). `None`
          * defaults to 20 MiB, matching a typical `URLCache` disk capacity.
-         */maxCacheBytes: UInt64? = nil) {
+         */maxCacheBytes: UInt64? = nil, 
+        /**
+         * Hard ceiling on the in-process LRU memory cache tier, in bytes.
+         * `None` defaults to 4 MiB on both platforms (matching `URLCache`'s
+         * historical memory capacity). `Some(0)` opts out of the memory tier
+         * entirely — Android consumers who want OkHttp-style disk-only
+         * behavior set this to `Some(0)`.
+         *
+         * Native baseline note: OkHttp's bundled `Cache` is disk-only (the
+         * `Cache` class is `final` and not extensible), so OkHttp users get
+         * no HTTP memory cache out of the box. URLCache on iOS does have a
+         * memory tier. We expose the same tier on both platforms because
+         * modern Android ART has dynamic heaps and the historical Dalvik
+         * caps that drove OkHttp's choice no longer apply.
+         */maxMemoryCacheBytes: UInt64? = nil) {
         self.pinnedCertSha256 = pinnedCertSha256
         self.defaultTimeoutMs = defaultTimeoutMs
         self.connectTimeoutMs = connectTimeoutMs
+        self.readIdleTimeoutMs = readIdleTimeoutMs
         self.enableCookies = enableCookies
         self.userAgent = userAgent
+        self.dnsResolver = dnsResolver
         self.redirectPolicy = redirectPolicy
+        self.maxInflightTotal = maxInflightTotal
+        self.maxInflightPerHost = maxInflightPerHost
         self.enableCache = enableCache
         self.cacheDir = cacheDir
         self.maxCacheBytes = maxCacheBytes
+        self.maxMemoryCacheBytes = maxMemoryCacheBytes
     }
 }
 
@@ -1126,13 +1843,25 @@ extension PqcConfig: Equatable, Hashable {
         if lhs.connectTimeoutMs != rhs.connectTimeoutMs {
             return false
         }
+        if lhs.readIdleTimeoutMs != rhs.readIdleTimeoutMs {
+            return false
+        }
         if lhs.enableCookies != rhs.enableCookies {
             return false
         }
         if lhs.userAgent != rhs.userAgent {
             return false
         }
+        if lhs.dnsResolver != rhs.dnsResolver {
+            return false
+        }
         if lhs.redirectPolicy != rhs.redirectPolicy {
+            return false
+        }
+        if lhs.maxInflightTotal != rhs.maxInflightTotal {
+            return false
+        }
+        if lhs.maxInflightPerHost != rhs.maxInflightPerHost {
             return false
         }
         if lhs.enableCache != rhs.enableCache {
@@ -1144,6 +1873,9 @@ extension PqcConfig: Equatable, Hashable {
         if lhs.maxCacheBytes != rhs.maxCacheBytes {
             return false
         }
+        if lhs.maxMemoryCacheBytes != rhs.maxMemoryCacheBytes {
+            return false
+        }
         return true
     }
 
@@ -1151,12 +1883,17 @@ extension PqcConfig: Equatable, Hashable {
         hasher.combine(pinnedCertSha256)
         hasher.combine(defaultTimeoutMs)
         hasher.combine(connectTimeoutMs)
+        hasher.combine(readIdleTimeoutMs)
         hasher.combine(enableCookies)
         hasher.combine(userAgent)
+        hasher.combine(dnsResolver)
         hasher.combine(redirectPolicy)
+        hasher.combine(maxInflightTotal)
+        hasher.combine(maxInflightPerHost)
         hasher.combine(enableCache)
         hasher.combine(cacheDir)
         hasher.combine(maxCacheBytes)
+        hasher.combine(maxMemoryCacheBytes)
     }
 }
 
@@ -1172,12 +1909,17 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
                 pinnedCertSha256: FfiConverterSequenceString.read(from: &buf), 
                 defaultTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
                 connectTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
+                readIdleTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
                 enableCookies: FfiConverterBool.read(from: &buf), 
                 userAgent: FfiConverterOptionString.read(from: &buf), 
+                dnsResolver: FfiConverterOptionTypeDnsResolver.read(from: &buf), 
                 redirectPolicy: FfiConverterTypeRedirectPolicy.read(from: &buf), 
+                maxInflightTotal: FfiConverterOptionUInt32.read(from: &buf), 
+                maxInflightPerHost: FfiConverterOptionUInt32.read(from: &buf), 
                 enableCache: FfiConverterBool.read(from: &buf), 
                 cacheDir: FfiConverterOptionString.read(from: &buf), 
-                maxCacheBytes: FfiConverterOptionUInt64.read(from: &buf)
+                maxCacheBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                maxMemoryCacheBytes: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
@@ -1185,12 +1927,17 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.pinnedCertSha256, into: &buf)
         FfiConverterOptionUInt64.write(value.defaultTimeoutMs, into: &buf)
         FfiConverterOptionUInt64.write(value.connectTimeoutMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.readIdleTimeoutMs, into: &buf)
         FfiConverterBool.write(value.enableCookies, into: &buf)
         FfiConverterOptionString.write(value.userAgent, into: &buf)
+        FfiConverterOptionTypeDnsResolver.write(value.dnsResolver, into: &buf)
         FfiConverterTypeRedirectPolicy.write(value.redirectPolicy, into: &buf)
+        FfiConverterOptionUInt32.write(value.maxInflightTotal, into: &buf)
+        FfiConverterOptionUInt32.write(value.maxInflightPerHost, into: &buf)
         FfiConverterBool.write(value.enableCache, into: &buf)
         FfiConverterOptionString.write(value.cacheDir, into: &buf)
         FfiConverterOptionUInt64.write(value.maxCacheBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxMemoryCacheBytes, into: &buf)
     }
 }
 
@@ -1208,6 +1955,88 @@ public func FfiConverterTypePqcConfig_lift(_ buf: RustBuffer) throws -> PqcConfi
 public func FfiConverterTypePqcConfig_lower(_ value: PqcConfig) -> RustBuffer {
     return FfiConverterTypePqcConfig.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * DNS resolver selection. See `PqcConfig::dns_resolver` for the full
+ * trade-off (Happy Eyeballs vs. Android Private DNS interaction).
+ */
+
+public enum DnsResolver {
+    
+    /**
+     * libc `getaddrinfo` (synchronous, on tokio's blocking pool).
+     * Honors Android Private DNS / DoT and the iOS system resolver chain.
+     */
+    case system
+    /**
+     * hickory-resolver (async, RFC 8305 Happy Eyeballs). Bypasses
+     * Android Private DNS.
+     */
+    case hickory
+}
+
+
+#if compiler(>=6)
+extension DnsResolver: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDnsResolver: FfiConverterRustBuffer {
+    typealias SwiftType = DnsResolver
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DnsResolver {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .system
+        
+        case 2: return .hickory
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DnsResolver, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .system:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .hickory:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDnsResolver_lift(_ buf: RustBuffer) throws -> DnsResolver {
+    return try FfiConverterTypeDnsResolver.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDnsResolver_lower(_ value: DnsResolver) -> RustBuffer {
+    return FfiConverterTypeDnsResolver.lower(value)
+}
+
+
+extension DnsResolver: Equatable, Hashable {}
+
+
+
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -1519,6 +2348,30 @@ extension RedirectPolicy: Equatable, Hashable {}
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -1583,6 +2436,54 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeBodyProvider: FfiConverterRustBuffer {
+    typealias SwiftType = BodyProvider?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeBodyProvider.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeBodyProvider.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeDnsResolver: FfiConverterRustBuffer {
+    typealias SwiftType = DnsResolver?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDnsResolver.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDnsResolver.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -1700,19 +2601,47 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_pqc_client_checksum_method_bodyprovider_next_chunk() != 25415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_bodyprovider_cancel() != 10343) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_pqc_client_checksum_method_pqchttpclient_cache_size_bytes() != 50194) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pqc_client_checksum_method_pqchttpclient_clear_cache() != 43165) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pqc_client_checksum_method_pqchttpclient_request() != 32508) {
+    if (uniffi_pqc_client_checksum_method_pqchttpclient_request() != 18885) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_bytes() != 45301) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_cancel() != 11085) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_final_url() != 10476) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_headers() != 116) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_negotiated_protocol() != 18904) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_read_chunk() != 48167) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_pqc_client_checksum_method_pqcresponse_status() != 16651) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_pqc_client_checksum_constructor_pqchttpclient_new() != 5152) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitBodyProvider()
     return InitializationResult.ok
 }()
 
