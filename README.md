@@ -29,19 +29,19 @@ This crate is a **unified, single-codebase** alternative that works on every sup
 **Android — Maven Central**
 
 ```kotlin
-implementation("io.github.sriharsha-y:pqc-mobile-client:0.7.1") // x-release-please-version
+implementation("io.github.sriharsha-y:pqc-mobile-client:0.8.0") // x-release-please-version
 ```
 
 **iOS — CocoaPods**
 
 ```ruby
-pod 'PqcCore', '~> 0.7.1' # x-release-please-version
+pod 'PqcCore', '~> 0.8.0' # x-release-please-version
 ```
 
 **iOS — Swift Package Manager**
 
 ```swift
-.package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.7.1") // x-release-please-version
+.package(url: "https://github.com/sriharsha-y/pqc-mobile-client.git", from: "0.8.0") // x-release-please-version
 ```
 
 The Android AAR is self-contained — it bundles the native `.so` files, the generated Kotlin bindings, and the `rustls-platform-verifier` glue, so no extra repositories or manual wiring are needed. Full setup (including the one-time `PqcAndroidInit.init` call) is in the [Android](docs/android.md) and [iOS](docs/ios.md) guides.
