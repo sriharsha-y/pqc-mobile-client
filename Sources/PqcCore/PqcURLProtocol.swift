@@ -227,6 +227,8 @@ open class PqcURLProtocol: URLProtocol {
         while let chunk = try await pqcResp.readChunk() {
             self.client?.urlProtocol(self, didLoad: Data(chunk))
         }
+        // Eager permit release — don't wait on stopLoading() timing.
+        pqcResp.cancel()
         self.client?.urlProtocolDidFinishLoading(self)
     }
 
