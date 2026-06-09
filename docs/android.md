@@ -415,8 +415,8 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 | Field | Default | Notes |
 |---|---|---|
 | `readIdleTimeoutMs` | `null` | Per-read idle timeout — kills a stalled stream without burning the total `defaultTimeoutMs` budget. Mirrors OkHttp's `readTimeout`. Recommended: 10–30 s for APIs, 60 s+ for large file downloads. |
-| `maxInflightTotal` | `64uL` | Global concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequests`. |
-| `maxInflightPerHost` | `5uL` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
+| `maxInflightTotal` | `64U` | Global concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequests`. |
+| `maxInflightPerHost` | `5U` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
 | `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
 | `dnsResolver` | `null` (= `System`) | See §12. |
 

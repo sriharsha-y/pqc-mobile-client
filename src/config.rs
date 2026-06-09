@@ -165,3 +165,38 @@ pub enum DnsResolver {
     /// Android Private DNS.
     Hickory,
 }
+
+#[cfg(test)]
+mod drift_detector {
+    use super::*;
+
+    /// Compile-time drift detector for `PqcConfig` field count. If a
+    /// field is added or removed and this destructure isn't updated,
+    /// `cargo check` fails with `pattern does not mention field …`. The
+    /// fix is to extend BOTH `platformDefault` helpers and then update
+    /// this destructure:
+    ///   - android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt
+    ///   - Sources/PqcCore/PqcConfig+Defaults.swift
+    ///
+    /// The function is never called — it exists only for the compile
+    /// check. The `#[allow(dead_code)]` silences the unused warning.
+    #[allow(dead_code)]
+    fn pqc_config_field_destructure_check(cfg: PqcConfig) {
+        let PqcConfig {
+            pinned_cert_sha256: _,
+            default_timeout_ms: _,
+            connect_timeout_ms: _,
+            read_idle_timeout_ms: _,
+            enable_cookies: _,
+            user_agent: _,
+            dns_resolver: _,
+            redirect_policy: _,
+            max_inflight_total: _,
+            max_inflight_per_host: _,
+            enable_cache: _,
+            cache_dir: _,
+            max_cache_bytes: _,
+            max_memory_cache_bytes: _,
+        } = cfg;
+    }
+}
