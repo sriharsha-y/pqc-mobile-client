@@ -163,16 +163,16 @@ futures-util = { version = "0.3", default-features = false, optional = true }
 bytes = "1"
 futures-core = { version = "0.3", default-features = false }
 
-# Android-only: rustls-platform-verifier needs a JNI handshake from the
-# app's Application.onCreate to capture the Android Context so it can
-# reach KeyStore / NetworkSecurityConfig classes at handshake time.
-# Without this, the first request throws
-#   io.github.sriharsha_y.pqc.InternalException: android context was not initialized
-# We expose a tiny JNI shim (src/android_init.rs) that consumers call
-# from MainApplication.onCreate. iOS has no equivalent — Apple's
-# Security framework is process-wide and discovered via dlopen.
+# Android-only JNI shim wiring. `jni` lets src/android_init.rs export the
+# `nativeInit` symbol that `PqcAndroidInit` calls from Application.onCreate
+# to hand the Context to TWO independent globals — rustls-platform-verifier
+# (TLS trust) and ndk-context (read by hickory-resolver for DNS). Same
+# `InternalException: android context was not initialized` from both if
+# either is skipped. iOS has no equivalent — Apple's Security framework is
+# process-wide.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
+ndk-context = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
