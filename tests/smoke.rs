@@ -262,6 +262,36 @@ async fn concurrent_requests_share_one_client() {
     assert_eq!(ok, N, "all {N} concurrent requests should succeed");
 }
 
+/// Regression for the 0.8.x FFI permit-leak: a foreign consumer that
+/// holds the `Arc<PqcResponse>` alive after `cancel()` (Kotlin Cleaner
+/// pattern) must still release the per-host inflight permit so the
+/// NEXT request can proceed. Pre-fix the permits only released on
+/// `Drop`. Shape: cap=2 per host, 4 sequential requests, each holds
+/// its Arc → pre-fix the 3rd `request()` deadlocks on `acquire_owned`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_releases_inflight_permits_under_ffi_holder_pattern() {
+    let mut cfg = default_test_config();
+    cfg.max_inflight_per_host = Some(2);
+    cfg.max_inflight_total = Some(64);
+    let client = PqcHttpClient::new(cfg).expect("client should construct");
+
+    let work = async {
+        let mut held: Vec<Arc<PqcResponse>> = Vec::new();
+        for _ in 0..4u32 {
+            let resp = request_resilient(&client, get("https://pq.cloudflareresearch.com/")).await;
+            resp.cancel();
+            held.push(resp);
+            // Yield so the next acquire can park if it's going to —
+            // without this we'd only catch a synchronous block.
+            tokio::task::yield_now().await;
+        }
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), work)
+        .await
+        .expect("permit starvation: cap=2 + FFI-holder pattern deadlocked the 3rd request");
+}
+
 /// Test-only `BodyProvider` that yields pre-staged chunks. Lets us
 /// drive the streaming-upload code path without a real file source.
 struct VecBodyProvider {
