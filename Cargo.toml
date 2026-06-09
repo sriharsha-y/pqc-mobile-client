@@ -58,6 +58,11 @@ cache = [
     "dep:pin-project-lite",
     "dep:futures-util",
 ]
+# DEBUG-ONLY: pulls android_logger so Rust `log::debug!` / `log::warn!` calls
+# surface in logcat. Enable for repro builds only:
+#   PQC_CARGO_FEATURES="cache,android-logs" make android
+# Never enable on release builds — extra dep + verbose logs.
+android-logs = ["dep:android_logger"]
 
 [dependencies]
 # Async runtime
@@ -173,6 +178,9 @@ futures-core = { version = "0.3", default-features = false }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
 ndk-context = "0.1"
+# Optional logcat backend for the `log` crate; enabled by the `android-logs`
+# feature, which is off by default. Repro/debug builds only.
+android_logger = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

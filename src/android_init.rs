@@ -38,6 +38,22 @@ pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_na
     _class: JClass<'local>,
     context: JObject<'local>,
 ) {
+    // android-logs feature: route the `log` crate to logcat. Idempotent at
+    // logger-level. No-op when the feature is off (production builds).
+    #[cfg(feature = "android-logs")]
+    {
+        use std::sync::Once;
+        static INIT_LOGGER: Once = Once::new();
+        INIT_LOGGER.call_once(|| {
+            android_logger::init_once(
+                android_logger::Config::default()
+                    .with_max_level(log::LevelFilter::Debug)
+                    .with_tag("PqcRust"),
+            );
+            log::debug!("pqc: android_logger initialized");
+        });
+    }
+
     unowned_env
         .with_env(|env| -> JniResult<()> {
             let java_vm = env.get_java_vm()?;
