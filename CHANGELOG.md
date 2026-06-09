@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.9.0...v0.10.0) (2026-06-09)
+
+
+### Features
+
+* **cache:** add x-pqc-cache-hit response header ([6eee6e3](https://github.com/sriharsha-y/pqc-mobile-client/commit/6eee6e3c51e422c9ff78e0dca7b78bbb00618513))
+* **cache:** add x-pqc-cache-hit response header ([d475d54](https://github.com/sriharsha-y/pqc-mobile-client/commit/d475d548e327540ba633dc6124c8a27bfc081941))
+* **config:** expose all PqcConfig fields in platformDefault helpers ([40731af](https://github.com/sriharsha-y/pqc-mobile-client/commit/40731afbc34c35b9f26495a3258be2649db0ab74))
+
+
+### Bug Fixes
+
+* **config:** correct platformDefault docs/types + drift detector ([20f4cfe](https://github.com/sriharsha-y/pqc-mobile-client/commit/20f4cfe515f04f1c23e928e6b9ae75e5552c1055))
+
 ## [0.9.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.3...v0.9.0) (2026-06-09)
 
 
