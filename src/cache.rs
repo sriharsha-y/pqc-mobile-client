@@ -1630,6 +1630,7 @@ mod tests {
     /// Build a streaming response body of N frames of `chunk_size` each
     /// with byte pattern `fill`. No Content-Length header → routes
     /// through put_tee.
+    #[allow(clippy::type_complexity)] // test helper, type alias not worth it
     fn streaming_response(
         n_frames: usize,
         chunk_size: usize,

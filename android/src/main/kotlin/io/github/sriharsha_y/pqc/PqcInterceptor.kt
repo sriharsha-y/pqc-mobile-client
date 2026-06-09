@@ -207,11 +207,11 @@ open class PqcInterceptor(context: Context) : Interceptor {
             }
             override fun timeout(): okio.Timeout = okio.Timeout.NONE
             override fun close() {
-                // Sync FFI — no runBlocking. PqcResponse.cancel() flips
-                // an atomic flag and drops the body if uncontended; if
-                // a read is in flight on another thread it observes the
-                // flag at its next chunk boundary.
+                // cancel() releases the inflight permits eagerly;
+                // destroy() bypasses the UniFFI Cleaner so the rest of
+                // the Rust struct is freed without waiting for GC.
                 pqcResp.cancel()
+                pqcResp.destroy()
             }
         }
         // `Source.buffer()` extension (imported above) — wraps the raw
