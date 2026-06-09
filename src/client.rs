@@ -375,9 +375,8 @@ impl PqcHttpClient {
         }
 
         // Return a PqcResponse handle. The body is NOT drained here —
-        // consumers pull via async `read_chunk()` / `bytes()`. The
-        // semaphore permits move INTO the response so they're held
-        // until the response is fully consumed or dropped, matching
+        // consumers pull via async `read_chunk()` / `bytes()`. Permits
+        // release on `cancel()` (eager) or Drop (fallback), matching
         // OkHttp's "in-flight until response.close()" lifecycle.
         Ok(Arc::new(PqcResponse {
             status,
@@ -386,8 +385,7 @@ impl PqcHttpClient {
             negotiated_protocol,
             cancelled: AtomicBool::new(false),
             body: tokio::sync::Mutex::new(Some(resp)),
-            _global_permit,
-            _host_permit,
+            permits: Mutex::new(Some((_global_permit, _host_permit))),
         }))
     }
 
@@ -432,11 +430,11 @@ impl PqcHttpClient {
 ///
 /// # Lifecycle
 ///
-/// The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
-/// semaphore permits acquired at request time both live inside this
-/// object. Dropping the response without calling `bytes()` aborts the
-/// body stream — same as OkHttp `Response.close()` and URLSession's
-/// task-cancel semantics.
+/// The connection and the inflight semaphore permits live inside
+/// this object. `cancel()` releases the permits synchronously — a
+/// foreign wrapper that outlives the body close (Android Kotlin
+/// Cleaner) does NOT stall the per-host gate; `Drop` is the natural
+/// fallback when `cancel()` wasn't issued.
 ///
 /// # Cancellation note
 ///
@@ -466,13 +464,11 @@ pub struct PqcResponse {
     /// must take `&self`). `Option` so consume-style operations
     /// (`bytes`, `cancel`) can `take()` it.
     body: tokio::sync::Mutex<Option<reqwest::Response>>,
-    /// In-flight semaphore permits acquired at request time. Held
-    /// here so they're released by `Drop` exactly when the response
-    /// is no longer in flight from the consumer's perspective.
-    /// Underscore-prefixed because we never read them — the lifetime
-    /// is what matters.
-    _global_permit: Option<OwnedSemaphorePermit>,
-    _host_permit: Option<OwnedSemaphorePermit>,
+    /// Inflight semaphore permits, wrapped so `cancel()` (`&self`)
+    /// can `take()` them — without this they only released on `Drop`,
+    /// which the Android Kotlin Cleaner runs GC-paced. Sync mutex
+    /// because `cancel()` is sync and permit release does no I/O.
+    permits: Mutex<Option<(Option<OwnedSemaphorePermit>, Option<OwnedSemaphorePermit>)>>,
 }
 
 // Manual Debug: `body` holds `reqwest::Response` (not Debug).
@@ -533,9 +529,11 @@ impl PqcResponse {
     /// interrupt a mid-read socket — interruption is best-effort.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        // If no reader holds the mutex right now, drop the response
-        // immediately so the connection returns to the pool. If a
-        // reader IS holding it, try_lock fails — the reader will
+        // Eagerly release the inflight permits — Drop is GC-paced on Android.
+        let _ = self.permits.lock().expect("permits mutex poisoned").take();
+        // If no reader holds the body mutex right now, drop the
+        // response immediately so the connection returns to the pool.
+        // If a reader IS holding it, try_lock fails — the reader will
         // observe `cancelled` after its current chunk finishes and
         // take care of the drop itself.
         if let Ok(mut guard) = self.body.try_lock() {
