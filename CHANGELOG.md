@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.3](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.2...v0.8.3) (2026-06-09)
+
+
+### Bug Fixes
+
+* **android:** also initialize ndk-context for hickory-resolver ([49daaec](https://github.com/sriharsha-y/pqc-mobile-client/commit/49daaec54a6dec89b534d313431751369c4f25e4))
+* **android:** also initialize ndk-context for hickory-resolver ([d617b59](https://github.com/sriharsha-y/pqc-mobile-client/commit/d617b59ff38fea9b0ce6b69cc355f98e68fe2140))
+* **android:** set ndk-context gate AFTER fallible work + doc update ([f894660](https://github.com/sriharsha-y/pqc-mobile-client/commit/f89466084e9e2117741f7217c774a110fb6ec0d0))
+
 ## [0.8.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.1...v0.8.2) (2026-06-09)
 
 
