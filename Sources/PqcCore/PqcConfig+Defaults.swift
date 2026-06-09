@@ -14,12 +14,10 @@ public extension PqcConfig {
     /// `URLSessionConfiguration.init(correctly:)`. Safe to call from any
     /// thread.
     ///
-    /// The parameter list mirrors all 14 fields of `PqcConfig`. The
-    /// concurrency / DNS / read-idle defaults match the Rust struct's
-    /// `#[uniffi(default = ...)]` annotations. The caching defaults
-    /// deliberately diverge — iOS turns the cache on and seeds a 20 MiB
-    /// ceiling for `URLSessionConfiguration.default` parity; pass
-    /// `enableCache: false` (and/or `maxCacheBytes: nil`) to opt out.
+    /// Mirrors all 14 fields of `PqcConfig`. Concurrency / DNS /
+    /// read-idle defaults match the Rust struct's
+    /// `#[uniffi(default = ...)]`; caching defaults are the
+    /// URLSession-parity values noted above.
     static func platformDefault(
         pinnedCertSha256: [String] = [],
         defaultTimeoutMs: UInt64? = 60_000,

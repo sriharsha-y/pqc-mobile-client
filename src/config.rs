@@ -166,37 +166,34 @@ pub enum DnsResolver {
     Hickory,
 }
 
-#[cfg(test)]
-mod drift_detector {
-    use super::*;
-
-    /// Compile-time drift detector for `PqcConfig` field count. If a
-    /// field is added or removed and this destructure isn't updated,
-    /// `cargo check` fails with `pattern does not mention field …`. The
-    /// fix is to extend BOTH `platformDefault` helpers and then update
-    /// this destructure:
-    ///   - android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt
-    ///   - Sources/PqcCore/PqcConfig+Defaults.swift
-    ///
-    /// The function is never called — it exists only for the compile
-    /// check. The `#[allow(dead_code)]` silences the unused warning.
-    #[allow(dead_code)]
-    fn pqc_config_field_destructure_check(cfg: PqcConfig) {
-        let PqcConfig {
-            pinned_cert_sha256: _,
-            default_timeout_ms: _,
-            connect_timeout_ms: _,
-            read_idle_timeout_ms: _,
-            enable_cookies: _,
-            user_agent: _,
-            dns_resolver: _,
-            redirect_policy: _,
-            max_inflight_total: _,
-            max_inflight_per_host: _,
-            enable_cache: _,
-            cache_dir: _,
-            max_cache_bytes: _,
-            max_memory_cache_bytes: _,
-        } = cfg;
-    }
+/// Compile-time drift detector for `PqcConfig` field count. Fires on
+/// `cargo check` / `cargo build` — not gated to tests — so the failure
+/// shows up in the cheapest local loop, not just CI.
+///
+/// The function is never called. `#[allow(dead_code)]` silences the
+/// unused warning; the function still type-checks, which is all we
+/// need.
+#[allow(dead_code)]
+fn pqc_config_field_destructure_check(cfg: PqcConfig) {
+    // If this destructure fails with `pattern does not mention field X`,
+    // a field was added to PqcConfig. FIX in this order:
+    //   1. android/src/main/kotlin/io/github/sriharsha_y/pqc/PqcConfigDefaults.kt
+    //   2. Sources/PqcCore/PqcConfig+Defaults.swift
+    //   3. add the new field below.
+    let PqcConfig {
+        pinned_cert_sha256: _,
+        default_timeout_ms: _,
+        connect_timeout_ms: _,
+        read_idle_timeout_ms: _,
+        enable_cookies: _,
+        user_agent: _,
+        dns_resolver: _,
+        redirect_policy: _,
+        max_inflight_total: _,
+        max_inflight_per_host: _,
+        enable_cache: _,
+        cache_dir: _,
+        max_cache_bytes: _,
+        max_memory_cache_bytes: _,
+    } = cfg;
 }

@@ -10,14 +10,9 @@ import android.os.Build
  * `cookieJar` is bypassed by the chain order anyway. Safe to call from
  * any thread.
  *
- * The parameter list mirrors all 14 fields of [PqcConfig]. When a field
- * is added to the Rust struct, extend this signature — otherwise the new
- * field is only reachable via the full constructor or `.copy(...)`.
- *
- * Defaults for the optional concurrency/DNS/cache knobs match the
- * `#[uniffi(default = ...)]` annotations on the Rust struct so callers
- * who don't pass them get the exact same shape as the no-arg
- * `PqcConfig(...)` constructor.
+ * Mirrors all 14 fields of [PqcConfig]. The Rust-side drift detector in
+ * `src/config.rs` compile-errors if a field is added without extending
+ * this signature.
  */
 fun PqcConfig.Companion.platformDefault(
     context: Context? = null,
