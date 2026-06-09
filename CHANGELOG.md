@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.3...v0.9.0) (2026-06-09)
+
+
+### Features
+
+* **client:** optional android-logs cargo feature for logcat observability ([2a1c8ed](https://github.com/sriharsha-y/pqc-mobile-client/commit/2a1c8eddef1147541c1e661aec6c753db510e473))
+
+
+### Bug Fixes
+
+* **android:** explicit pqcResp.destroy() in OkHttp Source.close ([d7e45a5](https://github.com/sriharsha-y/pqc-mobile-client/commit/d7e45a5fe1483576b816cac42dc3c71b054cef4b))
+* **client:** release inflight permits in PqcResponse.cancel() ([02d591d](https://github.com/sriharsha-y/pqc-mobile-client/commit/02d591d7207c0af5aeaef171071a29b62a39790e))
+* inflight permit leak under FFI holder pattern (Android image stall) ([196e785](https://github.com/sriharsha-y/pqc-mobile-client/commit/196e78511f9e1c456c1d2ea40c4f80fc260ca516))
+* **ios:** cancel() after natural EOF in PqcURLProtocol.emit ([84c44d8](https://github.com/sriharsha-y/pqc-mobile-client/commit/84c44d80483423da597148b95160ad5dfbc31385))
+
 ## [0.8.3](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.2...v0.8.3) (2026-06-09)
 
 

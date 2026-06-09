@@ -1,6 +1,6 @@
 [package]
 name = "pqc_client"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2021"
 # Bumped 1.81 → 1.88 for http-cache 1.0.0-alpha.6, which uses RPITIT
 # (return-position impl Trait in trait) on StreamingCacheManager — a
