@@ -62,12 +62,17 @@ pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_na
             let loader_global = env.new_global_ref(loader)?;
 
             // ndk-context: prepare BEFORE init_with_refs takes ownership of
-            // java_vm. Skip if already set — repeat invocations from a
-            // classloader-split scenario would otherwise hit upstream's
-            // `assert!(previous.is_none())`.
-            if !NDK_CONTEXT_INITIALIZED.swap(true, Ordering::SeqCst) {
-                let vm_ptr = java_vm.get_raw() as *mut c_void;
-                let context_for_ndk = env.new_global_ref(&context)?;
+            // java_vm. The compare_exchange runs AFTER the fallible
+            // new_global_ref so a transient JNI failure can't latch the gate
+            // on without the upstream init actually succeeding — otherwise
+            // a retried nativeInit would skip this block forever and the
+            // very bug we're fixing would re-emerge.
+            let vm_ptr = java_vm.get_raw() as *mut c_void;
+            let context_for_ndk = env.new_global_ref(&context)?;
+            if NDK_CONTEXT_INITIALIZED
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 let context_ptr = context_for_ndk.as_raw() as *mut c_void;
                 // SAFETY: vm_ptr and context_ptr outlive the process —
                 // java_vm itself is a process-wide handle and we mem::forget
@@ -75,6 +80,8 @@ pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_na
                 unsafe { ndk_context::initialize_android_context(vm_ptr, context_ptr) };
                 std::mem::forget(context_for_ndk);
             }
+            // (If we lost the race, context_for_ndk drops naturally and the
+            // JNI global ref is released — no leak.)
 
             rustls_platform_verifier::android::init_with_refs(
                 java_vm,

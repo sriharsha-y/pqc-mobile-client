@@ -5,10 +5,12 @@ import android.content.Context
 /**
  * One-time Android-side initialization for `pqc_client`.
  *
- * `rustls-platform-verifier` holds a JVM reference to the Application
- * `Context` to reach `KeyStore`, `NetworkSecurityConfig`, and revocation
- * lookups at handshake time. Rust can only obtain it through JNI, so this
- * object hands it over.
+ * The Rust side reads the Application `Context` from two independent
+ * process-globals: `rustls-platform-verifier` (KeyStore +
+ * NetworkSecurityConfig + revocation lookups at handshake time) and
+ * `ndk-context` (read by `hickory-resolver` during DNS setup, hit even
+ * with the default `DnsResolver.System`). Rust can only obtain the
+ * Context through JNI, so this object hands it to both.
  *
  * **Call exactly once, from `Application.onCreate`, BEFORE constructing
  * any [io.github.sriharsha_y.pqc.PqcHttpClient]**:
