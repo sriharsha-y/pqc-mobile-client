@@ -171,8 +171,16 @@ futures-core = { version = "0.3", default-features = false }
 # We expose a tiny JNI shim (src/android_init.rs) that consumers call
 # from MainApplication.onCreate. iOS has no equivalent — Apple's
 # Security framework is process-wide and discovered via dlopen.
+#
+# `ndk-context` is a SECOND, independent Android-context store used by
+# `hickory-resolver` (DNS) to query the system Context for DNS resolver
+# config — separate from `rustls-platform-verifier`'s store. Initializing
+# one does not initialize the other. We init both in the same JNI shim
+# so the same error message — same expect() call inside ndk-context —
+# isn't raised the moment DNS resolution touches the Android runtime.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
+ndk-context = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

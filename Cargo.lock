@@ -1879,6 +1879,7 @@ dependencies = [
  "jni",
  "log",
  "moka",
+ "ndk-context",
  "pin-project-lite",
  "postcard",
  "rcgen",
