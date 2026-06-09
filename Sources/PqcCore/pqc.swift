@@ -1096,11 +1096,11 @@ public func FfiConverterTypePqcHttpClient_lower(_ value: PqcHttpClient) -> Unsaf
  *
  * # Lifecycle
  *
- * The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
- * semaphore permits acquired at request time both live inside this
- * object. Dropping the response without calling `bytes()` aborts the
- * body stream — same as OkHttp `Response.close()` and URLSession's
- * task-cancel semantics.
+ * The connection and the inflight semaphore permits live inside
+ * this object. `cancel()` releases the permits synchronously — a
+ * foreign wrapper that outlives the body close (Android Kotlin
+ * Cleaner) does NOT stall the per-host gate; `Drop` is the natural
+ * fallback when `cancel()` wasn't issued.
  *
  * # Cancellation note
  *
@@ -1192,11 +1192,11 @@ public protocol PqcResponseProtocol: AnyObject, Sendable {
  *
  * # Lifecycle
  *
- * The connection (HTTP/2 stream or HTTP/1.1 socket) and the in-flight
- * semaphore permits acquired at request time both live inside this
- * object. Dropping the response without calling `bytes()` aborts the
- * body stream — same as OkHttp `Response.close()` and URLSession's
- * task-cancel semantics.
+ * The connection and the inflight semaphore permits live inside
+ * this object. `cancel()` releases the permits synchronously — a
+ * foreign wrapper that outlives the body close (Android Kotlin
+ * Cleaner) does NOT stall the per-host gate; `Drop` is the natural
+ * fallback when `cancel()` wasn't issued.
  *
  * # Cancellation note
  *

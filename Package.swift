@@ -8,7 +8,7 @@
 
 import PackageDescription
 
-let version = "0.8.3"
+let version = "0.9.0"
 
 let package = Package(
     name: "PqcCore",
@@ -25,7 +25,7 @@ let package = Package(
         .binaryTarget(
             name: "pqcFFI",
             url: "https://github.com/sriharsha-y/pqc-mobile-client/releases/download/v\(version)/PqcCore-\(version).zip",
-            checksum: "65c6c91b40e927f99ccbe6d8ad358a386d47d5eb7cf07bee9e944130d6c873aa"
+            checksum: "517d58dce8f57a479adfe43785430e42dac7767b35a20c8aa373669a4cf519ee"
         ),
         // UniFFI-generated Swift binding under Sources/PqcCore, refreshed by
         // `publish-swiftpm` each release. Its `import pqcFFI` matches the
