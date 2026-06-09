@@ -3,14 +3,9 @@ package io.github.sriharsha_y.pqc.android
 import android.content.Context
 
 /**
- * One-time Android-side initialization for `pqc_client`.
- *
- * The Rust side reads the Application `Context` from two independent
- * process-globals: `rustls-platform-verifier` (KeyStore +
- * NetworkSecurityConfig + revocation lookups at handshake time) and
- * `ndk-context` (read by `hickory-resolver` during DNS setup, hit even
- * with the default `DnsResolver.System`). Rust can only obtain the
- * Context through JNI, so this object hands it to both.
+ * One-time Android-side initialization for `pqc_client`. Hands the
+ * Application `Context` to the native side so TLS cert verification and
+ * DNS resolution can reach the Android runtime.
  *
  * **Call exactly once, from `Application.onCreate`, BEFORE constructing
  * any [io.github.sriharsha_y.pqc.PqcHttpClient]**:
@@ -27,8 +22,7 @@ import android.content.Context
  * Skipping this throws on the first request:
  *   `io.github.sriharsha_y.pqc.InternalException: android context was not initialized`
  *
- * Idempotent — a redundant call short-circuits before crossing into Rust.
- * iOS has no equivalent: Apple's Security framework is process-wide.
+ * Idempotent. iOS has no equivalent: Apple's Security framework is process-wide.
  */
 object PqcAndroidInit {
     @Volatile private var initialized = false
