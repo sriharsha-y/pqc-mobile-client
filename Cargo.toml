@@ -167,7 +167,7 @@ futures-core = { version = "0.3", default-features = false }
 # app's Application.onCreate to capture the Android Context so it can
 # reach KeyStore / NetworkSecurityConfig classes at handshake time.
 # Without this, the first request throws
-#   io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized
+#   io.github.sriharsha_y.pqc.InternalException: android context was not initialized
 # We expose a tiny JNI shim (src/android_init.rs) that consumers call
 # from MainApplication.onCreate. iOS has no equivalent — Apple's
 # Security framework is process-wide and discovered via dlopen.

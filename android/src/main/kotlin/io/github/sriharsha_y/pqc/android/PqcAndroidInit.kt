@@ -23,7 +23,7 @@ import android.content.Context
  * ```
  *
  * Skipping this throws on the first request:
- *   `io.github.sriharsha_y.pqc.InternalException: Expect rustls-platform-verifier to be initialized`
+ *   `io.github.sriharsha_y.pqc.InternalException: android context was not initialized`
  *
  * Idempotent — a redundant call short-circuits before crossing into Rust.
  * iOS has no equivalent: Apple's Security framework is process-wide.

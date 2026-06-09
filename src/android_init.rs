@@ -15,15 +15,15 @@ use jni::EnvUnowned;
 /// JNI symbol must mirror the Kotlin `external fun nativeInit` exactly.
 /// JNI mangling escapes the `_` in the `sriharsha_y` package segment as
 /// `_1`, hence `..._sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit`.
-/// Returns `void` so init failure surfaces as a Java exception, not a
-/// silent `false`.
 ///
-/// jni 0.22 native-method signature shape: the FFI param is
-/// `EnvUnowned<'local>` (was `JNIEnv<'local>` in 0.21). The body is
-/// wrapped in `with_env` / `resolve` so the `ThrowRuntimeExAndDefault`
-/// policy converts a returned `Err` into a thrown
-/// `java.lang.RuntimeException` automatically — replaces the manual
-/// `env.throw_new(...)` + `env.fatal_error(...)` dance from 0.21.
+/// Uses `init_with_refs` (not the simpler `init_with_env`) so the
+/// Context's classloader is captured as a global ref. Without it the
+/// verifier's JNI lookup of `org.rustls.platformverifier.*` runs against
+/// the calling thread's default loader — on Rust-spawned tokio workers
+/// that's the system loader, which can't see app DEX in processes with
+/// namespaced classloaders (RN New Arch + multi-DEX + RASP is the
+/// repro). Surfaces as `InternalException: android context was not
+/// initialized` at handshake time. See rustls-platform-verifier PR #159.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_nativeInit<'local>(
     mut unowned_env: EnvUnowned<'local>,
@@ -32,11 +32,14 @@ pub extern "system" fn Java_io_github_sriharsha_1y_pqc_android_PqcAndroidInit_na
 ) {
     unowned_env
         .with_env(|env| -> JniResult<()> {
-            // Captures a global ref to the Application Context + a
-            // JavaVM handle. Idempotent via the crate's internal
-            // OnceCell. The verifier's error type IS jni::errors::Error,
-            // so the `?` propagates straight to the policy below.
-            rustls_platform_verifier::android::init_with_env(env, context)
+            let java_vm = env.get_java_vm()?;
+            let loader = env.get_object_class(&context)?.get_class_loader(env)?;
+            rustls_platform_verifier::android::init_with_refs(
+                java_vm,
+                env.new_global_ref(context)?,
+                env.new_global_ref(loader)?,
+            );
+            Ok(())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
