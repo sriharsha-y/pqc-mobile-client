@@ -408,6 +408,7 @@ Cacheability is decided by method + status + cache headers — not by extension 
 
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache: true` makes the initializer throw `PqcError.invalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
 - **vs. `URLCache`:** the memory tier is true LRU; the disk tier evicts oldest-first (FIFO) once `maxCacheBytes` is exceeded. Like `URLCache`, we apply a **per-entry cap of ~5% of total capacity** — with a 20 MiB cache, individual responses larger than ~1 MiB skip the cache, so one large download can't evict the entire hot set. We deliberately do **not** replicate `URLCache`'s 200–299-only status filter (we cache the broader RFC set).
+- **Diagnostic header:** every response that flows through the cache layer carries `x-pqc-cache-hit: true` (served from the mem or disk tier) or `x-pqc-cache-hit: false` (cache miss). Absent when the cache layer wasn't engaged (`enableCache: false`). Useful for verifying cache behaviour at runtime; consumers can ignore it.
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
 
 ## 12. DNS resolver — `dnsResolver` (opt-in)

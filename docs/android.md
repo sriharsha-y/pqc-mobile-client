@@ -339,6 +339,7 @@ Cacheability is decided by method + status + cache headers — not by extension 
 
 - **Builds:** only effective in artifacts built with the `cache` cargo feature (the official release builds enable it). In a feature-less build, `enableCache = true` makes the constructor throw `PqcError.InvalidRequest`, and `clearCache`/`cacheSizeBytes` are inert.
 - **Eviction** is by insertion time (FIFO) once `maxCacheBytes` is exceeded — a close approximation of OkHttp's LRU (the disk store exposes no access time).
+- **Diagnostic header:** every response that flows through the cache layer carries `x-pqc-cache-hit: true` (served from the mem or disk tier) or `x-pqc-cache-hit: false` (cache miss). Absent when the cache layer wasn't engaged (`enableCache = false`). Useful for verifying cache behaviour at runtime; consumers can ignore it.
 - **Security:** a cache *hit* serves bytes without a TLS handshake, so the PQC / pinning guarantees re-apply only on a miss or revalidation. That's expected and matches every HTTP cache.
 
 ## 12. DNS resolver — `dnsResolver` (opt-in)
