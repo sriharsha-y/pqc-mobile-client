@@ -10,33 +10,43 @@ import android.os.Build
  * `cookieJar` is bypassed by the chain order anyway. Safe to call from
  * any thread.
  *
- * The parameter list mirrors the 9 fields of [PqcConfig]. When a field is
- * added to the Rust struct, this signature should be extended — otherwise
- * the new field silently picks up the binding's default value.
+ * Mirrors all 14 fields of [PqcConfig]. The Rust-side drift detector in
+ * `src/config.rs` compile-errors if a field is added without extending
+ * this signature.
  */
 fun PqcConfig.Companion.platformDefault(
     context: Context? = null,
     pinnedCertSha256: List<String> = emptyList(),
     defaultTimeoutMs: ULong? = 10_000UL,
     connectTimeoutMs: ULong? = 10_000UL,
+    readIdleTimeoutMs: ULong? = null,
     enableCookies: Boolean = true,
     userAgent: String? = null,
+    dnsResolver: DnsResolver? = null,
     redirectPolicy: RedirectPolicy = RedirectPolicy.Limited(max = 20U),
+    maxInflightTotal: UInt? = 64U,
+    maxInflightPerHost: UInt? = 5U,
     enableCache: Boolean = false,
     cacheDir: String? = null,
     maxCacheBytes: ULong? = null,
+    maxMemoryCacheBytes: ULong? = null,
 ): PqcConfig = PqcConfig(
     pinnedCertSha256 = pinnedCertSha256,
     defaultTimeoutMs = defaultTimeoutMs,
     connectTimeoutMs = connectTimeoutMs,
+    readIdleTimeoutMs = readIdleTimeoutMs,
     enableCookies = enableCookies,
     userAgent = userAgent
         ?: context?.let { defaultAndroidUserAgent(it) }
         ?: "PqcCore (Android ${Build.VERSION.RELEASE})",
+    dnsResolver = dnsResolver,
     redirectPolicy = redirectPolicy,
+    maxInflightTotal = maxInflightTotal,
+    maxInflightPerHost = maxInflightPerHost,
     enableCache = enableCache,
     cacheDir = cacheDir,
     maxCacheBytes = maxCacheBytes,
+    maxMemoryCacheBytes = maxMemoryCacheBytes,
 )
 
 /**

@@ -70,6 +70,12 @@ use crate::config::PqcConfig;
 /// URLCache's undocumented per-entry threshold.
 const ENTRY_CAP_DIVISOR: u64 = 20;
 
+/// Diagnostic response header set by the cache manager: `true` on a
+/// cache hit (mem or disk tier), `false` on a miss. Absent when the
+/// cache layer isn't engaged (no `cache` feature, or `enable_cache =
+/// false`).
+const X_PQC_CACHE_HIT: HeaderName = HeaderName::from_static("x-pqc-cache-hit");
+
 /// On-disk cap when `max_cache_bytes` is `None`: 20 MiB, a typical
 /// `URLCache` disk capacity.
 const DEFAULT_MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
@@ -387,12 +393,20 @@ impl HttpBody for PqcCachedBody {
 
 impl PqcStreamingCacheManager {
     /// Build a response head from `CacheMetadata`. Caller picks the
-    /// body — either Buffered (mem hit) or Cached (disk stream).
+    /// body — either Buffered (mem hit) or Cached (disk stream). Sets
+    /// `x-pqc-cache-hit: true` so consumers can tell this came from
+    /// the cache.
     fn response_head(meta: &CacheMetadata) -> http::response::Builder {
         let mut b = Response::builder()
             .status(StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK))
             .version(version_from_u8(meta.version));
         for (name, value) in &meta.headers {
+            // Skip any prior X_PQC_CACHE_HIT — `http::Builder::header`
+            // APPENDS, so a stale value persisted into CacheMetadata
+            // would coexist with the fresh one.
+            if name.eq_ignore_ascii_case(X_PQC_CACHE_HIT.as_str()) {
+                continue;
+            }
             if let (Ok(n), Ok(v)) = (
                 HeaderName::try_from(name.as_str()),
                 HeaderValue::from_bytes(value),
@@ -400,7 +414,7 @@ impl PqcStreamingCacheManager {
                 b = b.header(n, v);
             }
         }
-        b
+        b.header(&X_PQC_CACHE_HIT, HeaderValue::from_static("true"))
     }
 
     /// Pre-decide whether a response of known length would fail to fit
@@ -435,7 +449,9 @@ fn content_length_of(headers: &http::HeaderMap) -> Option<u64> {
 /// Rebuild a `Response<PqcCachedBody>` from the upstream response's
 /// parts + an already-shaped `PqcCachedBody`. Single source of truth
 /// for status/version/headers/extensions copying so a future Parts
-/// field (trailers, h2 settings) only needs to be plumbed once.
+/// field (trailers, h2 settings) only needs to be plumbed once. Also
+/// the single place the `x-pqc-cache-hit: false` diagnostic is set on
+/// all miss paths (`put_buffered`, `put_tee`, `passthrough_response`).
 fn build_response_with_body(
     parts: http::response::Parts,
     body: PqcCachedBody,
@@ -444,8 +460,16 @@ fn build_response_with_body(
         .status(parts.status)
         .version(parts.version);
     for (name, value) in &parts.headers {
+        // Same de-dup as response_head: skip a prior X_PQC_CACHE_HIT
+        // from the upstream parts so our miss value (`false`) is
+        // single-valued. `name` is already a HeaderName so this is a
+        // pointer-cheap equality, not a case-folded scan.
+        if name == X_PQC_CACHE_HIT {
+            continue;
+        }
         b = b.header(name, value);
     }
+    b = b.header(&X_PQC_CACHE_HIT, HeaderValue::from_static("false"));
     let mut resp = b
         .body(body)
         .map_err(|e| HttpCacheError::cache(format!("build response: {e}")))?;
@@ -1269,9 +1293,19 @@ mod tests {
     /// cacheability gate but exercises the exact single-key layout
     /// that `get` reads.
     async fn write_entry(m: &PqcStreamingCacheManager, key: &str, body: &[u8]) {
+        write_entry_with_headers(m, key, body, vec![]).await;
+    }
+
+    /// Same as `write_entry` but with caller-supplied stored headers.
+    /// Used by the dedup regression test to seed a stale x-pqc-cache-hit
+    /// without re-implementing the whole cacache write path.
+    async fn write_entry_with_headers(
+        m: &PqcStreamingCacheManager,
+        key: &str,
+        body: &[u8],
+        headers: Vec<(String, Vec<u8>)>,
+    ) {
         let disk = m.disk.as_ref().expect("disk tier present");
-        // Minimal CachePolicy + headers — postcard round-trip is all
-        // we need for the test surface.
         let now = std::time::SystemTime::UNIX_EPOCH;
         let req = http::Request::get("http://example.test/").body(()).unwrap();
         let resp = http::Response::builder().status(200).body(()).unwrap();
@@ -1284,7 +1318,7 @@ mod tests {
         let meta = CacheMetadata {
             status: 200,
             version: 11,
-            headers: vec![],
+            headers,
             policy,
             user_metadata: None,
             body_size: Some(body.len() as u64),
@@ -1353,6 +1387,41 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let drained = drain(resp.into_body()).await;
         assert_eq!(drained, body);
+    }
+
+    /// `x-pqc-cache-hit: true` on every hit (mem-tier or disk-tier),
+    /// single-valued.
+    #[tokio::test]
+    async fn get_sets_x_pqc_cache_hit_true_on_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        write_entry(&m, "k1", b"hit body").await;
+        let (resp, _policy) = m.get("k1").await.unwrap().unwrap();
+        let all: Vec<_> = resp.headers().get_all("x-pqc-cache-hit").iter().collect();
+        assert_eq!(all.len(), 1, "must be single-valued, got {all:?}");
+        assert_eq!(all[0].to_str().unwrap(), "true");
+    }
+
+    /// Duplicate-header regression: when CacheMetadata.headers already
+    /// contains an `x-pqc-cache-hit` (which could happen on a future
+    /// 304-revalidation re-put, or if an upstream ever sends our
+    /// header), `response_head` must NOT append a second value.
+    #[tokio::test]
+    async fn get_does_not_duplicate_x_pqc_cache_hit_when_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        write_entry_with_headers(
+            &m,
+            "k1",
+            b"dedup body",
+            vec![("x-pqc-cache-hit".to_string(), b"stale-value".to_vec())],
+        )
+        .await;
+
+        let (resp, _policy) = m.get("k1").await.unwrap().unwrap();
+        let all: Vec<_> = resp.headers().get_all("x-pqc-cache-hit").iter().collect();
+        assert_eq!(all.len(), 1, "must be single-valued, got {all:?}");
+        assert_eq!(all[0].to_str().unwrap(), "true");
     }
 
     #[tokio::test]
@@ -1611,6 +1680,111 @@ mod tests {
             .unwrap()
             .expect("small response should be cached on disk");
         assert_eq!(entry.size, 2);
+    }
+
+    /// Build a Full<Bytes> response + matching CachePolicy for the put
+    /// tests. Constructs the response once, snapshots parts for the
+    /// policy, and reassembles via from_parts so there's no drift
+    /// between the policy view and the actual put payload.
+    fn miss_test_response(
+        cl: Option<&str>,
+        body_bytes: &'static [u8],
+    ) -> (http::Response<http_body_util::Full<Bytes>>, CachePolicy) {
+        use http::header::CONTENT_LENGTH;
+        let mut b = http::Response::builder().status(200);
+        if let Some(v) = cl {
+            b = b.header(CONTENT_LENGTH, v);
+        }
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(body_bytes));
+        let (parts, body) = b.body(body).unwrap().into_parts();
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let policy = CachePolicy::new_options(
+            &req.into_parts().0,
+            &parts,
+            std::time::SystemTime::UNIX_EPOCH,
+            http_cache_semantics::CacheOptions::default(),
+        );
+        (http::Response::from_parts(parts, body), policy)
+    }
+
+    fn assert_miss_header(resp: &Response<PqcCachedBody>) {
+        assert_eq!(
+            resp.headers()
+                .get("x-pqc-cache-hit")
+                .map(|v| v.to_str().unwrap()),
+            Some("false"),
+        );
+    }
+
+    /// put_buffered → small known-length body → `x-pqc-cache-hit: false`
+    #[tokio::test]
+    async fn put_buffered_sets_x_pqc_cache_hit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let url = "http://example.test/".parse::<http_cache::Url>().unwrap();
+        let (response, policy) = miss_test_response(Some("2"), b"hi");
+        let resp = m
+            .put("k".to_string(), response, policy, url, None)
+            .await
+            .unwrap();
+        assert_miss_header(&resp);
+    }
+
+    /// put_tee → no Content-Length (chunked) → also `false`
+    #[tokio::test]
+    async fn put_tee_sets_x_pqc_cache_hit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let url = "http://example.test/".parse::<http_cache::Url>().unwrap();
+        // streaming_response: no Content-Length → routes through put_tee.
+        let resp = streaming_response(4, 64, 0xa5);
+        let (parts, body) = resp.into_parts();
+        let req = http::Request::get("http://example.test/").body(()).unwrap();
+        let policy = CachePolicy::new_options(
+            &req.into_parts().0,
+            &parts,
+            std::time::SystemTime::UNIX_EPOCH,
+            http_cache_semantics::CacheOptions::default(),
+        );
+        let resp = http::Response::from_parts(parts, body);
+        let out = m
+            .put("k".to_string(), resp, policy, url, None)
+            .await
+            .unwrap();
+        assert_miss_header(&out);
+    }
+
+    /// convert_body (middleware's skip-cache hook) — also `false`.
+    #[tokio::test]
+    async fn convert_body_sets_x_pqc_cache_hit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"x"));
+        let response = http::Response::builder().status(200).body(body).unwrap();
+        let out = m.convert_body(response).await.unwrap();
+        assert_miss_header(&out);
+    }
+
+    /// Miss-path dedup: if the upstream response parts already carry
+    /// `x-pqc-cache-hit` (an upstream/proxy that happens to send our
+    /// header), `build_response_with_body` must NOT append a second
+    /// value next to ours.
+    #[tokio::test]
+    async fn build_response_does_not_duplicate_x_pqc_cache_hit_from_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = PqcStreamingCacheManager::new(&tmp_config(dir.path())).unwrap();
+        let body = http_body_util::Full::<Bytes>::new(Bytes::from_static(b"x"));
+        let response = http::Response::builder()
+            .status(200)
+            .header("x-pqc-cache-hit", "stale-upstream-value")
+            .body(body)
+            .unwrap();
+        // convert_body funnels through passthrough_response →
+        // build_response_with_body, the function under test.
+        let out = m.convert_body(response).await.unwrap();
+        let all: Vec<_> = out.headers().get_all("x-pqc-cache-hit").iter().collect();
+        assert_eq!(all.len(), 1, "must be single-valued, got {all:?}");
+        assert_eq!(all[0].to_str().unwrap(), "false");
     }
 
     #[tokio::test]

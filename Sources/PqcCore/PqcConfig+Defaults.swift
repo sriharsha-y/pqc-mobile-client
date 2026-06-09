@@ -13,27 +13,42 @@ public extension PqcConfig {
     /// Android / OkHttp. Verified against `swift-corelibs-foundation`'s
     /// `URLSessionConfiguration.init(correctly:)`. Safe to call from any
     /// thread.
+    ///
+    /// Mirrors all 14 fields of `PqcConfig`. Concurrency / DNS /
+    /// read-idle defaults match the Rust struct's
+    /// `#[uniffi(default = ...)]`; caching defaults are the
+    /// URLSession-parity values noted above.
     static func platformDefault(
         pinnedCertSha256: [String] = [],
         defaultTimeoutMs: UInt64? = 60_000,
         connectTimeoutMs: UInt64? = 10_000,
+        readIdleTimeoutMs: UInt64? = nil,
         enableCookies: Bool = true,
         userAgent: String? = nil,
+        dnsResolver: DnsResolver? = nil,
         redirectPolicy: RedirectPolicy = .limited(max: 20),
+        maxInflightTotal: UInt32? = 64,
+        maxInflightPerHost: UInt32? = 5,
         enableCache: Bool = true,
         cacheDir: String? = nil,
-        maxCacheBytes: UInt64? = 20 * 1024 * 1024
+        maxCacheBytes: UInt64? = 20 * 1024 * 1024,
+        maxMemoryCacheBytes: UInt64? = nil
     ) -> PqcConfig {
         PqcConfig(
             pinnedCertSha256: pinnedCertSha256,
             defaultTimeoutMs: defaultTimeoutMs,
             connectTimeoutMs: connectTimeoutMs,
+            readIdleTimeoutMs: readIdleTimeoutMs,
             enableCookies: enableCookies,
             userAgent: userAgent ?? PqcConfig.defaultIOSUserAgent(),
+            dnsResolver: dnsResolver,
             redirectPolicy: redirectPolicy,
+            maxInflightTotal: maxInflightTotal,
+            maxInflightPerHost: maxInflightPerHost,
             enableCache: enableCache,
             cacheDir: cacheDir ?? PqcConfig.defaultCacheDirectory(),
-            maxCacheBytes: maxCacheBytes
+            maxCacheBytes: maxCacheBytes,
+            maxMemoryCacheBytes: maxMemoryCacheBytes
         )
     }
 
