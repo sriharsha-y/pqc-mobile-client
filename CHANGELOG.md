@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.1...v0.8.2) (2026-06-09)
+
+
+### Bug Fixes
+
+* **android:** use init_with_refs so verifier resolves classes from worker threads ([d167a88](https://github.com/sriharsha-y/pqc-mobile-client/commit/d167a88608379f09672fd19d5c8ab9901cb667c6))
+* **android:** use init_with_refs so verifier resolves classes from worker threads ([1c76504](https://github.com/sriharsha-y/pqc-mobile-client/commit/1c7650438354d1bbfccad09125897834fcb120da))
+
 ## [0.8.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.8.0...v0.8.1) (2026-06-08)
 
 
