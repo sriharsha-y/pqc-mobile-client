@@ -419,8 +419,41 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 | `maxInflightPerHost` | `5U` | Per-host concurrent-request cap. `null` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`. |
 | `maxMemoryCacheBytes` | `null` (= 4 MiB) | In-memory LRU tier for the response cache, **enabled by default on Android too**. Set to `0uL` for OkHttp-style disk-only behavior (OkHttp's bundled `Cache` is disk-only because its `Cache` class is `final`, not for a fundamental Android reason). |
 | `dnsResolver` | `null` (= `System`) | See §12. |
+| `proxyUrl` | `null` | Debug proxy — see §15. |
 
-## 15. Consuming from Java (not Kotlin)
+## 15. Debugging — routing through Charles / Proxyman / Burp (`proxyUrl`)
+
+Because the Rust client runs its **own** TLS stack (rustls), it bypasses the platform networking layer — so web-debugging proxies don't observe it the way they observe `OkHttp`/`HttpURLConnection` traffic.
+
+Set `proxyUrl` to route every request through your proxy so those tools can capture it:
+
+```kotlin
+val config = PqcConfig.platformDefault(
+    context = appContext,
+    pinnedCertSha256 = emptyList(),          // pinning OFF so the proxy CA is accepted
+    proxyUrl = "http://192.168.1.5:8888",    // your machine's LAN IP + proxy port
+)
+```
+
+Two prerequisites for HTTPS interception to actually work (identical to inspecting OkHttp):
+
+1. **Trust the proxy CA.** On Android API 24+ apps don't trust user-installed CAs by default. Add a **debug** `network_security_config` that trusts user certs and reference it from a debug manifest:
+   ```xml
+   <!-- res/xml/network_security_config_debug.xml -->
+   <network-security-config>
+     <debug-overrides>
+       <trust-anchors><certificates src="user"/></trust-anchors>
+     </debug-overrides>
+   </network-security-config>
+   ```
+   The Rust client's platform verifier delegates to the Android `TrustManager`, which honors this config.
+2. **Leave pinning off** for the build you're debugging (empty `pinnedCertSha256`) — an active SPKI pin will (correctly) reject the proxy's MITM cert.
+
+Notes:
+- Use your machine's **LAN IP**, not `localhost`/`10.0.2.2` (the latter only for the emulator loopback). Embedded credentials are honored (`http://user:pass@host:port`); a bare `host:port` is treated as `http://`, and only an unparseable value fails `PqcHttpClient(config)` with `PqcError.InvalidRequest`.
+- This is the supported way to inspect Rust-stack traffic; JS-XHR inspectors (Reactotron/Flipper) only see RN's JS layer and show incomplete URLs for these requests. **Leave `proxyUrl` `null` in production.**
+
+## 16. Consuming from Java (not Kotlin)
 
 The Kotlin-only sugar (`PqcConfig.platformDefault`, default-arg shortcuts, `suspend fun` on `PqcHttpClient.request`) interoperates with Java but requires a few adjustments:
 

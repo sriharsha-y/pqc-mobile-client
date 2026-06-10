@@ -31,6 +31,7 @@ fn default_test_config() -> PqcConfig {
         user_agent: Some("pqc-client-smoke-test/0.3.1".to_string()),
         redirect_policy: RedirectPolicy::SameOriginOnly {},
         dns_resolver: None,
+        proxy_url: None,
         max_inflight_total: Some(64),
         max_inflight_per_host: Some(5),
         enable_cache: false,
@@ -380,6 +381,89 @@ async fn streaming_post_body_round_trips() {
     assert!(
         body_str.contains("\"hello\"") && body_str.contains("\"world\""),
         "echoed body should contain the assembled payload, got: {body_str}"
+    );
+}
+
+/// `proxy_url` actually routes traffic: stand up an in-process HTTP CONNECT
+/// proxy, point the client at it, and assert (a) the request still succeeds
+/// end-to-end and (b) the proxy observed a CONNECT to the target host. No
+/// MITM / trusted CA is needed — CONNECT tunnels the TLS bytes through to the
+/// real server, so this proves routing without decrypting.
+#[tokio::test]
+async fn proxy_routes_traffic_through_local_connect_proxy() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    // Hosts the proxy was asked to CONNECT to — the proof of routing.
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let seen_acceptor = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let seen = seen_acceptor.clone();
+            tokio::spawn(async move {
+                // Read request head up to CRLFCRLF (the CONNECT line + headers).
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    match client.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                // `CONNECT host:port HTTP/1.1` → capture `host:port`.
+                let head = String::from_utf8_lossy(&buf);
+                let target = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().expect("seen poisoned").push(target.clone());
+
+                // Open the tunnel to the real target and splice both ways.
+                let Ok(mut upstream) = TcpStream::connect(&target).await else {
+                    return;
+                };
+                if client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+
+    let mut cfg = default_test_config();
+    cfg.proxy_url = Some(format!("http://{proxy_addr}"));
+    let client = PqcHttpClient::new(cfg).expect("client should construct with a proxy");
+
+    let resp = request_resilient(
+        &client,
+        get("https://pq.cloudflareresearch.com/cdn-cgi/trace"),
+    )
+    .await;
+    assert!(
+        resp.status() < 500,
+        "request via proxy returned {}",
+        resp.status()
+    );
+    let _ = resp.bytes().await;
+
+    let targets = seen.lock().expect("seen poisoned").clone();
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.contains("pq.cloudflareresearch.com")),
+        "proxy should have seen a CONNECT to the target host; saw: {targets:?}"
     );
 }
 

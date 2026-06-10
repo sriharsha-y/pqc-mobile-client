@@ -135,6 +135,15 @@ impl PqcHttpClient {
             builder = builder.hickory_dns(true);
         }
 
+        // Optional debug proxy so tools like Charles/Burp can see Rust-stack
+        // traffic. reqwest coerces a bare host:port to http://; only an
+        // unparseable value errors. MITM still needs the CA OS-trusted +
+        // pinning off — see PqcConfig::proxy_url.
+        if let Some(ref proxy) = config.proxy_url {
+            builder =
+                builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| PqcError::InvalidRequest)?);
+        }
+
         builder = builder.redirect(match config.redirect_policy {
             RedirectPolicy::NoRedirects {} => Policy::none(),
             RedirectPolicy::SameOriginOnly {} => Policy::custom(|attempt| {
@@ -977,5 +986,67 @@ mod tests {
             classify_err_chain(chain),
             crate::error::PqcError::Network
         ));
+    }
+
+    // ---- proxy_url constructor wiring ----
+    // These build a real client (sync, no network — the TLS config loads the
+    // platform trust store offline) to cover the `Proxy::all(..).map_err(..)`
+    // branch in `new`. End-to-end routing through a proxy is exercised by the
+    // `proxy_routes_traffic_through_local_connect_proxy` smoke test.
+
+    use crate::config::{PqcConfig, RedirectPolicy};
+    use crate::error::PqcError;
+    use crate::PqcHttpClient;
+
+    /// Minimal config with one overridable proxy_url. Pinning empty (no
+    /// network needed to build the verifier).
+    fn config_with_proxy(proxy_url: Option<&str>) -> PqcConfig {
+        PqcConfig {
+            pinned_cert_sha256: vec![],
+            default_timeout_ms: None,
+            connect_timeout_ms: None,
+            read_idle_timeout_ms: None,
+            enable_cookies: false,
+            user_agent: None,
+            dns_resolver: None,
+            proxy_url: proxy_url.map(str::to_owned),
+            redirect_policy: RedirectPolicy::SameOriginOnly {},
+            max_inflight_total: None,
+            max_inflight_per_host: None,
+            enable_cache: false,
+            cache_dir: None,
+            max_cache_bytes: None,
+            max_memory_cache_bytes: None,
+        }
+    }
+
+    #[test]
+    fn proxy_url_none_constructs() {
+        assert!(PqcHttpClient::new(config_with_proxy(None)).is_ok());
+    }
+
+    #[test]
+    fn proxy_url_valid_constructs() {
+        assert!(PqcHttpClient::new(config_with_proxy(Some("http://127.0.0.1:8888"))).is_ok());
+    }
+
+    /// reqwest coerces a bare host:port to `http://host:port`, so this is a
+    /// successful construction — documents the lenient parsing the field doc
+    /// promises.
+    #[test]
+    fn proxy_url_bare_host_port_constructs() {
+        assert!(PqcHttpClient::new(config_with_proxy(Some("127.0.0.1:8888"))).is_ok());
+    }
+
+    /// A genuinely unparseable proxy URL (empty host) is bad config and must
+    /// surface as InvalidRequest from the constructor, not silently no-op.
+    #[test]
+    fn proxy_url_malformed_rejected() {
+        // `PqcHttpClient` has no Debug, so match instead of expect_err.
+        let result = PqcHttpClient::new(config_with_proxy(Some("http://")));
+        assert!(
+            matches!(result, Err(PqcError::InvalidRequest)),
+            "empty-host proxy URL must be rejected as InvalidRequest"
+        );
     }
 }

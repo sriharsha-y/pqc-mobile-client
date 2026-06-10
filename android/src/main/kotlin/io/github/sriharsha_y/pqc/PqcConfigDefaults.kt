@@ -10,7 +10,7 @@ import android.os.Build
  * `cookieJar` is bypassed by the chain order anyway. Safe to call from
  * any thread.
  *
- * Mirrors all 14 fields of [PqcConfig]. The Rust-side drift detector in
+ * Mirrors all 15 fields of [PqcConfig]. The Rust-side drift detector in
  * `src/config.rs` compile-errors if a field is added without extending
  * this signature.
  */
@@ -23,6 +23,7 @@ fun PqcConfig.Companion.platformDefault(
     enableCookies: Boolean = true,
     userAgent: String? = null,
     dnsResolver: DnsResolver? = null,
+    proxyUrl: String? = null,
     redirectPolicy: RedirectPolicy = RedirectPolicy.Limited(max = 20U),
     maxInflightTotal: UInt? = 64U,
     maxInflightPerHost: UInt? = 5U,
@@ -40,6 +41,7 @@ fun PqcConfig.Companion.platformDefault(
         ?: context?.let { defaultAndroidUserAgent(it) }
         ?: "PqcCore (Android ${Build.VERSION.RELEASE})",
     dnsResolver = dnsResolver,
+    proxyUrl = proxyUrl,
     redirectPolicy = redirectPolicy,
     maxInflightTotal = maxInflightTotal,
     maxInflightPerHost = maxInflightPerHost,

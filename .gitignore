@@ -49,6 +49,10 @@ xcuserdata/
 *.log
 .scratch/
 
+# Local-only planning / audit notes (kept out of version control on purpose).
+docs/AUDIT.md
+docs/HTTP3_PLAN.md
+
 # Claude Code per-user, machine-local state. The project-level CLAUDE.md
 # at the repo root IS tracked — it's the load-bearing project guide for
 # Claude Code (and referenced in the system prompt as "checked into the
