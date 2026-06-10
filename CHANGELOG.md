@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.1...v0.10.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* **cache:** preserve post-redirect final_url under cache feature ([1d59429](https://github.com/sriharsha-y/pqc-mobile-client/commit/1d5942954dcefd0e2a9ea4f18948863f73578b7b))
+* **cache:** preserve post-redirect final_url under cache feature ([3d8eae5](https://github.com/sriharsha-y/pqc-mobile-client/commit/3d8eae5d07140d5ddbad3e0446e8098f44c5d4d8))
+
 ## [0.10.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.0...v0.10.1) (2026-06-10)
 
 
