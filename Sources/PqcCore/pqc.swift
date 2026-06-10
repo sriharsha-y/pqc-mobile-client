@@ -1604,6 +1604,29 @@ public struct PqcConfig {
      */
     public var dnsResolver: DnsResolver?
     /**
+     * Optional HTTP/HTTPS proxy the client routes ALL requests through,
+     * e.g. `"http://192.168.1.5:8888"`. `None` (default) sends traffic
+     * directly.
+     *
+     * Primary use is **debugging**: a Rust-stack client does its own TLS
+     * and therefore bypasses the OS networking layer, so web-debugging
+     * proxies (Charles, Burp, Proxyman, Fiddler) can't observe it the way
+     * they observe URLSession/OkHttp. Setting this points the client at
+     * the proxy so those tools can capture requests/responses.
+     *
+     * For the proxy to MITM HTTPS you ALSO need its CA to be trusted by
+     * the OS (iOS: install + enable the proxy's root profile; Android:
+     * a debug `network_security_config` trusting user CAs) and pinning
+     * turned off (leave `pinned_cert_sha256` empty) — exactly the same
+     * prerequisites as inspecting OkHttp/URLSession traffic. Embedded
+     * credentials are honored (`http://user:pass@host:port`).
+     *
+     * Accepts the proxy URL scheme verbatim; a malformed value fails
+     * `PqcHttpClient::new` with `PqcError::InvalidRequest`. Leave `None`
+     * in production.
+     */
+    public var proxyUrl: String?
+    /**
      * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
      * are refused so a redirect can't silently downgrade to an un-pinned
      * host.
@@ -1739,6 +1762,28 @@ public struct PqcConfig {
          * depend on DoT for privacy/policy should leave this at `None`.
          */dnsResolver: DnsResolver? = nil, 
         /**
+         * Optional HTTP/HTTPS proxy the client routes ALL requests through,
+         * e.g. `"http://192.168.1.5:8888"`. `None` (default) sends traffic
+         * directly.
+         *
+         * Primary use is **debugging**: a Rust-stack client does its own TLS
+         * and therefore bypasses the OS networking layer, so web-debugging
+         * proxies (Charles, Burp, Proxyman, Fiddler) can't observe it the way
+         * they observe URLSession/OkHttp. Setting this points the client at
+         * the proxy so those tools can capture requests/responses.
+         *
+         * For the proxy to MITM HTTPS you ALSO need its CA to be trusted by
+         * the OS (iOS: install + enable the proxy's root profile; Android:
+         * a debug `network_security_config` trusting user CAs) and pinning
+         * turned off (leave `pinned_cert_sha256` empty) — exactly the same
+         * prerequisites as inspecting OkHttp/URLSession traffic. Embedded
+         * credentials are honored (`http://user:pass@host:port`).
+         *
+         * Accepts the proxy URL scheme verbatim; a malformed value fails
+         * `PqcHttpClient::new` with `PqcError::InvalidRequest`. Leave `None`
+         * in production.
+         */proxyUrl: String? = nil, 
+        /**
          * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
          * are refused so a redirect can't silently downgrade to an un-pinned
          * host.
@@ -1817,6 +1862,7 @@ public struct PqcConfig {
         self.enableCookies = enableCookies
         self.userAgent = userAgent
         self.dnsResolver = dnsResolver
+        self.proxyUrl = proxyUrl
         self.redirectPolicy = redirectPolicy
         self.maxInflightTotal = maxInflightTotal
         self.maxInflightPerHost = maxInflightPerHost
@@ -1855,6 +1901,9 @@ extension PqcConfig: Equatable, Hashable {
         if lhs.dnsResolver != rhs.dnsResolver {
             return false
         }
+        if lhs.proxyUrl != rhs.proxyUrl {
+            return false
+        }
         if lhs.redirectPolicy != rhs.redirectPolicy {
             return false
         }
@@ -1887,6 +1936,7 @@ extension PqcConfig: Equatable, Hashable {
         hasher.combine(enableCookies)
         hasher.combine(userAgent)
         hasher.combine(dnsResolver)
+        hasher.combine(proxyUrl)
         hasher.combine(redirectPolicy)
         hasher.combine(maxInflightTotal)
         hasher.combine(maxInflightPerHost)
@@ -1913,6 +1963,7 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
                 enableCookies: FfiConverterBool.read(from: &buf), 
                 userAgent: FfiConverterOptionString.read(from: &buf), 
                 dnsResolver: FfiConverterOptionTypeDnsResolver.read(from: &buf), 
+                proxyUrl: FfiConverterOptionString.read(from: &buf), 
                 redirectPolicy: FfiConverterTypeRedirectPolicy.read(from: &buf), 
                 maxInflightTotal: FfiConverterOptionUInt32.read(from: &buf), 
                 maxInflightPerHost: FfiConverterOptionUInt32.read(from: &buf), 
@@ -1931,6 +1982,7 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.enableCookies, into: &buf)
         FfiConverterOptionString.write(value.userAgent, into: &buf)
         FfiConverterOptionTypeDnsResolver.write(value.dnsResolver, into: &buf)
+        FfiConverterOptionString.write(value.proxyUrl, into: &buf)
         FfiConverterTypeRedirectPolicy.write(value.redirectPolicy, into: &buf)
         FfiConverterOptionUInt32.write(value.maxInflightTotal, into: &buf)
         FfiConverterOptionUInt32.write(value.maxInflightPerHost, into: &buf)

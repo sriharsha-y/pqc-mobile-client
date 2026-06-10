@@ -14,7 +14,7 @@ public extension PqcConfig {
     /// `URLSessionConfiguration.init(correctly:)`. Safe to call from any
     /// thread.
     ///
-    /// Mirrors all 14 fields of `PqcConfig`. Concurrency / DNS /
+    /// Mirrors all 15 fields of `PqcConfig`. Concurrency / DNS /
     /// read-idle defaults match the Rust struct's
     /// `#[uniffi(default = ...)]`; caching defaults are the
     /// URLSession-parity values noted above.
@@ -26,6 +26,7 @@ public extension PqcConfig {
         enableCookies: Bool = true,
         userAgent: String? = nil,
         dnsResolver: DnsResolver? = nil,
+        proxyUrl: String? = nil,
         redirectPolicy: RedirectPolicy = .limited(max: 20),
         maxInflightTotal: UInt32? = 64,
         maxInflightPerHost: UInt32? = 5,
@@ -42,6 +43,7 @@ public extension PqcConfig {
             enableCookies: enableCookies,
             userAgent: userAgent ?? PqcConfig.defaultIOSUserAgent(),
             dnsResolver: dnsResolver,
+            proxyUrl: proxyUrl,
             redirectPolicy: redirectPolicy,
             maxInflightTotal: maxInflightTotal,
             maxInflightPerHost: maxInflightPerHost,

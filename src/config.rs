@@ -61,6 +61,23 @@ pub struct PqcConfig {
     #[uniffi(default = None)]
     pub dns_resolver: Option<DnsResolver>,
 
+    // ----- Proxy -----
+    /// Optional proxy all requests route through, e.g. `"http://192.168.1.5:8888"`.
+    /// For **debugging**: the Rust client does its own TLS and bypasses the OS
+    /// network layer, so proxies (Charles/Burp/Proxyman) can't observe it —
+    /// pointing them here lets them capture traffic.
+    ///
+    /// To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
+    /// root profile; Android: a debug `network_security_config`) AND pinning off
+    /// (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+    /// are honored; reqwest coerces a bare `host:port` to `http://`, and only
+    /// unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
+    ///
+    /// `None` (default) adds no proxy, but reqwest still honors `HTTP(S)_PROXY`
+    /// env vars if set. Leave `None` in production.
+    #[uniffi(default = None)]
+    pub proxy_url: Option<String>,
+
     // ----- Redirects -----
     /// How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
     /// are refused so a redirect can't silently downgrade to an un-pinned
@@ -188,6 +205,7 @@ fn pqc_config_field_destructure_check(cfg: PqcConfig) {
         enable_cookies: _,
         user_agent: _,
         dns_resolver: _,
+        proxy_url: _,
         redirect_policy: _,
         max_inflight_total: _,
         max_inflight_per_host: _,

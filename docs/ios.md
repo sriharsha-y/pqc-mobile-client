@@ -486,3 +486,32 @@ Beyond the basics in §3, `PqcConfig` exposes the following knobs (all optional,
 | `maxInflightPerHost` | `Some(5)` | Per-host concurrent-request cap. `nil` disables. Matches OkHttp `Dispatcher.maxRequestsPerHost`; URLSession's analogous cap is 6. |
 | `maxMemoryCacheBytes` | `nil` (= 4 MiB) | In-memory LRU tier for the response cache, on top of the disk tier. Matches `URLCache`'s memory tier. `Some(0)` opts out entirely. |
 | `dnsResolver` | `nil` (= `.system`) | See §12. |
+| `proxyUrl` | `nil` | Debug proxy — see §15. |
+
+## 15. Debugging — routing through Charles / Proxyman / Burp (`proxyUrl`)
+
+Because the Rust client runs its **own** TLS stack (rustls), it bypasses the OS networking layer — so web-debugging proxies don't observe it the way they observe `URLSession`/`OkHttp` traffic.
+
+Set `proxyUrl` to route every request through your proxy so those tools can capture it:
+
+```swift
+override class func makeConfig() -> PqcConfig {
+    #if DEBUG
+    return .platformDefault(
+        pinnedCertSha256: [],                       // pinning OFF so the proxy CA is accepted
+        proxyUrl: "http://192.168.1.5:8888"         // your Mac's LAN IP + proxy port
+    )
+    #else
+    return .platformDefault(pinnedCertSha256: ["…"])
+    #endif
+}
+```
+
+Two prerequisites for HTTPS interception to actually work (identical to inspecting any native client):
+
+1. **Trust the proxy CA on the device.** Install the proxy's root certificate profile and enable full trust (Settings → General → About → Certificate Trust Settings). The Rust client's platform verifier honors the system trust store, so an OS-trusted proxy CA is accepted.
+2. **Leave pinning off** for the build you're debugging (empty `pinnedCertSha256`) — an active SPKI pin will (correctly) reject the proxy's MITM cert.
+
+Notes:
+- Use your machine's **LAN IP**, not `localhost`, when debugging on a physical device. Embedded credentials are honored (`http://user:pass@host:port`); a bare `host:port` is treated as `http://`, and only an unparseable value fails `PqcHttpClient(config:)` with `PqcError.InvalidRequest`.
+- This is the supported way to inspect Rust-stack traffic — JS-XHR inspectors (Reactotron/Flipper) only see RN's JS layer and show incomplete URLs for these requests. **Leave `proxyUrl` `nil` in production.**
