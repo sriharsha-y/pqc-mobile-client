@@ -1604,26 +1604,19 @@ public struct PqcConfig {
      */
     public var dnsResolver: DnsResolver?
     /**
-     * Optional HTTP/HTTPS proxy the client routes ALL requests through,
-     * e.g. `"http://192.168.1.5:8888"`. `None` (default) sends traffic
-     * directly.
+     * Optional proxy all requests route through, e.g. `"http://192.168.1.5:8888"`.
+     * For **debugging**: the Rust client does its own TLS and bypasses the OS
+     * network layer, so proxies (Charles/Burp/Proxyman) can't observe it —
+     * pointing them here lets them capture traffic.
      *
-     * Primary use is **debugging**: a Rust-stack client does its own TLS
-     * and therefore bypasses the OS networking layer, so web-debugging
-     * proxies (Charles, Burp, Proxyman, Fiddler) can't observe it the way
-     * they observe URLSession/OkHttp. Setting this points the client at
-     * the proxy so those tools can capture requests/responses.
+     * To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
+     * root profile; Android: a debug `network_security_config`) AND pinning off
+     * (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+     * are honored; reqwest coerces a bare `host:port` to `http://`, and only
+     * unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
      *
-     * For the proxy to MITM HTTPS you ALSO need its CA to be trusted by
-     * the OS (iOS: install + enable the proxy's root profile; Android:
-     * a debug `network_security_config` trusting user CAs) and pinning
-     * turned off (leave `pinned_cert_sha256` empty) — exactly the same
-     * prerequisites as inspecting OkHttp/URLSession traffic. Embedded
-     * credentials are honored (`http://user:pass@host:port`).
-     *
-     * Accepts the proxy URL scheme verbatim; a malformed value fails
-     * `PqcHttpClient::new` with `PqcError::InvalidRequest`. Leave `None`
-     * in production.
+     * `None` (default) adds no proxy, but reqwest still honors `HTTP(S)_PROXY`
+     * env vars if set. Leave `None` in production.
      */
     public var proxyUrl: String?
     /**
@@ -1762,26 +1755,19 @@ public struct PqcConfig {
          * depend on DoT for privacy/policy should leave this at `None`.
          */dnsResolver: DnsResolver? = nil, 
         /**
-         * Optional HTTP/HTTPS proxy the client routes ALL requests through,
-         * e.g. `"http://192.168.1.5:8888"`. `None` (default) sends traffic
-         * directly.
+         * Optional proxy all requests route through, e.g. `"http://192.168.1.5:8888"`.
+         * For **debugging**: the Rust client does its own TLS and bypasses the OS
+         * network layer, so proxies (Charles/Burp/Proxyman) can't observe it —
+         * pointing them here lets them capture traffic.
          *
-         * Primary use is **debugging**: a Rust-stack client does its own TLS
-         * and therefore bypasses the OS networking layer, so web-debugging
-         * proxies (Charles, Burp, Proxyman, Fiddler) can't observe it the way
-         * they observe URLSession/OkHttp. Setting this points the client at
-         * the proxy so those tools can capture requests/responses.
+         * To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
+         * root profile; Android: a debug `network_security_config`) AND pinning off
+         * (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+         * are honored; reqwest coerces a bare `host:port` to `http://`, and only
+         * unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
          *
-         * For the proxy to MITM HTTPS you ALSO need its CA to be trusted by
-         * the OS (iOS: install + enable the proxy's root profile; Android:
-         * a debug `network_security_config` trusting user CAs) and pinning
-         * turned off (leave `pinned_cert_sha256` empty) — exactly the same
-         * prerequisites as inspecting OkHttp/URLSession traffic. Embedded
-         * credentials are honored (`http://user:pass@host:port`).
-         *
-         * Accepts the proxy URL scheme verbatim; a malformed value fails
-         * `PqcHttpClient::new` with `PqcError::InvalidRequest`. Leave `None`
-         * in production.
+         * `None` (default) adds no proxy, but reqwest still honors `HTTP(S)_PROXY`
+         * env vars if set. Leave `None` in production.
          */proxyUrl: String? = nil, 
         /**
          * How to handle 3xx. Default `SameOriginOnly` — cross-origin redirects
