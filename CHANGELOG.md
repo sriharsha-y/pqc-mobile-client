@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.0...v0.10.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **client:** add opt-in proxy_url for debugging-proxy support ([212f7f3](https://github.com/sriharsha-y/pqc-mobile-client/commit/212f7f31d3634e61cfdfb8325170728751e93517))
+* **client:** add opt-in proxy_url for debugging-proxy support ([f70d7d5](https://github.com/sriharsha-y/pqc-mobile-client/commit/f70d7d54dc86bfed58e66c790ca6e852a28b333d))
+
 ## [0.10.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.9.0...v0.10.0) (2026-06-09)
 
 
