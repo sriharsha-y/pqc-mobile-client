@@ -1248,6 +1248,60 @@ async fn remove_entry(disk: &DiskTier, cache_key: &str) -> u64 {
     reclaimed
 }
 
+/// Per-request slot for capturing the real response URL before the cache
+/// layer drops it (see [`capture_response_url`]). `client.rs` attaches one
+/// via request extensions and reads it back after `send()`.
+#[derive(Clone, Default)]
+pub struct UrlSlot(Arc<std::sync::Mutex<Option<String>>>);
+
+impl UrlSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The captured URL, if the middleware ran. Empty on a cache HIT, where
+    /// `StreamingCache` short-circuits before reaching it — so a HIT of a
+    /// cacheable redirected response reports the request URL, unlike native
+    /// caches, which retain the post-redirect URL.
+    pub fn take(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|mut g| g.take())
+    }
+
+    fn set(&self, url: String) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = Some(url);
+        }
+    }
+}
+
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Middleware recording the real (post-redirect) response URL into the
+/// request's [`UrlSlot`], when it carries one.
+///
+/// Why: the streaming cache layer round-trips responses through
+/// `http::Response`, which drops reqwest's `ResponseUrl` extension; reqwest
+/// then substitutes `http://no.url.provided.local`, so `Response::url()` is a
+/// placeholder for every cached-backend request — even non-cacheable ones.
+/// Installed INNERMOST (after `StreamingCache`) so `next.run` reaches reqwest
+/// directly, where `res.url()` is still real. A plain `fn` so the blanket
+/// `Fn` impl of `Middleware` applies. No upstream fix as of http-cache
+/// 1.0.0-alpha.6 — re-audit on any `http-cache`/`reqwest` bump.
+fn capture_response_url<'a>(
+    req: reqwest::Request,
+    ext: &'a mut http::Extensions,
+    next: reqwest_middleware::Next<'a>,
+) -> BoxFuture<'a, reqwest_middleware::Result<reqwest::Response>> {
+    let slot = ext.get::<UrlSlot>().cloned();
+    Box::pin(async move {
+        let res = next.run(req, ext).await?;
+        if let Some(slot) = slot {
+            slot.set(res.url().to_string());
+        }
+        Ok(res)
+    })
+}
+
 /// Build the streaming-aware reqwest cache middleware from this manager.
 /// Used by `client.rs::new()` to wrap the reqwest client.
 pub fn build_cached_client(
@@ -1258,6 +1312,8 @@ pub fn build_cached_client(
     use http_cache_reqwest::StreamingCache;
     reqwest_middleware::ClientBuilder::new(client)
         .with(StreamingCache::new(manager, CacheMode::Default))
+        // Innermost (after the cache) so it still sees reqwest's real URL.
+        .with(capture_response_url)
         .build()
 }
 

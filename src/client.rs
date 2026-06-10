@@ -344,22 +344,33 @@ impl PqcHttpClient {
             }};
         }
 
-        let resp = match &self.inner {
-            HttpBackend::Plain(c) => build_request!(c.request(method, &req.url))
-                .send()
-                .await
-                .map_err(map_reqwest_err)?,
+        // Each arm yields the response plus the post-redirect URL it came
+        // from. `resp.url()` is only trustworthy on the Plain path — the cache
+        // layer loses it (see `cache::capture_response_url`), so the cached
+        // arm reads the middleware-filled slot, falling back to the request
+        // URL on a cache hit (no redirect re-resolution happens there).
+        let (resp, final_url) = match &self.inner {
+            HttpBackend::Plain(c) => {
+                let resp = build_request!(c.request(method, &req.url))
+                    .send()
+                    .await
+                    .map_err(map_reqwest_err)?;
+                let final_url = resp.url().to_string();
+                (resp, final_url)
+            }
             #[cfg(feature = "cache")]
-            HttpBackend::Cached(c) => build_request!(c.request(method, &req.url))
-                .send()
-                .await
-                .map_err(map_middleware_err)?,
+            HttpBackend::Cached(c) => {
+                let slot = crate::cache::UrlSlot::new();
+                let resp = build_request!(c.request(method, &req.url).with_extension(slot.clone()))
+                    .send()
+                    .await
+                    .map_err(map_middleware_err)?;
+                let final_url = slot.take().unwrap_or_else(|| req.url.clone());
+                (resp, final_url)
+            }
         };
 
         let status = resp.status().as_u16();
-        // The URL the body actually came from (post-redirect). Captured before
-        // `resp` is consumed by the streaming loop below.
-        let final_url = resp.url().to_string();
         // Map to the ALPN id the API documents ("h2", "http/1.1"); the
         // Version Debug string ("HTTP/2.0") would break consumer equality.
         let negotiated_protocol = match resp.version() {
