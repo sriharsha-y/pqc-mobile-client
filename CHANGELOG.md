@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.11.0...v0.12.0) (2026-06-11)
+
+
+### Features
+
+* **pinning:** add per-domain certificate pin expiration ([c902e61](https://github.com/sriharsha-y/pqc-mobile-client/commit/c902e61105e98dceb6b26de2471367693eee62bc))
+* **pinning:** add per-domain certificate pin expiration ([b38966f](https://github.com/sriharsha-y/pqc-mobile-client/commit/b38966f9ee8f25a79ada2fadf5361ce1b0c31bdc))
+
 ## [0.11.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.2...v0.11.0) (2026-06-11)
 
 
