@@ -8,8 +8,8 @@ The latest released minor version is supported with security fixes. Pre-1.0 rele
 
 | Version  | Supported          |
 |----------|--------------------|
-| `0.5.x`  | :white_check_mark: |
-| `< 0.5`  | :x:                |
+| `0.11.x` | :white_check_mark: |
+| `< 0.11` | :x:                |
 
 ## Reporting a vulnerability
 
