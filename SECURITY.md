@@ -6,10 +6,10 @@
 
 The latest released minor version is supported with security fixes. Pre-1.0 releases follow this rule strictly — old `0.x` minors are not patched.
 
-| Version  | Supported          |
-|----------|--------------------|
-| `0.5.x`  | :white_check_mark: |
-| `< 0.5`  | :x:                |
+| Version                                    | Supported          |
+|--------------------------------------------|--------------------|
+| `0.11.0` <!-- x-release-please-version --> (and its minor line) | :white_check_mark: |
+| Any older minor                            | :x:                |
 
 ## Reporting a vulnerability
 
