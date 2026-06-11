@@ -128,6 +128,7 @@ async fn pin_failure_surfaces_typed_error() {
         host: "pq.cloudflareresearch.com".to_string(),
         include_subdomains: false,
         spki_sha256: vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()],
+        expiration: None,
     }];
     let client = PqcHttpClient::new(cfg).expect("client should construct with bogus pin");
     let err = client

@@ -292,6 +292,7 @@ PqcConfig.platformDefault(
                 "YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=",  // current intermediate
                 "Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=",  // backup intermediate
             ),
+            expiration = "2027-01-01",  // optional; pins disable (fail-open) on/after this date
         ),
         // A different host can carry a completely different pin set:
         CertPin(host = "vault.example.com", includeSubdomains = true, spkiSha256 = listOf(/* … */)),
@@ -326,9 +327,25 @@ openssl x509 -in cert.pem -pubkey -noout \
 
 **Recommended: pin your issuing intermediate CA.** Its key has a multi-year lifespan and is far more specific than a public root, so the leaf can rotate freely (CA-forced reissue, ACME renewal) without an app update. Pinning the leaf alone is the most fragile option — a single reissue without a matching pin already shipped will brick the app.
 
-**Always pin at least two hashes** (e.g. the current intermediate + a backup intermediate, or a pre-deployed next leaf). Set the pin set's effective expiry to ≥ 12 months out, with a rotation playbook documented for cert renewal. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
+**Always pin at least two hashes** (e.g. the current intermediate + a backup intermediate, or a pre-deployed next leaf), with a rotation playbook documented for cert renewal. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.PinningFailure`.
+
+### Pin expiration (optional, fail-open)
+
+Each `CertPin` accepts an optional `expiration = "YYYY-MM-DD"` (interpreted at **00:00 UTC**). On or after that date the host's pins are treated as absent and the connection falls back to normal platform trust — i.e. **pinning fails *open*, not closed**. This is the exact semantics of Android's `<pin-set expiration>` and TrustKit's `kTSKExpirationDate`: a safety valve so an app whose users have stopped taking updates isn't permanently bricked once the pinned key rotates. Omit it and the pins never expire (OkHttp / `NSPinnedDomains` behavior).
+
+- Set it **≥ 12 months out** and renew it on your normal release cadence, ahead of the date.
+- A malformed date fails `PqcHttpClient(...)` construction with `PqcException.InvalidRequest` — it never silently means "never expires".
+- **Trade-off:** once expired, that host no longer rejects a user-installed / MITM cert (see the trust model below). Expiration trades a hard availability floor for a window of reduced pinning protection — pick the date accordingly.
+
+### Trust model — what pinning does and does not protect against
+
+Be precise about the threat model so you don't over-trust this:
+
+- **User-installed / MITM CAs (on the wire):** A pinned host **rejects** a proxy/MITM cert even when the device trusts the interceptor's CA — the attacker's cert can't reproduce your pinned key. **This is pinning's job, and it's the cross-platform defense** against a Charles/Burp/mitmproxy/corporate-MITM root. (For an *un-pinned* host, see the note below.)
+- **This crate trusts user-installed CAs by default, and bypasses `NetworkSecurityConfig`.** Unlike OkHttp/`HttpsURLConnection`, the Rust client validates with `rustls-platform-verifier`, which builds trust from `AndroidCAStore` (**system + user** CAs) and runs its own path validation — it does **not** consult your app's `res/xml/network_security_config.xml`. So the Android-7+ "ignore user CAs by default" behavior and any `<trust-anchors>`/`<pin-set>` you declare there do **not** apply to traffic through this client. **Use `pinnedDomains` here**, not NSC, to pin or to defend against user-installed CAs.
+- **Not anti-tampering.** Pinning protects the *connection*; it is not a device-integrity control. An attacker who controls the device — root + Frida, or a repackaged/re-signed APK with a Frida gadget — can hook out *any* client-side check (ours included, though our pin check living in a stripped native `.so` rather than a JVM `CertificatePinner` defeats the off-the-shelf "universal" bypass scripts and forces hand reversing). If you need assurance that a genuine, untampered app is talking to your server, that is the job of **server-side attestation** (Play Integrity API), layered *above* this library — out of scope here.
 
 ## 11. Response caching (opt-in)
 
@@ -459,17 +476,8 @@ val config = PqcConfig.platformDefault(
 
 Two prerequisites for HTTPS interception to actually work (identical to inspecting OkHttp):
 
-1. **Trust the proxy CA.** On Android API 24+ apps don't trust user-installed CAs by default. Add a **debug** `network_security_config` that trusts user certs and reference it from a debug manifest:
-   ```xml
-   <!-- res/xml/network_security_config_debug.xml -->
-   <network-security-config>
-     <debug-overrides>
-       <trust-anchors><certificates src="user"/></trust-anchors>
-     </debug-overrides>
-   </network-security-config>
-   ```
-   The Rust client's platform verifier delegates to the Android `TrustManager`, which honors this config.
-2. **Leave pinning off** for the build you're debugging (empty `pinnedDomains`) — an active SPKI pin will (correctly) reject the proxy's MITM cert.
+1. **Install + fully trust the proxy CA as a user cert** on the device (Settings → install the CA, then confirm it under user credentials). That's all the Rust client needs: it validates against `AndroidCAStore` (system + **user**) and **does not consult `network_security_config`**, so — unlike OkHttp — you do **not** need a `<debug-overrides><trust-anchors><certificates src="user"/>` entry for *this* client to accept the proxy CA. (You'd still add that NSC override if you also want the platform stack / WebView / other libraries in your debug build to trust it.)
+2. **Leave pinning off** for the build you're debugging (empty `pinnedDomains`) — an active SPKI pin will (correctly) reject the proxy's MITM cert regardless of the trusted CA.
 
 Notes:
 - Use your machine's **LAN IP**, not `localhost`/`10.0.2.2` (the latter only for the emulator loopback). Embedded credentials are honored (`http://user:pass@host:port`); a bare `host:port` is treated as `http://`, and only an unparseable value fails `PqcHttpClient(config)` with `PqcError.InvalidRequest`.

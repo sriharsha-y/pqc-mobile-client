@@ -23,6 +23,19 @@ pub struct CertPin {
     /// See `src/pinning.rs` for pin-selection guidance (intermediate CA, >= 2
     /// pins, never a public root).
     pub spki_sha256: Vec<String>,
+
+    /// Optional pin-set expiration as `"YYYY-MM-DD"` (00:00 UTC). On or after
+    /// that instant the host's pins are treated as absent and it falls back to
+    /// the platform verifier alone (**fail-open**) — mirroring Android
+    /// `<pin-set expiration>` / TrustKit `kTSKExpirationDate`, so an app that
+    /// stops receiving updates isn't bricked when its pinned key rotates.
+    /// `None` (default) = never expires. A malformed date fails
+    /// `PqcHttpClient::new` with `InvalidRequest`.
+    ///
+    /// Trade-off: once expired, this host no longer rejects a user-installed-CA
+    /// / MITM cert. Set the date accordingly.
+    #[uniffi(default = None)]
+    pub expiration: Option<String>,
 }
 
 /// Configuration handed to `PqcHttpClient::new`. Defaults are tuned for
