@@ -65,7 +65,7 @@ async fn serve(listener: TcpListener) {
 /// Caching is enabled iff `cache_dir` is given.
 fn test_config(cache_dir: Option<&str>) -> PqcConfig {
     PqcConfig {
-        pinned_cert_sha256: vec![],
+        pinned_domains: vec![],
         default_timeout_ms: Some(5_000),
         connect_timeout_ms: None,
         read_idle_timeout_ms: None,

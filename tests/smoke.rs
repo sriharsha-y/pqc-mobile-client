@@ -4,8 +4,8 @@
 //! Run: `cargo test --release --test smoke -- --nocapture`
 
 use pqc_client::{
-    BodyProvider, HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient, PqcResponse,
-    RedirectPolicy,
+    BodyProvider, CertPin, HttpMethod, HttpRequest, PqcConfig, PqcError, PqcHttpClient,
+    PqcResponse, RedirectPolicy,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,7 @@ fn parse_kex(trace_body: &str) -> Option<String> {
 /// app's call sites is visible.
 fn default_test_config() -> PqcConfig {
     PqcConfig {
-        pinned_cert_sha256: vec![],
+        pinned_domains: vec![],
         default_timeout_ms: Some(15_000),
         connect_timeout_ms: None,
         read_idle_timeout_ms: None,
@@ -122,8 +122,13 @@ async fn pq_handshake_cloudflare() {
 async fn pin_failure_surfaces_typed_error() {
     let mut cfg = default_test_config();
     // 32 zero bytes, base64-encoded — guaranteed not to match any real
-    // SPKI hash.
-    cfg.pinned_cert_sha256 = vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()];
+    // SPKI hash. Scoped to the host the request below targets, so the pin
+    // is actually enforced for that connection.
+    cfg.pinned_domains = vec![CertPin {
+        host: "pq.cloudflareresearch.com".to_string(),
+        include_subdomains: false,
+        spki_sha256: vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()],
+    }];
     let client = PqcHttpClient::new(cfg).expect("client should construct with bogus pin");
     let err = client
         .request(get("https://pq.cloudflareresearch.com/"))

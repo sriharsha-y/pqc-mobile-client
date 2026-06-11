@@ -62,7 +62,7 @@ pub struct PqcHttpClient {
 #[uniffi::export]
 impl PqcHttpClient {
     /// Returns `PqcError` (not panic) so consumers surface bad config —
-    /// e.g. malformed base64 in pinned_cert_sha256 — as a typed error.
+    /// e.g. malformed base64 in pinned_domains — as a typed error.
     #[uniffi::constructor]
     pub fn new(config: PqcConfig) -> Result<Self, PqcError> {
         let tls = build_tls_config(&config)?;
@@ -1013,7 +1013,7 @@ mod tests {
     /// network needed to build the verifier).
     fn config_with_proxy(proxy_url: Option<&str>) -> PqcConfig {
         PqcConfig {
-            pinned_cert_sha256: vec![],
+            pinned_domains: vec![],
             default_timeout_ms: None,
             connect_timeout_ms: None,
             read_idle_timeout_ms: None,

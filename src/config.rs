@@ -1,14 +1,39 @@
+/// One pinned domain and the SPKI hashes accepted for it. Pinning is scoped
+/// per host: a connection is pin-checked only against the entries whose `host`
+/// matches its SNI hostname; a host with no matching entry is left to the
+/// platform verifier alone (so pinning one host never breaks requests to an
+/// unpinned host). Mirrors Apple `NSPinnedDomains` / Android
+/// `NetworkSecurityConfig` `<domain>`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CertPin {
+    /// Hostname to pin, e.g. `"api.example.com"`. Matched ASCII
+    /// case-insensitively against the connection's SNI. IP-literal SNI is
+    /// never matched — pinning is by hostname only.
+    pub host: String,
+
+    /// When true, also pins every subdomain of `host` (`a.host`, `b.a.host`,
+    /// …) but NOT a bare different host. Mirrors `NSIncludesSubdomains` /
+    /// Android `includeSubdomains`.
+    #[uniffi(default = false)]
+    pub include_subdomains: bool,
+
+    /// Base64 SHA-256 of a DER SPKI (standard or URL-safe) accepted for this
+    /// host. A connection matches if ANY cert in its chain — leaf or
+    /// intermediate — carries one of these hashes (the leaf must still parse).
+    /// See `src/pinning.rs` for pin-selection guidance (intermediate CA, >= 2
+    /// pins, never a public root).
+    pub spki_sha256: Vec<String>,
+}
+
 /// Configuration handed to `PqcHttpClient::new`. Defaults are tuned for
 /// mobile and safe to set from Swift/Kotlin without reading the docs.
 /// All `*_ms` fields are milliseconds.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PqcConfig {
-    /// Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
-    /// accept. Matches if ANY cert in the chain — leaf or intermediate —
-    /// has a matching SPKI hash (the leaf must still parse); empty disables
-    /// pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
-    /// public root. See `src/pinning.rs`.
-    pub pinned_cert_sha256: Vec<String>,
+    /// Per-host SPKI pin set. Empty disables pinning entirely. Each entry
+    /// scopes its pins to a host (see `CertPin`); hosts with no matching
+    /// entry are not pinned. See `src/pinning.rs`.
+    pub pinned_domains: Vec<CertPin>,
 
     // ----- Timeouts -----
     /// Total request budget (handshake + headers + body); on expiry the
@@ -69,7 +94,7 @@ pub struct PqcConfig {
     ///
     /// To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
     /// root profile; Android: a debug `network_security_config`) AND pinning off
-    /// (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+    /// (`pinned_domains` empty). Embedded credentials (`http://user:pass@host`)
     /// are honored; reqwest coerces a bare `host:port` to `http://`, and only
     /// unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
     ///
@@ -198,7 +223,7 @@ fn pqc_config_field_destructure_check(cfg: PqcConfig) {
     //   2. Sources/PqcCore/PqcConfig+Defaults.swift
     //   3. add the new field below.
     let PqcConfig {
-        pinned_cert_sha256: _,
+        pinned_domains: _,
         default_timeout_ms: _,
         connect_timeout_ms: _,
         read_idle_timeout_ms: _,

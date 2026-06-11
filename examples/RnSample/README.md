@@ -74,6 +74,6 @@ The app reads the **server's** report of the negotiated key exchange, which is a
 
 This sample intentionally elides things a real banking app needs:
 
-- No cert pinning configured (the integration accepts an empty `pinnedCertSha256` list). See [`../../docs/android.md` Section 10](../../docs/android.md) and [`../../docs/ios.md` Section 10](../../docs/ios.md) for how to compute and configure pins.
+- No cert pinning configured (the integration accepts an empty `pinnedDomains` list). See [`../../docs/android.md` Section 10](../../docs/android.md) and [`../../docs/ios.md` Section 10](../../docs/ios.md) for how to compute and configure pins.
 - `RnSamplePqcURLProtocol` intercepts every `https://` URL — a real app should restrict to known API hostnames so 3rd-party SDKs and CDN traffic continue to use URLSession's native stack.
 - WebViews (`react-native-webview`) and 3rd-party native SDKs (Firebase, Sentry, payment SDKs, etc.) bring their own HTTP stacks and are NOT covered by the swap. See [`../../README.md`](../../README.md) for the full coverage matrix.

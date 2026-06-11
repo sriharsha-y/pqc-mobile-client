@@ -24,7 +24,7 @@ class RnSamplePqcInterceptor(
         //   - SameOriginOnly redirects (refuse cross-origin downgrades),
         //   - 15 s total budget,
         //   - explicit UA for Akamai / bank WAFs.
-        // A real banking app MUST populate pinnedCertSha256 too.
+        // A real banking app MUST populate pinnedDomains too.
         PqcConfig.platformDefault(
             context = context,
             defaultTimeoutMs = 15_000UL,
