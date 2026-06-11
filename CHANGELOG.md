@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.2...v0.11.0) (2026-06-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* `PqcConfig.pinned_cert_sha256` is removed. Use `pinned_domains` with `CertPin { host, include_subdomains, spki_sha256 }`.
+
+### Features
+
+* per-domain SPKI certificate pinning ([affbed4](https://github.com/sriharsha-y/pqc-mobile-client/commit/affbed4133398743e87d48133e760335ab497bd6))
+
 ## [0.10.2](https://github.com/sriharsha-y/pqc-mobile-client/compare/v0.10.1...v0.10.2) (2026-06-10)
 
 
