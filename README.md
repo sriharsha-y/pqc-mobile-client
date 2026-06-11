@@ -64,7 +64,9 @@ PqcAndroidInit.init(this)
 // config (e.g. a malformed pin).
 val client = PqcHttpClient(PqcConfig.platformDefault(
     context = applicationContext,
-    pinnedCertSha256 = listOf("base64-spki-hash"),  // see docs/android.md §10
+    pinnedDomains = listOf(                          // see docs/android.md §10
+        CertPin(host = "example.com", spkiSha256 = listOf("base64-spki-hash")),
+    ),
     userAgent = "MyApp/1.0",
     redirectPolicy = RedirectPolicy.SameOriginOnly,
 ))
@@ -89,7 +91,7 @@ import PqcCore
 // `PqcConfig.platformDefault()` matches URLSessionConfiguration.default —
 // override just the fields you care about.
 let client = try PqcHttpClient(config: .platformDefault(
-    pinnedCertSha256: ["base64-spki-hash"],  // see docs/ios.md §10
+    pinnedDomains: [CertPin(host: "example.com", spkiSha256: ["base64-spki-hash"])],  // see docs/ios.md §10
     userAgent: "MyApp/1.0",
     redirectPolicy: .sameOriginOnly
 ))

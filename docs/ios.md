@@ -102,7 +102,7 @@ final class AppPqcURLProtocol: PqcURLProtocol {
     /// class lazily builds one `PqcHttpClient` per subclass under an NSLock.
     override class func makeConfig() -> PqcConfig {
         return .platformDefault(
-            pinnedCertSha256: CertPins.spkiSha256,    // see §10
+            pinnedDomains: CertPins.pinnedDomains,    // see §10
             defaultTimeoutMs: 15_000,
             enableCookies: false,                     // banking: no auto cookie jar
             userAgent: "MyApp/1.0",                   // identify to bank WAF / Akamai
@@ -182,7 +182,7 @@ For new code paths or non-URLSession-based clients, call `PqcHttpClient` directl
 ```swift
 let pqc = try PqcHttpClient(
     config: .platformDefault(
-        pinnedCertSha256: CertPins.spkiSha256,
+        pinnedDomains: CertPins.pinnedDomains,
         enableCookies: false,
         userAgent: "MyApp/1.0",
         redirectPolicy: .sameOriginOnly
@@ -294,7 +294,7 @@ import PqcCore
 public class AppPqcURLProtocol: PqcURLProtocol {
     public override class func makeConfig() -> PqcConfig {
         return .platformDefault(
-            pinnedCertSha256: CertPins.spkiSha256,
+            pinnedDomains: CertPins.pinnedDomains,
             userAgent: "MyApp/1.0",
             redirectPolicy: .sameOriginOnly
         )
@@ -351,9 +351,30 @@ For fleet-level telemetry, query Akamai DataStream 2 (or your edge's TLS observa
 
 ## 10. SPKI cert pinning — how to compute hashes
 
-`PqcConfig.pinnedCertSha256` takes an array of base64-encoded SHA-256 hashes of a certificate's **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding. Empty array disables pinning.
+`PqcConfig.pinnedDomains` is a **per-host** pin map: an array of `CertPin`, each binding a hostname to the SPKI hashes accepted for it.
 
-A pin matches if **any certificate in the server's chain — leaf or intermediate — has a matching SPKI hash** (the leaf must still parse). This mirrors OkHttp's `CertificatePinner`, Apple's `NSPinnedDomains`, and Android's `NetworkSecurityConfig`.
+```swift
+PqcConfig.platformDefault(
+    pinnedDomains: [
+        CertPin(
+            host: "api.example.com",
+            includeSubdomains: false,
+            spkiSha256: [
+                "YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=",  // current intermediate
+                "Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=",  // backup intermediate
+            ]
+        ),
+        // A different host can carry a completely different pin set:
+        CertPin(host: "vault.example.com", includeSubdomains: true, spkiSha256: [/* … */]),
+    ]
+)
+```
+
+Each `spkiSha256` is a base64-encoded SHA-256 hash of a certificate's **Subject Public Key Info** (SPKI). Both standard (`+`/`/`) and URL-safe (`-`/`_`) alphabets are accepted, with or without padding.
+
+**Pinning is scoped per host.** A connection is pin-checked only against the entries whose `host` matches its SNI (exact, case-insensitive; or any subdomain when `includeSubdomains` is true). **A host with no matching entry is not pinned** — so pinning `api.example.com` never breaks requests to an unpinned CDN on the same client. To disable pinning entirely, pass an empty `pinnedDomains` array — *not* an entry with an empty `spkiSha256`, which is rejected at construction (an empty pin set would silently un-pin its host). IP-literal hosts are never pinned (matching is by hostname only). This mirrors Apple's `NSPinnedDomains` and Android's `NetworkSecurityConfig` `<domain>`.
+
+Within a matched host, a pin matches if **any certificate in the server's chain — leaf or intermediate — has one of that host's SPKI hashes** (the leaf must still parse), the same semantics as OkHttp's `CertificatePinner`.
 
 Compute a SPKI hash. The chain (leaf first, then intermediates) is shown by `-showcerts`:
 
@@ -498,11 +519,11 @@ Set `proxyUrl` to route every request through your proxy so those tools can capt
 override class func makeConfig() -> PqcConfig {
     #if DEBUG
     return .platformDefault(
-        pinnedCertSha256: [],                       // pinning OFF so the proxy CA is accepted
+        pinnedDomains: [],                          // pinning OFF so the proxy CA is accepted
         proxyUrl: "http://192.168.1.5:8888"         // your Mac's LAN IP + proxy port
     )
     #else
-    return .platformDefault(pinnedCertSha256: ["…"])
+    return .platformDefault(pinnedDomains: [CertPin(host: "api.example.com", spkiSha256: ["…"])])
     #endif
 }
 ```
@@ -510,7 +531,7 @@ override class func makeConfig() -> PqcConfig {
 Two prerequisites for HTTPS interception to actually work (identical to inspecting any native client):
 
 1. **Trust the proxy CA on the device.** Install the proxy's root certificate profile and enable full trust (Settings → General → About → Certificate Trust Settings). The Rust client's platform verifier honors the system trust store, so an OS-trusted proxy CA is accepted.
-2. **Leave pinning off** for the build you're debugging (empty `pinnedCertSha256`) — an active SPKI pin will (correctly) reject the proxy's MITM cert.
+2. **Leave pinning off** for the build you're debugging (empty `pinnedDomains`) — an active SPKI pin will (correctly) reject the proxy's MITM cert.
 
 Notes:
 - Use your machine's **LAN IP**, not `localhost`, when debugging on a physical device. Embedded credentials are honored (`http://user:pass@host:port`); a bare `host:port` is treated as `http://`, and only an unparseable value fails `PqcHttpClient(config:)` with `PqcError.InvalidRequest`.

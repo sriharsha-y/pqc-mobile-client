@@ -1327,7 +1327,7 @@ mod tests {
     /// tier follows the user-default (Some(4 MiB)).
     fn tmp_config(dir: &std::path::Path) -> PqcConfig {
         PqcConfig {
-            pinned_cert_sha256: vec![],
+            pinned_domains: vec![],
             default_timeout_ms: None,
             connect_timeout_ms: None,
             read_idle_timeout_ms: None,
@@ -1413,7 +1413,7 @@ mod tests {
     #[tokio::test]
     async fn new_returns_none_when_both_tiers_disabled() {
         let mut cfg = PqcConfig {
-            pinned_cert_sha256: vec![],
+            pinned_domains: vec![],
             default_timeout_ms: None,
             connect_timeout_ms: None,
             read_idle_timeout_ms: None,
@@ -1572,7 +1572,7 @@ mod tests {
     #[tokio::test]
     async fn memory_only_cache_actually_stores() {
         let cfg = PqcConfig {
-            pinned_cert_sha256: vec![],
+            pinned_domains: vec![],
             default_timeout_ms: None,
             connect_timeout_ms: None,
             read_idle_timeout_ms: None,

@@ -932,7 +932,7 @@ open class PqcHttpClient: PqcHttpClientProtocol, @unchecked Sendable {
     }
     /**
      * Returns `PqcError` (not panic) so consumers surface bad config —
-     * e.g. malformed base64 in pinned_cert_sha256 — as a typed error.
+     * e.g. malformed base64 in pinned_domains — as a typed error.
      */
 public convenience init(config: PqcConfig)throws  {
     let pointer =
@@ -1428,6 +1428,126 @@ public func FfiConverterTypePqcResponse_lower(_ value: PqcResponse) -> UnsafeMut
 
 
 
+/**
+ * One pinned domain and the SPKI hashes accepted for it. Pinning is scoped
+ * per host: a connection is pin-checked only against the entries whose `host`
+ * matches its SNI hostname; a host with no matching entry is left to the
+ * platform verifier alone (so pinning one host never breaks requests to an
+ * unpinned host). Mirrors Apple `NSPinnedDomains` / Android
+ * `NetworkSecurityConfig` `<domain>`.
+ */
+public struct CertPin {
+    /**
+     * Hostname to pin, e.g. `"api.example.com"`. Matched ASCII
+     * case-insensitively against the connection's SNI. IP-literal SNI is
+     * never matched — pinning is by hostname only.
+     */
+    public var host: String
+    /**
+     * When true, also pins every subdomain of `host` (`a.host`, `b.a.host`,
+     * …) but NOT a bare different host. Mirrors `NSIncludesSubdomains` /
+     * Android `includeSubdomains`.
+     */
+    public var includeSubdomains: Bool
+    /**
+     * Base64 SHA-256 of a DER SPKI (standard or URL-safe) accepted for this
+     * host. A connection matches if ANY cert in its chain — leaf or
+     * intermediate — carries one of these hashes (the leaf must still parse).
+     * See `src/pinning.rs` for pin-selection guidance (intermediate CA, >= 2
+     * pins, never a public root).
+     */
+    public var spkiSha256: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Hostname to pin, e.g. `"api.example.com"`. Matched ASCII
+         * case-insensitively against the connection's SNI. IP-literal SNI is
+         * never matched — pinning is by hostname only.
+         */host: String, 
+        /**
+         * When true, also pins every subdomain of `host` (`a.host`, `b.a.host`,
+         * …) but NOT a bare different host. Mirrors `NSIncludesSubdomains` /
+         * Android `includeSubdomains`.
+         */includeSubdomains: Bool = false, 
+        /**
+         * Base64 SHA-256 of a DER SPKI (standard or URL-safe) accepted for this
+         * host. A connection matches if ANY cert in its chain — leaf or
+         * intermediate — carries one of these hashes (the leaf must still parse).
+         * See `src/pinning.rs` for pin-selection guidance (intermediate CA, >= 2
+         * pins, never a public root).
+         */spkiSha256: [String]) {
+        self.host = host
+        self.includeSubdomains = includeSubdomains
+        self.spkiSha256 = spkiSha256
+    }
+}
+
+#if compiler(>=6)
+extension CertPin: Sendable {}
+#endif
+
+
+extension CertPin: Equatable, Hashable {
+    public static func ==(lhs: CertPin, rhs: CertPin) -> Bool {
+        if lhs.host != rhs.host {
+            return false
+        }
+        if lhs.includeSubdomains != rhs.includeSubdomains {
+            return false
+        }
+        if lhs.spkiSha256 != rhs.spkiSha256 {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(host)
+        hasher.combine(includeSubdomains)
+        hasher.combine(spkiSha256)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCertPin: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CertPin {
+        return
+            try CertPin(
+                host: FfiConverterString.read(from: &buf), 
+                includeSubdomains: FfiConverterBool.read(from: &buf), 
+                spkiSha256: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CertPin, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterBool.write(value.includeSubdomains, into: &buf)
+        FfiConverterSequenceString.write(value.spkiSha256, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCertPin_lift(_ buf: RustBuffer) throws -> CertPin {
+    return try FfiConverterTypeCertPin.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCertPin_lower(_ value: CertPin) -> RustBuffer {
+    return FfiConverterTypeCertPin.lower(value)
+}
+
+
 public struct HttpRequest {
     public var method: HttpMethod
     public var url: String
@@ -1545,13 +1665,11 @@ public func FfiConverterTypeHttpRequest_lower(_ value: HttpRequest) -> RustBuffe
  */
 public struct PqcConfig {
     /**
-     * Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
-     * accept. Matches if ANY cert in the chain — leaf or intermediate —
-     * has a matching SPKI hash (the leaf must still parse); empty disables
-     * pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
-     * public root. See `src/pinning.rs`.
+     * Per-host SPKI pin set. Empty disables pinning entirely. Each entry
+     * scopes its pins to a host (see `CertPin`); hosts with no matching
+     * entry are not pinned. See `src/pinning.rs`.
      */
-    public var pinnedCertSha256: [String]
+    public var pinnedDomains: [CertPin]
     /**
      * Total request budget (handshake + headers + body); on expiry the
      * request aborts with `PqcError::Timeout`. `None` means no total cap —
@@ -1611,7 +1729,7 @@ public struct PqcConfig {
      *
      * To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
      * root profile; Android: a debug `network_security_config`) AND pinning off
-     * (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+     * (`pinned_domains` empty). Embedded credentials (`http://user:pass@host`)
      * are honored; reqwest coerces a bare `host:port` to `http://`, and only
      * unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
      *
@@ -1703,12 +1821,10 @@ public struct PqcConfig {
     // declare one manually.
     public init(
         /**
-         * Base64 SHA-256 of a DER SPKI (standard or URL-safe) the client will
-         * accept. Matches if ANY cert in the chain — leaf or intermediate —
-         * has a matching SPKI hash (the leaf must still parse); empty disables
-         * pinning. Pin the issuing intermediate CA, keep >= 2 pins, never pin a
-         * public root. See `src/pinning.rs`.
-         */pinnedCertSha256: [String], 
+         * Per-host SPKI pin set. Empty disables pinning entirely. Each entry
+         * scopes its pins to a host (see `CertPin`); hosts with no matching
+         * entry are not pinned. See `src/pinning.rs`.
+         */pinnedDomains: [CertPin], 
         /**
          * Total request budget (handshake + headers + body); on expiry the
          * request aborts with `PqcError::Timeout`. `None` means no total cap —
@@ -1762,7 +1878,7 @@ public struct PqcConfig {
          *
          * To MITM HTTPS the proxy CA must be OS-trusted (iOS: install + enable its
          * root profile; Android: a debug `network_security_config`) AND pinning off
-         * (`pinned_cert_sha256` empty). Embedded credentials (`http://user:pass@host`)
+         * (`pinned_domains` empty). Embedded credentials (`http://user:pass@host`)
          * are honored; reqwest coerces a bare `host:port` to `http://`, and only
          * unparseable values fail `PqcHttpClient::new` with `InvalidRequest`.
          *
@@ -1841,7 +1957,7 @@ public struct PqcConfig {
          * modern Android ART has dynamic heaps and the historical Dalvik
          * caps that drove OkHttp's choice no longer apply.
          */maxMemoryCacheBytes: UInt64? = nil) {
-        self.pinnedCertSha256 = pinnedCertSha256
+        self.pinnedDomains = pinnedDomains
         self.defaultTimeoutMs = defaultTimeoutMs
         self.connectTimeoutMs = connectTimeoutMs
         self.readIdleTimeoutMs = readIdleTimeoutMs
@@ -1866,7 +1982,7 @@ extension PqcConfig: Sendable {}
 
 extension PqcConfig: Equatable, Hashable {
     public static func ==(lhs: PqcConfig, rhs: PqcConfig) -> Bool {
-        if lhs.pinnedCertSha256 != rhs.pinnedCertSha256 {
+        if lhs.pinnedDomains != rhs.pinnedDomains {
             return false
         }
         if lhs.defaultTimeoutMs != rhs.defaultTimeoutMs {
@@ -1915,7 +2031,7 @@ extension PqcConfig: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(pinnedCertSha256)
+        hasher.combine(pinnedDomains)
         hasher.combine(defaultTimeoutMs)
         hasher.combine(connectTimeoutMs)
         hasher.combine(readIdleTimeoutMs)
@@ -1942,7 +2058,7 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PqcConfig {
         return
             try PqcConfig(
-                pinnedCertSha256: FfiConverterSequenceString.read(from: &buf), 
+                pinnedDomains: FfiConverterSequenceTypeCertPin.read(from: &buf), 
                 defaultTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
                 connectTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
                 readIdleTimeoutMs: FfiConverterOptionUInt64.read(from: &buf), 
@@ -1961,7 +2077,7 @@ public struct FfiConverterTypePqcConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PqcConfig, into buf: inout [UInt8]) {
-        FfiConverterSequenceString.write(value.pinnedCertSha256, into: &buf)
+        FfiConverterSequenceTypeCertPin.write(value.pinnedDomains, into: &buf)
         FfiConverterOptionUInt64.write(value.defaultTimeoutMs, into: &buf)
         FfiConverterOptionUInt64.write(value.connectTimeoutMs, into: &buf)
         FfiConverterOptionUInt64.write(value.readIdleTimeoutMs, into: &buf)
@@ -2555,6 +2671,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCertPin: FfiConverterRustBuffer {
+    typealias SwiftType = [CertPin]
+
+    public static func write(_ value: [CertPin], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCertPin.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CertPin] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CertPin]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCertPin.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringSequenceString: FfiConverterRustBuffer {
     public static func write(_ value: [String: [String]], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -2675,7 +2816,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_pqc_client_checksum_method_pqcresponse_status() != 16651) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_pqc_client_checksum_constructor_pqchttpclient_new() != 5152) {
+    if (uniffi_pqc_client_checksum_constructor_pqchttpclient_new() != 39939) {
         return InitializationResult.apiChecksumMismatch
     }
 

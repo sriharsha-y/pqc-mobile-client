@@ -19,7 +19,7 @@ public extension PqcConfig {
     /// `#[uniffi(default = ...)]`; caching defaults are the
     /// URLSession-parity values noted above.
     static func platformDefault(
-        pinnedCertSha256: [String] = [],
+        pinnedDomains: [CertPin] = [],
         defaultTimeoutMs: UInt64? = 60_000,
         connectTimeoutMs: UInt64? = 10_000,
         readIdleTimeoutMs: UInt64? = nil,
@@ -36,7 +36,7 @@ public extension PqcConfig {
         maxMemoryCacheBytes: UInt64? = nil
     ) -> PqcConfig {
         PqcConfig(
-            pinnedCertSha256: pinnedCertSha256,
+            pinnedDomains: pinnedDomains,
             defaultTimeoutMs: defaultTimeoutMs,
             connectTimeoutMs: connectTimeoutMs,
             readIdleTimeoutMs: readIdleTimeoutMs,

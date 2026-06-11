@@ -24,7 +24,7 @@ mod cache;
 mod android_init;
 
 pub use client::{PqcHttpClient, PqcResponse};
-pub use config::{DnsResolver, PqcConfig, RedirectPolicy};
+pub use config::{CertPin, DnsResolver, PqcConfig, RedirectPolicy};
 pub use error::PqcError;
 pub use types::{BodyProvider, HttpMethod, HttpRequest};
 

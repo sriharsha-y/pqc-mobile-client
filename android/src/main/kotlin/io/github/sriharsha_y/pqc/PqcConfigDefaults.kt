@@ -16,7 +16,7 @@ import android.os.Build
  */
 fun PqcConfig.Companion.platformDefault(
     context: Context? = null,
-    pinnedCertSha256: List<String> = emptyList(),
+    pinnedDomains: List<CertPin> = emptyList(),
     defaultTimeoutMs: ULong? = 10_000UL,
     connectTimeoutMs: ULong? = 10_000UL,
     readIdleTimeoutMs: ULong? = null,
@@ -32,7 +32,7 @@ fun PqcConfig.Companion.platformDefault(
     maxCacheBytes: ULong? = null,
     maxMemoryCacheBytes: ULong? = null,
 ): PqcConfig = PqcConfig(
-    pinnedCertSha256 = pinnedCertSha256,
+    pinnedDomains = pinnedDomains,
     defaultTimeoutMs = defaultTimeoutMs,
     connectTimeoutMs = connectTimeoutMs,
     readIdleTimeoutMs = readIdleTimeoutMs,

@@ -22,7 +22,7 @@ public final class RnSamplePqcURLProtocol: PqcURLProtocol {
         // Cookies are left ON (the platform default) so the Rust client's
         // jar tracks session cookies across requests through the protocol;
         // this matches Android and keeps fetch-based login flows working.
-        // A real banking app MUST also populate pinnedCertSha256 with
+        // A real banking app MUST also populate pinnedDomains with per-host
         // base64(SHA-256(SPKI)) of the production leaf + next leaf.
         return .platformDefault(
             defaultTimeoutMs: 15_000,
