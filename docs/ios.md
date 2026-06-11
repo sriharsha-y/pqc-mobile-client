@@ -362,7 +362,8 @@ PqcConfig.platformDefault(
             spkiSha256: [
                 "YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=",  // current intermediate
                 "Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=",  // backup intermediate
-            ]
+            ],
+            expiration: "2027-01-01"  // optional; pins disable (fail-open) on/after this date
         ),
         // A different host can carry a completely different pin set:
         CertPin(host: "vault.example.com", includeSubdomains: true, spkiSha256: [/* … */]),
@@ -396,6 +397,21 @@ openssl s_client -showcerts -servername api.example.com -connect api.example.com
 **Always configure at least two pins** (e.g. the current intermediate + a backup intermediate or a pre-deployed next leaf), and document a rotation playbook. **Never pin a public root** (e.g. ISRG Root X1): every cert that root issues would satisfy the pin, defeating the guarantee.
 
 The verifier layers SPKI pinning **on top of** the system trust verification — both must pass. If either fails, the handshake is rejected with `PqcError.pinningFailure`.
+
+### Pin expiration (optional, fail-open)
+
+Each `CertPin` accepts an optional `expiration: "YYYY-MM-DD"` (interpreted at **00:00 UTC**). On or after that date the host's pins are treated as absent and the connection falls back to normal platform trust — i.e. **pinning fails *open*, not closed**. This is exactly TrustKit's `kTSKExpirationDate` (and Android's `<pin-set expiration>`): a safety valve so an app whose users have stopped taking updates isn't permanently bricked once the pinned key rotates. Omit it and the pins never expire (the `NSPinnedDomains` / OkHttp behavior).
+
+- Set it **≥ 12 months out** and renew it on your normal release cadence, ahead of the date.
+- A malformed date fails `PqcHttpClient(...)` construction with `PqcError.invalidRequest` — it never silently means "never expires".
+- **Trade-off:** once expired, that host no longer rejects a user-installed / MITM cert (see the trust model below). Expiration trades a hard availability floor for a window of reduced pinning protection — pick the date accordingly.
+
+### Trust model — what pinning does and does not protect against
+
+Be precise about the threat model so you don't over-trust this:
+
+- **User-installed / MITM CAs (on the wire):** A pinned host **rejects** a proxy/MITM cert even when the user has fully trusted the interceptor's CA — the attacker's cert can't reproduce your pinned key. **This is pinning's job, and on iOS it is *the* mechanism for excluding user-trusted roots.** Apple's `SecTrust` always honors user/admin-installed roots (once the user enables full trust under Settings → General → About → Certificate Trust Settings) and exposes **no** "system-only" switch — so pinning, not a trust-anchor toggle, is how you defend a host against a user-installed CA. (For an *un-pinned* host there is no such defense; the OS-trusted root is accepted.)
+- **Not anti-tampering.** Pinning protects the *connection*; it is not a device-integrity control. An attacker who controls the device — a jailbroken phone with Frida, or a repackaged/re-signed app — can hook out *any* client-side check (ours included, though our pin check living in a stripped native library rather than a known Objective-C `SecTrust` call defeats the off-the-shelf "universal" bypass scripts and forces hand reversing). If you need assurance that a genuine, untampered app is talking to your server, that is the job of **server-side attestation** (App Attest / DeviceCheck), layered *above* this library — out of scope here.
 
 ## 11. Response caching (opt-in)
 

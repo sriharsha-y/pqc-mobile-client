@@ -21,6 +21,15 @@
 //!    satisfy the pin). Pin the issuing intermediate (leaf rotates freely) or
 //!    the leaf plus a backup; always keep >= 2 pins (OWASP Pinning Cheat Sheet).
 //!
+//! Expiration: a `CertPin` may carry an optional `"YYYY-MM-DD"` expiration. On
+//! or after 00:00 UTC of that date the entry's pins are treated as absent, so
+//! the host falls back to the platform verifier alone (**fail-open**). This is
+//! the exact semantics of Android `<pin-set expiration>` and TrustKit
+//! `kTSKExpirationDate` — a safety valve so an app that stops receiving pin
+//! updates isn't permanently bricked when its pinned key rotates. (OkHttp's
+//! `CertificatePinner` and Apple's `NSPinnedDomains` have no expiration at
+//! all.) Unset = never expires.
+//!
 //! Pin format: base64 SHA-256 of the DER SPKI (RFC 7469). Compute with:
 //! ```sh
 //! openssl s_client -servername api.example.com -connect api.example.com:443 < /dev/null 2>/dev/null \
@@ -49,6 +58,10 @@ pub struct DomainPins {
     host: String,
     include_subdomains: bool,
     pins: Vec<SpkiHash>,
+    /// Seconds since the Unix epoch (00:00 UTC of the configured date) at which
+    /// this entry's pins stop being enforced. `None` = never expires. See the
+    /// module doc for the fail-open rationale.
+    expires_at: Option<u64>,
 }
 
 impl DomainPins {
@@ -63,6 +76,12 @@ impl DomainPins {
             && sni_host
                 .strip_suffix(&self.host)
                 .is_some_and(|prefix| prefix.ends_with('.'))
+    }
+
+    /// Whether this entry's pins have lapsed as of `now_secs`. Inclusive (`>=`):
+    /// pins are off from 00:00 UTC of the expiry date. `None` = never expires.
+    fn is_expired(&self, now_secs: u64) -> bool {
+        self.expires_at.is_some_and(|t| now_secs >= t)
     }
 }
 
@@ -79,12 +98,21 @@ impl PinningVerifier {
         Self { inner, domains }
     }
 
-    /// The union of pins for every entry matching `sni_host`. Empty when the
-    /// host is not pinned.
-    fn pins_for(&self, sni_host: &str) -> Vec<SpkiHash> {
+    /// Union of pins for every non-expired entry matching `sni_host` (`now_secs`
+    /// is the handshake time). Empty means the host is unpinned or every
+    /// matching entry has expired, so the caller falls back to the platform
+    /// verifier alone (fail-open). Entries expire independently.
+    fn pins_for(&self, sni_host: &str, now_secs: u64) -> Vec<SpkiHash> {
         self.domains
             .iter()
             .filter(|d| d.matches(sni_host))
+            .filter(|d| {
+                let expired = d.is_expired(now_secs);
+                if expired {
+                    log::debug!("matching pin set expired; falling back to platform trust");
+                }
+                !expired
+            })
             .flat_map(|d| d.pins.iter().copied())
             .collect()
     }
@@ -121,7 +149,9 @@ impl ServerCertVerifier for PinningVerifier {
             return Ok(verified);
         };
         let sni_host = dns.as_ref().to_ascii_lowercase();
-        let pins = self.pins_for(&sni_host);
+        // Expired entries are excluded here (fail-open), so a host whose only
+        // matching pin set has lapsed behaves exactly like an unpinned host.
+        let pins = self.pins_for(&sni_host, now.as_secs());
         if pins.is_empty() {
             return Ok(verified);
         }
@@ -216,9 +246,76 @@ pub fn decode_domain_pins(domains: &[CertPin]) -> Result<Vec<DomainPins>, PqcErr
                 host: d.host.trim().to_ascii_lowercase(),
                 include_subdomains: d.include_subdomains,
                 pins: decode_pin_list(&d.spki_sha256)?,
+                // Malformed date → fail closed here; a typo must not silently
+                // make a pin permanent. Absent = never expires.
+                expires_at: match &d.expiration {
+                    Some(s) => Some(parse_yyyy_mm_dd(s).ok_or(PqcError::InvalidRequest)?),
+                    None => None,
+                },
             })
         })
         .collect()
+}
+
+/// Parse strict `"YYYY-MM-DD"` to seconds since the Unix epoch at 00:00 UTC.
+/// `None` on any deviation: field widths, non-digits, month/day out of range
+/// (leap years handled). Dependency-free — the date→days step is Howard
+/// Hinnant's `days_from_civil`.
+fn parse_yyyy_mm_dd(s: &str) -> Option<u64> {
+    let bytes = s.as_bytes();
+    // Exact layout: 4 digits, '-', 2 digits, '-', 2 digits.
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let digits = |range: std::ops::Range<usize>| -> Option<u32> {
+        let part = &s[range];
+        if part.bytes().all(|b| b.is_ascii_digit()) {
+            part.parse().ok()
+        } else {
+            None
+        }
+    };
+    let year = digits(0..4)?;
+    let month = digits(5..7)?;
+    let day = digits(8..10)?;
+
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    // Pre-1970 dates give negative days; clamp to 0 (already-expired, the right
+    // fail-open outcome) so the result stays in u64.
+    let days = days_from_civil(year as i64, month as i64, day as i64);
+    let secs = days.checked_mul(86_400)?;
+    Some(secs.max(0) as u64)
+}
+
+/// Number of days in `month` (1..=12) of `year`, accounting for leap years.
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Proleptic Gregorian leap-year rule.
+fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+/// Days from 1970-01-01 (UTC) to `y-m-d`. Howard Hinnant's `days_from_civil`
+/// (http://howardhinnant.github.io/date_algorithms.html#days_from_civil),
+/// exact for all valid Gregorian dates.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 /// Decode base64 SPKI SHA-256 strings to raw 32-byte hashes;
@@ -307,12 +404,23 @@ mod tests {
     }
 
     /// A pin entry for `host` (no subdomains), with hosts stored lowercased as
-    /// `decode_domain_pins` would.
+    /// `decode_domain_pins` would. Never expires.
     fn domain(host: &str, pins: Vec<SpkiHash>) -> DomainPins {
         DomainPins {
             host: host.to_ascii_lowercase(),
             include_subdomains: false,
             pins,
+            expires_at: None,
+        }
+    }
+
+    /// Like `domain` but with an explicit expiration instant (epoch seconds).
+    fn domain_exp(host: &str, pins: Vec<SpkiHash>, expires_at: u64) -> DomainPins {
+        DomainPins {
+            host: host.to_ascii_lowercase(),
+            include_subdomains: false,
+            pins,
+            expires_at: Some(expires_at),
         }
     }
 
@@ -476,6 +584,7 @@ mod tests {
             host: "example.com".to_string(),
             include_subdomains: true,
             pins: vec![leaf_hash],
+            expires_at: None,
         };
         let v = PinningVerifier::new(Arc::new(AlwaysOkVerifier), vec![entry]);
 
@@ -649,6 +758,7 @@ mod tests {
             host: "API.Example.COM".to_string(),
             include_subdomains: true,
             spki_sha256: vec![STANDARD.encode(raw)],
+            expiration: None,
         }];
         let decoded = decode_domain_pins(&entries).unwrap();
         assert_eq!(decoded.len(), 1);
@@ -665,6 +775,7 @@ mod tests {
             host: "   ".to_string(),
             include_subdomains: false,
             spki_sha256: vec![STANDARD.encode([0u8; 32])],
+            expiration: None,
         }];
         assert!(decode_domain_pins(&entries).is_err());
     }
@@ -682,6 +793,7 @@ mod tests {
             host: "  API.Example.com\n".to_string(),
             include_subdomains: false,
             spki_sha256: vec![STANDARD.encode(leaf_hash)],
+            expiration: None,
         }];
         let decoded = decode_domain_pins(&entries).unwrap();
         assert_eq!(decoded[0].host, "api.example.com", "host must be trimmed");
@@ -706,6 +818,7 @@ mod tests {
             host: "example.com".to_string(),
             include_subdomains: false,
             spki_sha256: vec![],
+            expiration: None,
         }];
         assert!(decode_domain_pins(&entries).is_err());
     }
@@ -716,6 +829,7 @@ mod tests {
             host: "example.com".to_string(),
             include_subdomains: false,
             spki_sha256: vec!["not-valid-base64-!!!".to_string()],
+            expiration: None,
         }];
         assert!(decode_domain_pins(&entries).is_err());
     }
@@ -723,5 +837,177 @@ mod tests {
     #[test]
     fn decode_domain_pins_empty_returns_empty() {
         assert!(decode_domain_pins(&[]).unwrap().is_empty());
+    }
+
+    // ----- Expiration -----
+
+    #[test]
+    fn expired_pin_set_falls_through_to_platform_verifier() {
+        // A pin matching nothing in the chain would normally reject; once the
+        // entry's expiration has passed it is treated as absent, so the host
+        // falls back to the (accepting) platform verifier — fail-open, the
+        // Android <pin-set expiration> / TrustKit kTSKExpirationDate behavior.
+        let leaf = make_test_cert(); // SPKI won't match the bogus pin
+        let past = now().as_secs() - 1; // already expired at `now()`
+        let v = PinningVerifier::new(
+            Arc::new(AlwaysOkVerifier),
+            vec![domain_exp("api.bank.com", vec![[9u8; 32]], past)],
+        );
+        assert!(
+            v.verify_server_cert(&leaf, &[], &name("api.bank.com"), &[], now())
+                .is_ok(),
+            "an expired pin set must fail open (fall through to platform trust)"
+        );
+    }
+
+    #[test]
+    fn unexpired_pin_set_is_still_enforced() {
+        // Same setup, expiration in the future → the mismatching pin still
+        // rejects. Proves the fall-through above is expiry, not a globally
+        // disabled check.
+        let leaf = make_test_cert();
+        let future = now().as_secs() + 86_400;
+        let v = PinningVerifier::new(
+            Arc::new(AlwaysOkVerifier),
+            vec![domain_exp("api.bank.com", vec![[9u8; 32]], future)],
+        );
+        assert!(
+            v.verify_server_cert(&leaf, &[], &name("api.bank.com"), &[], now())
+                .is_err(),
+            "a not-yet-expired pin set must still be enforced"
+        );
+    }
+
+    #[test]
+    fn expiration_boundary_is_inclusive() {
+        // At exactly the expiration instant the pins are already disabled
+        // ("on that date" per the native configs → now == expires_at expired).
+        let leaf = make_test_cert();
+        let exactly_now = now().as_secs();
+        let v = PinningVerifier::new(
+            Arc::new(AlwaysOkVerifier),
+            vec![domain_exp("api.bank.com", vec![[9u8; 32]], exactly_now)],
+        );
+        assert!(
+            v.verify_server_cert(&leaf, &[], &name("api.bank.com"), &[], now())
+                .is_ok(),
+            "expiration must be inclusive: now == expires_at means expired"
+        );
+    }
+
+    #[test]
+    fn live_entry_still_enforced_when_a_matching_entry_expired() {
+        // Two entries match the same host; the union drops the expired one but
+        // keeps enforcing the live one (independent per-entry expiry).
+        let leaf = make_test_cert(); // matches neither bogus pin
+        let past = now().as_secs() - 1;
+        let future = now().as_secs() + 86_400;
+        let v = PinningVerifier::new(
+            Arc::new(AlwaysOkVerifier),
+            vec![
+                domain_exp("api.bank.com", vec![[8u8; 32]], past), // expired
+                domain_exp("api.bank.com", vec![[9u8; 32]], future), // live
+            ],
+        );
+        assert!(
+            v.verify_server_cert(&leaf, &[], &name("api.bank.com"), &[], now())
+                .is_err(),
+            "a live matching entry must still enforce despite an expired sibling"
+        );
+    }
+
+    #[test]
+    fn parse_yyyy_mm_dd_known_values() {
+        assert_eq!(parse_yyyy_mm_dd("1970-01-01"), Some(0));
+        assert_eq!(parse_yyyy_mm_dd("1970-01-02"), Some(86_400));
+        // 2023-11-14 00:00:00 UTC.
+        assert_eq!(parse_yyyy_mm_dd("2023-11-14"), Some(1_699_920_000));
+    }
+
+    #[test]
+    fn parse_yyyy_mm_dd_handles_leap_years() {
+        assert!(
+            parse_yyyy_mm_dd("2024-02-29").is_some(),
+            "2024 is a leap year"
+        );
+        assert!(
+            parse_yyyy_mm_dd("2023-02-29").is_none(),
+            "2023 is not a leap year"
+        );
+        assert!(
+            parse_yyyy_mm_dd("2000-02-29").is_some(),
+            "2000 is a leap year (divisible by 400)"
+        );
+        assert!(
+            parse_yyyy_mm_dd("1900-02-29").is_none(),
+            "1900 is not a leap year (divisible by 100, not 400)"
+        );
+    }
+
+    #[test]
+    fn parse_yyyy_mm_dd_rejects_malformed() {
+        for bad in [
+            "",
+            "2024-1-1",      // unpadded fields
+            "2024/01/01",    // wrong separator
+            "2024-13-01",    // month out of range
+            "2024-00-01",    // month zero
+            "2024-02-30",    // day out of range for February
+            "2024-01-32",    // day out of range
+            "2024-01-00",    // day zero
+            "20240-1-1",     // wrong field widths
+            "abcd-ef-gh",    // non-digits
+            "2024-01-01 ",   // trailing space (length 11)
+            "2024-01-01T00", // extra characters
+        ] {
+            assert!(
+                parse_yyyy_mm_dd(bad).is_none(),
+                "{bad:?} should be rejected as malformed"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_domain_pins_parses_expiration() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let entries = vec![CertPin {
+            host: "example.com".to_string(),
+            include_subdomains: false,
+            spki_sha256: vec![STANDARD.encode([0u8; 32])],
+            expiration: Some("2030-01-01".to_string()),
+        }];
+        let decoded = decode_domain_pins(&entries).unwrap();
+        assert_eq!(decoded[0].expires_at, parse_yyyy_mm_dd("2030-01-01"));
+        assert!(decoded[0].expires_at.is_some());
+    }
+
+    #[test]
+    fn decode_domain_pins_none_expiration_never_expires() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let entries = vec![CertPin {
+            host: "example.com".to_string(),
+            include_subdomains: false,
+            spki_sha256: vec![STANDARD.encode([0u8; 32])],
+            expiration: None,
+        }];
+        let decoded = decode_domain_pins(&entries).unwrap();
+        assert_eq!(decoded[0].expires_at, None);
+    }
+
+    #[test]
+    fn decode_domain_pins_rejects_malformed_expiration() {
+        // A typo'd date fails closed at construction, not silently "never
+        // expires".
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let entries = vec![CertPin {
+            host: "example.com".to_string(),
+            include_subdomains: false,
+            spki_sha256: vec![STANDARD.encode([0u8; 32])],
+            expiration: Some("01-01-2030".to_string()), // wrong order/format
+        }];
+        assert!(decode_domain_pins(&entries).is_err());
     }
 }
