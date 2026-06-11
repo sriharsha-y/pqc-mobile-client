@@ -1457,6 +1457,19 @@ public struct CertPin {
      * pins, never a public root).
      */
     public var spkiSha256: [String]
+    /**
+     * Optional pin-set expiration as `"YYYY-MM-DD"` (00:00 UTC). On or after
+     * that instant the host's pins are treated as absent and it falls back to
+     * the platform verifier alone (**fail-open**) — mirroring Android
+     * `<pin-set expiration>` / TrustKit `kTSKExpirationDate`, so an app that
+     * stops receiving updates isn't bricked when its pinned key rotates.
+     * `None` (default) = never expires. A malformed date fails
+     * `PqcHttpClient::new` with `InvalidRequest`.
+     *
+     * Trade-off: once expired, this host no longer rejects a user-installed-CA
+     * / MITM cert. Set the date accordingly.
+     */
+    public var expiration: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1477,10 +1490,23 @@ public struct CertPin {
          * intermediate — carries one of these hashes (the leaf must still parse).
          * See `src/pinning.rs` for pin-selection guidance (intermediate CA, >= 2
          * pins, never a public root).
-         */spkiSha256: [String]) {
+         */spkiSha256: [String], 
+        /**
+         * Optional pin-set expiration as `"YYYY-MM-DD"` (00:00 UTC). On or after
+         * that instant the host's pins are treated as absent and it falls back to
+         * the platform verifier alone (**fail-open**) — mirroring Android
+         * `<pin-set expiration>` / TrustKit `kTSKExpirationDate`, so an app that
+         * stops receiving updates isn't bricked when its pinned key rotates.
+         * `None` (default) = never expires. A malformed date fails
+         * `PqcHttpClient::new` with `InvalidRequest`.
+         *
+         * Trade-off: once expired, this host no longer rejects a user-installed-CA
+         * / MITM cert. Set the date accordingly.
+         */expiration: String? = nil) {
         self.host = host
         self.includeSubdomains = includeSubdomains
         self.spkiSha256 = spkiSha256
+        self.expiration = expiration
     }
 }
 
@@ -1500,6 +1526,9 @@ extension CertPin: Equatable, Hashable {
         if lhs.spkiSha256 != rhs.spkiSha256 {
             return false
         }
+        if lhs.expiration != rhs.expiration {
+            return false
+        }
         return true
     }
 
@@ -1507,6 +1536,7 @@ extension CertPin: Equatable, Hashable {
         hasher.combine(host)
         hasher.combine(includeSubdomains)
         hasher.combine(spkiSha256)
+        hasher.combine(expiration)
     }
 }
 
@@ -1521,7 +1551,8 @@ public struct FfiConverterTypeCertPin: FfiConverterRustBuffer {
             try CertPin(
                 host: FfiConverterString.read(from: &buf), 
                 includeSubdomains: FfiConverterBool.read(from: &buf), 
-                spkiSha256: FfiConverterSequenceString.read(from: &buf)
+                spkiSha256: FfiConverterSequenceString.read(from: &buf), 
+                expiration: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1529,6 +1560,7 @@ public struct FfiConverterTypeCertPin: FfiConverterRustBuffer {
         FfiConverterString.write(value.host, into: &buf)
         FfiConverterBool.write(value.includeSubdomains, into: &buf)
         FfiConverterSequenceString.write(value.spkiSha256, into: &buf)
+        FfiConverterOptionString.write(value.expiration, into: &buf)
     }
 }
 
